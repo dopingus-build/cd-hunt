@@ -445,3 +445,22 @@ describe('Storage namespacing and checklist persistence integration', () => {
     );
   });
 });
+
+describe('Responsive CSS grid containment regression', () => {
+  it('constrains .modal-stage tracks with minmax(0, 1fr) and .lb-details with min-width: 0', () => {
+    const css = fs.readFileSync(CSS_PATH, 'utf8');
+    const stageMatch = css.match(/\.modal-stage\s*\{[^}]*\}/);
+    const detailsMatch = css.match(/\.lb-details\s*\{[^}]*\}/);
+
+    assert.ok(stageMatch, '.modal-stage rule must exist in css/styles.css');
+    assert.ok(detailsMatch, '.lb-details rule must exist in css/styles.css');
+    assert.ok(
+      stageMatch[0].includes('minmax(0, 1fr)'),
+      '.modal-stage must use minmax(0, 1fr) so variant strips do not widen the grid track'
+    );
+    assert.ok(
+      detailsMatch[0].includes('min-width: 0'),
+      '.lb-details must set min-width: 0 to allow horizontal flex strips to scroll within viewport'
+    );
+  });
+});

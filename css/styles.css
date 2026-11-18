@@ -373,6 +373,8 @@ button {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
   cursor: pointer;
   transition: border-color 0.15s, opacity 0.15s, transform 0.15s;
 }
@@ -607,6 +609,9 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .single-top-row {
@@ -614,6 +619,13 @@ button {
   justify-content: space-between;
   align-items: flex-start;
   gap: 10px;
+  min-width: 0;
+}
+
+.single-top-row > div {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .single-artist {
@@ -676,6 +688,10 @@ button {
   font-size: 11px;
   font-weight: 600;
   color: var(--text-main);
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .chip-btn:hover {
@@ -804,6 +820,7 @@ button {
   justify-content: space-between;
   padding: 14px;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .modal-backdrop.open {
@@ -813,6 +830,7 @@ button {
 .modal-inner {
   max-width: 860px;
   width: 100%;
+  min-width: 0;
   margin: 0 auto;
 }
 
@@ -825,7 +843,9 @@ button {
 
 .modal-stage {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
   gap: 18px;
   align-items: center;
   margin: auto 0;
@@ -834,15 +854,16 @@ button {
 
 @media (min-width: 768px) {
   .modal-stage {
-    grid-template-columns: 340px 1fr;
+    grid-template-columns: 340px minmax(0, 1fr);
     gap: 24px;
   }
 }
 
 .lb-cover-frame {
   position: relative;
+  box-sizing: border-box;
   width: 100%;
-  max-width: 340px;
+  max-width: min(340px, 100%);
   margin: 0 auto;
   aspect-ratio: 1 / 1;
   border-radius: var(--radius-lg);
@@ -875,6 +896,9 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .lb-variants-box {
@@ -885,11 +909,17 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .lb-variants-strip {
   display: flex;
   gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
   padding-bottom: 2px;
   scrollbar-width: none;
@@ -985,6 +1015,9 @@ button {
 .filmstrip {
   display: flex;
   gap: 6px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
   padding: 6px 0;
   scrollbar-width: none;
