@@ -16,6 +16,8 @@ This document specifies the versioned schema, loading rules, and cover-resolutio
    - Load a local `.json` file directly from their device.
 
 > **Note:** External catalog JSON files (such as `2026-japan.json` in `dopingus-build/cd-metadata` or [`docs/sample-catalog.json`](./sample-catalog.json)) conform to [`schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json) (`schemaVersion: 1`) and are validated at load time by `js/validate.js`.
+>
+> **For LLMs & Coding Agents:** See [`docs/AGENT_CATALOG_GUIDE.md`](./AGENT_CATALOG_GUIDE.md) for step-by-step instructions on researching catalog numbers, Gojūon shelf filing, used pricing, MusicBrainz/iTunes cover verification, and adding entries safely to existing catalogs.
 
 ---
 

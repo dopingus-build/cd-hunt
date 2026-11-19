@@ -25,6 +25,7 @@ cd-hunt/
 ├── docs/
 │   ├── HANDOVER.md            # Project context & architectural rules
 │   ├── METADATA.md            # Catalog schema & validation specification
+│   ├── AGENT_CATALOG_GUIDE.md # Guide for LLMs/agents creating & editing catalogs
 │   └── sample-catalog.json    # Sample schemaVersion: 1 catalog JSON template
 └── test/
     ├── catalog-validation.test.js   # Unit tests for validator, schema, & storage prefixing
@@ -33,7 +34,7 @@ cd-hunt/
 
 ## Using Your Own Metadata
 
-1. Create a JSON file with `"schemaVersion": 1` following [`docs/METADATA.md`](./docs/METADATA.md) and [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json) (see [`docs/sample-catalog.json`](./docs/sample-catalog.json) as a template).
+1. Create a JSON file with `"schemaVersion": 1` following [`docs/METADATA.md`](./docs/METADATA.md) and [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json) (see [`docs/sample-catalog.json`](./docs/sample-catalog.json) as a template; if using an LLM or coding agent, point it to [`docs/AGENT_CATALOG_GUIDE.md`](./docs/AGENT_CATALOG_GUIDE.md)).
 2. Open the app (`index.html`), paste your URL (`https://github.com/<owner>/<repo>/blob/...` or `raw.githubusercontent.com`) or load a local `.json` file directly.
 3. For URL-loaded catalogs, your active URL is saved in `localStorage` (`cd_hunt_catalog_url_v1`), synced to `?catalog=`, and shareable via **Copy Share Link**. Progress keys are automatically derived per catalog so separate lists never collide.
 
