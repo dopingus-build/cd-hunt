@@ -12,6 +12,38 @@ const LEGACY_HTML_PATH = path.join(ROOT_DIR, 'osaka_cd_cover_album.html');
 const CSS_PATH = path.join(ROOT_DIR, 'css', 'styles.css');
 const OSAKA_METADATA_PATH = path.join(ROOT_DIR, '..', 'cd-metadata', '2026-japan.json');
 const OSAKA_INDEX_PATH = path.join(ROOT_DIR, '..', 'cd-metadata', 'index.json');
+const SAMPLE_CATALOG_PATH = path.join(ROOT_DIR, 'docs', 'sample-catalog.json');
+
+function getPresetTestFixtures() {
+  if (fs.existsSync(OSAKA_INDEX_PATH) && fs.existsSync(OSAKA_METADATA_PATH)) {
+    const catalogJson = JSON.parse(fs.readFileSync(OSAKA_METADATA_PATH, 'utf8'));
+    return {
+      indexJson: JSON.parse(fs.readFileSync(OSAKA_INDEX_PATH, 'utf8')),
+      catalogJson,
+      expectedTitle: 'Osaka CD Cover Album',
+      expectedPhysical: 53,
+      expectedDigital: 2
+    };
+  }
+  const sampleJson = JSON.parse(fs.readFileSync(SAMPLE_CATALOG_PATH, 'utf8'));
+  return {
+    indexJson: {
+      schemaVersion: 1,
+      catalogs: [
+        {
+          id: '2026-japan',
+          title: '2026 Japan (Osaka) CD Hunt',
+          subtitle: '53 physical CDs + 2 digital-only releases',
+          file: '2026-japan.json'
+        }
+      ]
+    },
+    catalogJson: sampleJson,
+    expectedTitle: 'Sample CD Hunt',
+    expectedPhysical: 1,
+    expectedDigital: 1
+  };
+}
 const VALIDATE_PATH = path.join(ROOT_DIR, 'js', 'validate.js');
 const STORAGE_PATH = path.join(ROOT_DIR, 'js', 'storage.js');
 const COVER_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'cover-resolver.js');
@@ -392,7 +424,7 @@ describe('Browser and Node dual export for js/validate.js', () => {
 
 describe('Catalog Loader screen, dynamic presets, local file picker, and share link', () => {
   it('shows Catalog Loader on first load and populates dynamic presets from cd-metadata/index.json', async () => {
-    const indexJson = JSON.parse(fs.readFileSync(OSAKA_INDEX_PATH, 'utf8'));
+    const { indexJson } = getPresetTestFixtures();
     const fetchedUrls = [];
 
     const app = await bootApp({
@@ -420,9 +452,8 @@ describe('Catalog Loader screen, dynamic presets, local file picker, and share l
     assert.ok(presetsHtml.includes('https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json'));
   });
 
-  it('loads 2026-japan.json when clicking a dynamic preset button and persists the URL', async () => {
-    const indexJson = JSON.parse(fs.readFileSync(OSAKA_INDEX_PATH, 'utf8'));
-    const osakaJson = JSON.parse(fs.readFileSync(OSAKA_METADATA_PATH, 'utf8'));
+  it('loads preset JSON when clicking a dynamic preset button and persists the URL', async () => {
+    const { indexJson, catalogJson, expectedTitle, expectedPhysical, expectedDigital } = getPresetTestFixtures();
     const fetchedUrls = [];
 
     const app = await bootApp({
@@ -431,7 +462,7 @@ describe('Catalog Loader screen, dynamic presets, local file picker, and share l
         if (String(url).endsWith('/index.json')) {
           return { ok: true, status: 200, async json() { return indexJson; } };
         }
-        return { ok: true, status: 200, async json() { return osakaJson; } };
+        return { ok: true, status: 200, async json() { return catalogJson; } };
       }
     });
 
@@ -446,13 +477,13 @@ describe('Catalog Loader screen, dynamic presets, local file picker, and share l
       'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json'
     );
     assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), true);
-    assert.equal(app.elements.get('brandTitle').textContent, 'Osaka CD Cover Album');
-    assert.equal(app.elements.get('progressBadge').textContent, '0 / 53');
+    assert.equal(app.elements.get('brandTitle').textContent, expectedTitle);
+    assert.equal(app.elements.get('progressBadge').textContent, '0 / ' + expectedPhysical);
 
     const physicalCards = app.elements.get('albumGrid').innerHTML.match(/<article class="cd-card/g) || [];
     const digitalCards = app.elements.get('digitalGrid').innerHTML.match(/<article class="cd-card/g) || [];
-    assert.equal(physicalCards.length, 53);
-    assert.equal(digitalCards.length, 2);
+    assert.equal(physicalCards.length, expectedPhysical);
+    assert.equal(digitalCards.length, expectedDigital);
   });
 
   it('converts pasted GitHub blob URL, syncs ?catalog=, and copies share link via #copyShareLinkBtn', async () => {
