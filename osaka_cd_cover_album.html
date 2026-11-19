@@ -45,6 +45,9 @@
           <button id="backupBtn" type="button" class="btn" title="Export or Import JSON progress">
             <span>Backup</span>
           </button>
+          <button id="openCatalogLoaderBtn" type="button" class="btn" title="Load or switch catalog metadata URL">
+            <span>Catalog</span>
+          </button>
           <button id="openCrateFlipBtn" type="button" class="btn btn-primary">
             <span>Crate Flip</span>
           </button>
@@ -77,6 +80,43 @@
 
   <!-- Main Workspace -->
   <main class="main-area">
+    <!-- Catalog Metadata Loader Screen -->
+    <section id="catalogLoaderScreen" class="catalog-loader-card hidden" aria-label="Load Catalog Metadata">
+      <div class="catalog-loader-header">
+        <div>
+          <span class="tag-sky">CATALOG LOADER</span>
+          <h2 style="margin:6px 0 4px; font-size:18px; font-weight:800;">Load CD Hunt Metadata</h2>
+          <p style="margin:0; font-size:12.5px; color:var(--text-muted);">
+            Paste a URL to a public metadata JSON file (GitHub <code>blob</code> URLs are automatically converted to <code>raw.githubusercontent.com</code>), or load the Osaka catalog preset.
+          </p>
+        </div>
+        <button id="closeCatalogLoaderBtn" type="button" class="btn hidden">Cancel</button>
+      </div>
+
+      <div class="catalog-loader-form">
+        <input
+          id="catalogUrlInput"
+          class="search-input"
+          style="padding-left:12px;"
+          type="url"
+          placeholder="https://github.com/owner/repo/blob/main/catalog.json"
+        />
+        <div class="catalog-loader-actions">
+          <button id="loadCatalogUrlBtn" type="button" class="btn btn-primary">Load Metadata</button>
+          <button
+            id="loadPresetOsakaBtn"
+            type="button"
+            class="btn"
+            data-preset-url="https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json"
+          >
+            Load 2026 Japan (Osaka) Catalog
+          </button>
+        </div>
+      </div>
+
+      <div id="activeCatalogInfo" class="catalog-url-pill hidden"></div>
+    </section>
+
     <div id="digitalNoteBanner" class="notice-bar">
       <div class="notice-left">
         <span id="digitalNoteTag" class="tag-sky">DIGITAL-ONLY (0)</span>
@@ -211,7 +251,6 @@
   <!-- Toast -->
   <div id="toast" class="toast">Copied!</div>
 
-  <script src="./data/catalog.js"></script>
   <script src="./js/validate.js"></script>
   <script src="./js/storage.js"></script>
   <script src="./js/cover-resolver.js"></script>

@@ -6,13 +6,13 @@ This document specifies the schema, loading rules, and cover-resolution requirem
 
 ## Loading Modes
 
-`osaka_cd_cover_album.html` (via `js/app.js`) separates UI logic from catalog data and resolves the catalog in the following order (`loadCatalogData()`):
+`osaka_cd_cover_album.html` (via `js/app.js`) separates UI logic from catalog data and resolves the catalog in the following order:
 
-1. **Custom JSON URL (`?catalog=<url>`):** When hosted over `http://` or `https://`, passing `?catalog=path/to/my-catalog.json` fetches and loads that JSON file directly.
-2. **Default Script (`./data/catalog.js`):** Loaded via `<script src="./data/catalog.js"></script>`, which sets `window.CD_HUNT_CATALOG`. This works both offline via `file://` (avoiding browser CORS blocks) and on static hosts like GitHub Pages.
-3. **Local JSON Fallback (`./data/catalog.json`):** If `window.CD_HUNT_CATALOG` is undefined and the app is served over HTTP(S), it attempts `fetch('./data/catalog.json')`.
+1. **Custom JSON URL (`?catalog=<url>`):** Fetches and loads the JSON file from the URL query parameter. Standard GitHub `https://github.com/<owner>/<repo>/blob/<ref>/<path>` URLs are automatically converted to `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>`.
+2. **Saved Catalog URL (`localStorage` key `cd_hunt_catalog_url_v1`):** If no `?catalog=` parameter is present, reloads the previously selected catalog URL automatically.
+3. **Catalog Loader Screen:** On first visit (with no `?catalog=` or saved URL), displays the interactive Catalog Loader where users can paste any public JSON URL or click the quick-select button for `https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json`. Once loaded, the URL is persisted to `localStorage` and synced to `?catalog=`.
 
-> **Note:** Both `data/catalog.js` (`window.CD_HUNT_CATALOG = { ... }`) and external JSON files (`?catalog=...` / `data/catalog.json`) share the exact same object structure below, validated at startup by `js/validate.js`.
+> **Note:** External catalog JSON files (such as `2026-japan.json` in `dopingus-build/cd-metadata` or [`docs/sample-catalog.json`](./sample-catalog.json)) share the exact schema below and are validated at load time by `js/validate.js`.
 
 ---
 
@@ -131,7 +131,7 @@ All cards render immediately using an offline SVG jewel-case + Japanese obi stri
 - **Edition scoring (`classifyItunesEdition`):** `通常盤 Regular` (120 / 100) outranks `アニメ盤 Anime` (50) and `初回盤 Limited` (40), with `+10` bonus for `country=jp`.
 
 ### Prohibited External URLs
-- Do **not** hardcode hotlinked image URLs from VGMdb, Wikia/Fandom, or CDJapan inside `data/catalog.js` / `data/catalog.json` (they block hotlinking or serve wrong promo art). Users can still manually add custom cover URLs at runtime via **Crate Flip → + Add Cover Variant**, which saves to `localStorage`.
+- Do **not** hardcode hotlinked image URLs from VGMdb, Wikia/Fandom, or CDJapan inside metadata JSON files (they block hotlinking or serve wrong promo art). Users can still manually add custom cover URLs at runtime via **Crate Flip → + Add Cover Variant**, which saves to `localStorage`.
 
 ---
 
@@ -145,56 +145,57 @@ All cards render immediately using an offline SVG jewel-case + Japanese obi stri
 
 ## 6. Templates
 
-### Minimal `data/catalog.js` Template for Custom Hunts
+### Minimal Catalog JSON Template (`docs/sample-catalog.json`)
 
-```js
-window.CD_HUNT_CATALOG = {
-  meta: {
-    title: 'Tokyo Vinyl & CD Hunt',
-    subtitle: 'Disk Union & Recofan Checklist',
-    documentTitle: 'Tokyo Hunt Checklist',
-    storagePrefix: 'tokyo_hunt',
-    searchPlaceholder: 'Search artist, title, or catalog #...'
+See [`sample-catalog.json`](./sample-catalog.json) for a ready-to-use JSON file, or use this structure:
+
+```json
+{
+  "meta": {
+    "title": "Tokyo Vinyl & CD Hunt",
+    "subtitle": "Disk Union & Recofan Checklist",
+    "documentTitle": "Tokyo Hunt Checklist",
+    "storagePrefix": "tokyo_hunt",
+    "searchPlaceholder": "Search artist, title, or catalog #..."
   },
-  // Optional: omit `categories` to auto-generate pills from items[].category
-  items: [
+  "items": [
     {
-      id: 'item-01',
-      category: 'J-Rock',
-      artist: 'Artist Name',
-      artistJa: 'アーティスト名',
-      title: 'Album Title',
-      titleJa: 'アルバム名',
-      regCatNo: 'ABCD-1234',
-      catalog: 'ABCD-1234 (通常盤)',
-      mbEditions: [
-        { catno: 'ABCD-1234', label: '通常盤 Regular' }
+      "id": "item-01",
+      "category": "J-Rock",
+      "artist": "Artist Name",
+      "artistJa": "アーティスト名",
+      "title": "Album Title",
+      "titleJa": "アルバム名",
+      "regCatNo": "ABCD-1234",
+      "catalog": "ABCD-1234 (通常盤)",
+      "mbEditions": [
+        { "catno": "ABCD-1234", "label": "通常盤 Regular" }
       ],
-      kana: 'ア / A',
-      filing: 'ア (Artist) — J-Rock aisle',
-      price: '¥500–¥1,000',
-      itunesQuery: 'Album Title Artist Name',
-      requiredGroups: [['album'], ['artist']],
-      accent: '#e11d48'
+      "kana": "ア / A",
+      "filing": "ア (Artist) — J-Rock aisle",
+      "price": "¥500–¥1,000",
+      "itunesQuery": "Album Title Artist Name",
+      "requiredGroups": [["album"], ["artist"]],
+      "accent": "#e11d48"
     },
     {
-      id: 'dig-01',
-      digitalOnly: true,
-      category: 'Digital-Only',
-      artist: 'Digital Artist',
-      artistJa: 'デジタルアーティスト',
-      title: '"Single Name" (Digital-Only Release)',
-      titleJa: 'シングル名 (配信限定)',
-      regCatNo: 'DIGITAL-ONLY',
-      catalog: 'DIGITAL-ONLY (No CD)',
-      mbEditions: [],
-      kana: '配信限定',
-      filing: 'No physical CD exists — skip shelf hunting.',
-      price: 'Digital Only',
-      itunesQuery: 'Single Name Digital Artist',
-      requiredGroups: [['single'], ['digital artist']],
-      accent: '#0ea5e9'
+      "id": "dig-01",
+      "digitalOnly": true,
+      "category": "Digital-Only",
+      "artist": "Digital Artist",
+      "artistJa": "デジタルアーティスト",
+      "title": "\"Single Name\" (Digital-Only Release)",
+      "titleJa": "シングル名 (配信限定)",
+      "regCatNo": "DIGITAL-ONLY",
+      "catalog": "DIGITAL-ONLY (No CD)",
+      "mbEditions": [],
+      "kana": "配信限定",
+      "filing": "No physical CD exists — skip shelf hunting.",
+      "price": "Digital Only",
+      "itunesQuery": "Single Name Digital Artist",
+      "requiredGroups": [["single"], ["digital artist"]],
+      "accent": "#0ea5e9"
     }
   ]
-};
+}
 ```

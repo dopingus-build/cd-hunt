@@ -263,13 +263,32 @@
     };
   }
 
+  /**
+   * Normalize a catalog metadata URL, converting GitHub blob/raw URLs to raw.githubusercontent.com.
+   * @param {string} rawUrl
+   * @returns {string}
+   */
+  function normalizeCatalogUrl(rawUrl) {
+    const trimmed = String(rawUrl || '').trim();
+    if (!trimmed) return '';
+    const match = trimmed.match(
+      /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:blob|raw)\/([^?#]+?)(?:[?#].*)?$/i
+    );
+    if (match) {
+      return 'https://raw.githubusercontent.com/' + match[1] + '/' + match[2] + '/' + match[3];
+    }
+    return trimmed;
+  }
+
   if (root) {
     root.validateCatalog = validateCatalog;
+    root.normalizeCatalogUrl = normalizeCatalogUrl;
     root.CDHunt = root.CDHunt || {};
     root.CDHunt.validateCatalog = validateCatalog;
+    root.CDHunt.normalizeCatalogUrl = normalizeCatalogUrl;
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { validateCatalog };
+    module.exports = { validateCatalog, normalizeCatalogUrl };
   }
 })(typeof window !== 'undefined' ? window : typeof globalThis !== 'undefined' ? globalThis : null);

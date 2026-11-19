@@ -1,0 +1,53 @@
+{
+  "meta": {
+    "title": "Sample CD Hunt",
+    "subtitle": "Custom Catalog Template (通常盤 Priority)",
+    "documentTitle": "Sample CD Hunt Checklist",
+    "storagePrefix": "sample_cd_hunt",
+    "searchPlaceholder": "Search artist, title, or catalog #..."
+  },
+  "categories": [
+    { "key": "All", "label": "All Releases", "dot": "#a1a1aa" },
+    { "key": "J-Rock", "label": "J-Rock", "dot": "#38bdf8" },
+    { "key": "Digital-Only", "label": "Digital-Only", "dot": "#22d3ee" }
+  ],
+  "items": [
+    {
+      "id": "sample-01",
+      "category": "J-Rock",
+      "artist": "Asian Kung-Fu Generation",
+      "artistJa": "ASIAN KUNG-FU GENERATION",
+      "title": "Sol-fa",
+      "titleJa": "ソルファ",
+      "regCatNo": "KSCL-737",
+      "catalog": "KSCL-737 (通常盤)",
+      "mbEditions": [
+        { "catno": "KSCL-737", "label": "通常盤 Regular" }
+      ],
+      "kana": "ア / A",
+      "filing": "ア (AKFG) — J-Rock aisle",
+      "price": "¥400–¥800",
+      "itunesQuery": "Sol-fa ASIAN KUNG-FU GENERATION",
+      "requiredGroups": [["sol-fa"], ["asian kung-fu"]],
+      "accent": "#38bdf8"
+    },
+    {
+      "id": "dig-01",
+      "digitalOnly": true,
+      "category": "Digital-Only",
+      "artist": "Sample Digital Artist",
+      "artistJa": "サンプルアーティスト",
+      "title": "\"Sample Digital Single\" (Digital-Only Release)",
+      "titleJa": "サンプル配信シングル (配信限定)",
+      "regCatNo": "DIGITAL-ONLY",
+      "catalog": "DIGITAL-ONLY (No CD)",
+      "mbEditions": [],
+      "kana": "配信限定",
+      "filing": "No physical CD exists — skip shelf hunting.",
+      "price": "Digital Only",
+      "itunesQuery": "Sample Digital Single",
+      "requiredGroups": [["sample"], ["single"]],
+      "accent": "#0ea5e9"
+    }
+  ]
+}

@@ -9,7 +9,7 @@ const vm = require('node:vm');
 const ROOT_DIR = path.join(__dirname, '..');
 const HTML_PATH = path.join(ROOT_DIR, 'osaka_cd_cover_album.html');
 const CSS_PATH = path.join(ROOT_DIR, 'css', 'styles.css');
-const CATALOG_PATH = path.join(ROOT_DIR, 'data', 'catalog.js');
+const OSAKA_METADATA_PATH = path.join(ROOT_DIR, '..', 'cd-metadata', '2026-japan.json');
 const VALIDATE_PATH = path.join(ROOT_DIR, 'js', 'validate.js');
 const STORAGE_PATH = path.join(ROOT_DIR, 'js', 'storage.js');
 const COVER_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'cover-resolver.js');
@@ -100,7 +100,12 @@ function buildDomElements(html) {
     const id = match[1];
     const classMatch = fullTag.match(/\bclass=["']([^"']+)["']/);
     const initialClasses = classMatch ? classMatch[1].split(/\s+/).filter(Boolean) : [];
-    elements.set(id, createElementStub(id, initialClasses));
+    const el = createElementStub(id, initialClasses);
+    const presetMatch = fullTag.match(/\bdata-preset-url=["']([^"']+)["']/);
+    if (presetMatch) {
+      el.setAttribute('data-preset-url', presetMatch[1]);
+    }
+    elements.set(id, el);
   }
   return elements;
 }
@@ -121,7 +126,13 @@ function createStorage() {
   };
 }
 
-async function bootApp({ catalogObject, useRealCatalogFile = false, search = '', fetchImpl } = {}) {
+async function bootApp({
+  catalogObject,
+  savedCatalogUrl,
+  search = '',
+  pathname = '/cd-hunt/osaka_cd_cover_album.html',
+  fetchImpl
+} = {}) {
   const html = readAppHtml();
   const validatorSource = readValidatorSource();
   const storageSource = fs.readFileSync(STORAGE_PATH, 'utf8');
@@ -130,6 +141,12 @@ async function bootApp({ catalogObject, useRealCatalogFile = false, search = '',
   const elements = buildDomElements(html);
   const docListeners = {};
   const localStorage = createStorage();
+  if (savedCatalogUrl) {
+    localStorage.setItem('cd_hunt_catalog_url_v1', savedCatalogUrl);
+  }
+
+  const historyUpdates = [];
+  const locationObj = { search, pathname };
 
   const documentStub = {
     title: '',
@@ -190,7 +207,14 @@ async function bootApp({ catalogObject, useRealCatalogFile = false, search = '',
     decodeURIComponent,
     document: documentStub,
     localStorage,
-    location: { search },
+    location: locationObj,
+    history: {
+      replaceState(_state, _title, nextUrl) {
+        historyUpdates.push(nextUrl);
+        const qIdx = String(nextUrl).indexOf('?');
+        locationObj.search = qIdx !== -1 ? String(nextUrl).slice(qIdx) : '';
+      }
+    },
     fetch:
       fetchImpl ||
       (async () => {
@@ -203,10 +227,7 @@ async function bootApp({ catalogObject, useRealCatalogFile = false, search = '',
 
   const context = vm.createContext(sandbox);
 
-  // Load catalog/data + js modules in HTML script order
-  if (useRealCatalogFile) {
-    vm.runInContext(fs.readFileSync(CATALOG_PATH, 'utf8'), context);
-  } else if (catalogObject !== undefined) {
+  if (catalogObject !== undefined) {
     context.CD_HUNT_CATALOG = catalogObject;
   }
 
@@ -215,14 +236,26 @@ async function bootApp({ catalogObject, useRealCatalogFile = false, search = '',
   vm.runInContext(coverResolverSource, context);
   vm.runInContext(appScript, context);
 
+  async function flush() {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
   // Wait for async initApp() microtasks to settle
-  await new Promise((resolve) => setTimeout(resolve, 15));
+  await flush();
 
   return {
     elements,
     localStorage,
+    historyUpdates,
     document: documentStub,
     window: context,
+    flush,
+    async clickElement(id) {
+      const el = elements.get(id);
+      assert.ok(el, `Element #${id} must exist`);
+      el.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} });
+      await flush();
+    },
     triggerDocumentClick(action, attrs = {}) {
       const targetStub = {
         closest(selector) {
@@ -273,16 +306,20 @@ function makeValidRemoteCatalog() {
 }
 
 describe('HTML asset & script wiring', () => {
-  it('links ./css/styles.css and loads data & modular js scripts in order', () => {
+  it('links ./css/styles.css and loads modular js scripts without bundled data/catalog.js', () => {
     const html = readAppHtml();
     assert.ok(fs.existsSync(CSS_PATH), 'css/styles.css must exist');
     assert.ok(
       html.includes('<link rel="stylesheet" href="./css/styles.css" />'),
       'Expected <link rel="stylesheet" href="./css/styles.css" /> in HTML'
     );
+    assert.equal(
+      html.includes('./data/catalog.js'),
+      false,
+      'data/catalog.js should no longer be bundled in cd-hunt HTML'
+    );
 
     const expectedScripts = [
-      '<script src="./data/catalog.js"></script>',
       '<script src="./js/validate.js"></script>',
       '<script src="./js/storage.js"></script>',
       '<script src="./js/cover-resolver.js"></script>',
@@ -300,7 +337,7 @@ describe('HTML asset & script wiring', () => {
 });
 
 describe('Browser and Node dual export for js/validate.js', () => {
-  it('attaches window.validateCatalog when executed in a browser global context', () => {
+  it('attaches window.validateCatalog and window.normalizeCatalogUrl in a browser global context', () => {
     const validatorSource = readValidatorSource();
     const sandbox = {};
     sandbox.window = sandbox;
@@ -308,29 +345,113 @@ describe('Browser and Node dual export for js/validate.js', () => {
     vm.runInNewContext(validatorSource, sandbox);
 
     assert.equal(typeof sandbox.window.validateCatalog, 'function');
+    assert.equal(typeof sandbox.window.normalizeCatalogUrl, 'function');
     assert.equal(typeof sandbox.window.CDHunt.validateCatalog, 'function');
+    assert.equal(typeof sandbox.window.CDHunt.normalizeCatalogUrl, 'function');
     const result = sandbox.window.validateCatalog(makeValidRemoteCatalog());
     assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true, errors: [] });
   });
 });
 
-describe('Default catalog startup integration (data/catalog.js + js/* + HTML)', () => {
-  it('boots cleanly, displays 53 physical cards and 2 digital-only cards with hidden errorBanner', async () => {
-    const app = await bootApp({ useRealCatalogFile: true });
-    const errorBanner = app.elements.get('errorBanner');
-    const brandTitle = app.elements.get('brandTitle');
-    const progressBadge = app.elements.get('progressBadge');
-    const albumGrid = app.elements.get('albumGrid');
-    const digitalGrid = app.elements.get('digitalGrid');
+describe('Catalog Loader screen & external cd-metadata integration', () => {
+  it('shows the Catalog Loader screen on first load when no ?catalog= or saved URL exists', async () => {
+    const app = await bootApp();
+    assert.notEqual(app.elements.get('errorBanner').style.display, 'block');
+    assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), false);
+    assert.equal(app.elements.get('albumGrid').classList.contains('hidden'), true);
+    assert.equal(app.elements.get('digitalOnlySection').classList.contains('hidden'), true);
+  });
 
-    assert.notEqual(errorBanner.style.display, 'block', `Unexpected errorBanner: ${errorBanner.textContent}`);
-    assert.equal(brandTitle.textContent, 'Osaka CD Cover Album');
-    assert.equal(progressBadge.textContent, '0 / 53');
+  it('loads 2026-japan.json via the Osaka preset button and persists the URL', async () => {
+    const osakaJson = JSON.parse(fs.readFileSync(OSAKA_METADATA_PATH, 'utf8'));
+    let fetchedUrl = null;
 
-    const physicalCards = albumGrid.innerHTML.match(/<article class="cd-card/g) || [];
-    const digitalCards = digitalGrid.innerHTML.match(/<article class="cd-card/g) || [];
+    const app = await bootApp({
+      fetchImpl: async (url) => {
+        fetchedUrl = url;
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return osakaJson;
+          }
+        };
+      }
+    });
+
+    await app.clickElement('loadPresetOsakaBtn');
+
+    assert.equal(
+      fetchedUrl,
+      'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json'
+    );
+    assert.equal(
+      app.localStorage.getItem('cd_hunt_catalog_url_v1'),
+      'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json'
+    );
+    assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), true);
+    assert.notEqual(app.elements.get('errorBanner').style.display, 'block');
+    assert.equal(app.elements.get('brandTitle').textContent, 'Osaka CD Cover Album');
+    assert.equal(app.elements.get('progressBadge').textContent, '0 / 53');
+
+    const physicalCards = app.elements.get('albumGrid').innerHTML.match(/<article class="cd-card/g) || [];
+    const digitalCards = app.elements.get('digitalGrid').innerHTML.match(/<article class="cd-card/g) || [];
     assert.equal(physicalCards.length, 53);
     assert.equal(digitalCards.length, 2);
+  });
+
+  it('converts a pasted GitHub blob URL to raw.githubusercontent.com, persists it, and syncs ?catalog=', async () => {
+    const remoteCatalog = makeValidRemoteCatalog();
+    let fetchedUrl = null;
+
+    const app = await bootApp({
+      fetchImpl: async (url) => {
+        fetchedUrl = url;
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return remoteCatalog;
+          }
+        };
+      }
+    });
+
+    app.elements.get('catalogUrlInput').value = 'https://github.com/example/my-cds/blob/main/tokyo.json';
+    await app.clickElement('loadCatalogUrlBtn');
+
+    const expectedRaw = 'https://raw.githubusercontent.com/example/my-cds/main/tokyo.json';
+    assert.equal(fetchedUrl, expectedRaw);
+    assert.equal(app.localStorage.getItem('cd_hunt_catalog_url_v1'), expectedRaw);
+    assert.ok(app.historyUpdates.some((u) => u.includes(encodeURIComponent(expectedRaw))));
+    assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), true);
+    assert.equal(app.elements.get('brandTitle').textContent, 'Tokyo Vinyl & CD Hunt');
+    assert.equal(app.elements.get('progressBadge').textContent, '0 / 1');
+  });
+
+  it('automatically reloads the catalog from saved localStorage URL on subsequent visit', async () => {
+    const remoteCatalog = makeValidRemoteCatalog();
+    const savedRaw = 'https://raw.githubusercontent.com/example/my-cds/main/tokyo.json';
+    let fetchedUrl = null;
+
+    const app = await bootApp({
+      savedCatalogUrl: savedRaw,
+      fetchImpl: async (url) => {
+        fetchedUrl = url;
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return remoteCatalog;
+          }
+        };
+      }
+    });
+
+    assert.equal(fetchedUrl, savedRaw);
+    assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), true);
+    assert.equal(app.elements.get('brandTitle').textContent, 'Tokyo Vinyl & CD Hunt');
+    assert.equal(app.elements.get('progressBadge').textContent, '0 / 1');
   });
 });
 

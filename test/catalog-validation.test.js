@@ -7,10 +7,11 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 let validateCatalog = null;
+let normalizeCatalogUrl = null;
 let loadError = null;
 
 try {
-  ({ validateCatalog } = require('../js/validate.js'));
+  ({ validateCatalog, normalizeCatalogUrl } = require('../js/validate.js'));
 } catch (err) {
   loadError = err;
 }
@@ -19,6 +20,12 @@ function getValidator() {
   assert.ifError(loadError);
   assert.equal(typeof validateCatalog, 'function', 'js/validate.js must export a validateCatalog function');
   return validateCatalog;
+}
+
+function getNormalizer() {
+  assert.ifError(loadError);
+  assert.equal(typeof normalizeCatalogUrl, 'function', 'js/validate.js must export a normalizeCatalogUrl function');
+  return normalizeCatalogUrl;
 }
 
 function makeValidItem(overrides = {}) {
@@ -67,22 +74,59 @@ function makeValidCatalog(overrides = {}) {
 }
 
 describe('Catalog validation module export', () => {
-  it('exports validateCatalog from ../js/validate.js', () => {
+  it('exports validateCatalog and normalizeCatalogUrl from ../js/validate.js', () => {
     getValidator();
+    getNormalizer();
   });
 });
 
-describe('Production catalog (data/catalog.js)', () => {
+describe('Sample catalog (docs/sample-catalog.json)', () => {
   it('passes validation with zero errors', () => {
     const validate = getValidator();
-    const catalogPath = path.join(__dirname, '..', 'data', 'catalog.js');
-    const source = fs.readFileSync(catalogPath, 'utf8');
-    const sandbox = { window: {} };
-    vm.runInNewContext(source, sandbox);
+    const samplePath = path.join(__dirname, '..', 'docs', 'sample-catalog.json');
+    const data = JSON.parse(fs.readFileSync(samplePath, 'utf8'));
+    assert.deepEqual(validate(data), { valid: true, errors: [] });
+  });
+});
 
-    assert.ok(sandbox.window.CD_HUNT_CATALOG, 'window.CD_HUNT_CATALOG should be defined');
-    const result = validate(sandbox.window.CD_HUNT_CATALOG);
-    assert.deepEqual(result, { valid: true, errors: [] });
+describe('External metadata catalog (cd-metadata/2026-japan.json)', () => {
+  it('passes validation with zero errors when sibling cd-metadata repo is present', () => {
+    const validate = getValidator();
+    const osakaPath = path.join(__dirname, '..', '..', 'cd-metadata', '2026-japan.json');
+    if (!fs.existsSync(osakaPath)) return;
+    const data = JSON.parse(fs.readFileSync(osakaPath, 'utf8'));
+    assert.deepEqual(validate(data), { valid: true, errors: [] });
+    assert.equal(data.items.filter((i) => !i.digitalOnly).length, 53);
+    assert.equal(data.items.filter((i) => !!i.digitalOnly).length, 2);
+  });
+});
+
+describe('normalizeCatalogUrl helper', () => {
+  it('converts GitHub blob URLs to raw.githubusercontent.com URLs', () => {
+    const normalize = getNormalizer();
+    assert.equal(
+      normalize('  https://github.com/dopingus-build/cd-metadata/blob/main/2026-japan.json  '),
+      'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json'
+    );
+  });
+
+  it('strips query/hash fragments when converting GitHub blob or raw URLs', () => {
+    const normalize = getNormalizer();
+    assert.equal(
+      normalize('https://github.com/owner/repo/blob/main/nested/list.json?plain=1#L1'),
+      'https://raw.githubusercontent.com/owner/repo/main/nested/list.json'
+    );
+    assert.equal(
+      normalize('https://github.com/owner/repo/raw/main/list.json'),
+      'https://raw.githubusercontent.com/owner/repo/main/list.json'
+    );
+  });
+
+  it('preserves already-raw and arbitrary JSON URLs', () => {
+    const normalize = getNormalizer();
+    const rawUrl = 'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json';
+    assert.equal(normalize(rawUrl), rawUrl);
+    assert.equal(normalize('https://example.com/catalog.json'), 'https://example.com/catalog.json');
   });
 });
 

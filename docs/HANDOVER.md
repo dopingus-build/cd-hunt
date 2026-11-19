@@ -4,7 +4,7 @@
 This project is a mobile-first, offline-capable web application (`osaka_cd_cover_album.html`) and companion Google Sheet designed for hunting used Japanese CDs in person across Osaka (e.g., Mandarake, Suruga-ya, Book Off, Disk Union in Nipponbashi, Namba, and Umeda).
 
 - **Primary Artifact:** `osaka_cd_cover_album.html` (Zero-dependency HTML shell linking `css/styles.css` and modular JS in `js/`; `index.html` redirects to it for GitHub Pages alongside `.nojekyll`).
-- **Catalog Data & Metadata:** `data/catalog.js` (`window.CD_HUNT_CATALOG` with `meta`, `categories`, and `items`; works both offline via `file://` and on GitHub Pages, or override via `?catalog=<url>` JSON when hosted over HTTP(S)). See [`METADATA.md`](./METADATA.md) for the full schema and [`js/validate.js`](../js/validate.js) for runtime validation.
+- **Catalog Data & Metadata:** Stored externally in [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata) as flat root-level JSON files (Osaka list: `2026-japan.json`). On first load without `?catalog=` or a saved URL, the app shows the Catalog Loader screen where users can paste any public metadata URL (with auto `blob` → `raw` conversion) or click the `2026-japan.json` preset. See [`METADATA.md`](./METADATA.md), [`sample-catalog.json`](./sample-catalog.json), and [`js/validate.js`](../js/validate.js).
 - **Master Google Sheet:** [Osaka CD Shopping Checklist](https://docs.google.com/spreadsheets/d/1fVOtXaNniW62Ze0iZcQxGXRLaCbDlUBHjGZNRkO9u6A/edit) (44 physical CD rows + 2 digital-only rows).
 - **Catalog Size in Web App:** **55 total entries** (**53 physical CDs** across 4 aisles, plus **2 digital-only tracks** separated so they do not inflate the physical shelf-hunting progress counter).
 
@@ -38,6 +38,7 @@ When continuing development on `osaka_cd_cover_album.html` in Antigravity (`agy`
 ---
 
 ## 4. `localStorage` Schema Keys
+- `cd_hunt_catalog_url_v1`: Active normalized metadata JSON URL (restored automatically on next visit when `?catalog=` is not supplied).
 - `osaka_cd_checklist_v2`: Object mapping `album.id` → `boolean` (e.g., `{ "cd-01": true }`) or compatible checklist array format. Tracks acquired physical CDs (`0 / 53`) and saved digital tracks.
 - `osaka_cd_cover_cache_v6`: Object mapping `album.id` → `{ variants: Array, selectedIndex: number }`. (Older `v1`–`v5` keys are automatically purged on startup).
 - `osaka_cd_view_mode_v1`: `'grid'` or `'single'` (toggles between responsive multi-column cover grid and 1-column detailed card view).
@@ -61,7 +62,7 @@ When continuing development on `osaka_cd_cover_album.html` in Antigravity (`agy`
 ---
 
 ## 6. How to Resume in Antigravity (`agy`)
-1. Open the repository root containing `osaka_cd_cover_album.html`, `css/`, `data/`, `js/`, `docs/`, and `test/`.
+1. Open the repository root containing `osaka_cd_cover_album.html`, `css/`, `js/`, `docs/`, and `test/` (and the companion `cd-metadata` repository containing `2026-japan.json`).
 2. If transferring existing progress from another browser, open the app, click **Backup** in the top bar, copy the JSON string, and paste it into **Backup → Import & Restore** in the new browser.
 3. Prompt Antigravity with:
-   > *"Read `docs/HANDOVER.md`, `docs/METADATA.md`, and `osaka_cd_cover_album.html`. Keep the zero-CDN modular architecture, `通常盤`-first cover resolution, and `localStorage` keys intact, and help me with [next feature/edit]."*
+   > *"Read `docs/HANDOVER.md`, `docs/METADATA.md`, and `osaka_cd_cover_album.html`. Keep the zero-CDN modular architecture, external metadata loader, `通常盤`-first cover resolution, and `localStorage` keys intact, and help me with [next feature/edit]."*

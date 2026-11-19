@@ -5,10 +5,15 @@
   const storage = CDHunt.storage;
   const coverResolver = CDHunt.coverResolver;
   const validateCatalog = window.validateCatalog || CDHunt.validateCatalog;
+  const normalizeCatalogUrl = window.normalizeCatalogUrl || CDHunt.normalizeCatalogUrl || function (u) {
+    return String(u || '').trim();
+  };
 
   if (!storage || !coverResolver) {
     throw new Error('Required CDHunt modules (storage, coverResolver) are not loaded.');
   }
+
+  const DEFAULT_OSAKA_CATALOG_URL = 'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json';
 
   const safeGetItem = storage.safeGetItem;
   const safeSetItem = storage.safeSetItem;
@@ -28,6 +33,8 @@
   let ALBUMS = [];
   let CATEGORIES = [];
   let CATALOG_META = {};
+  let hasLoadedCatalog = false;
+  let activeCatalogUrl = null;
 
   function deriveCategories(items) {
     const cats = [{ key: 'All', label: 'All Releases', dot: '#a1a1aa' }];
@@ -82,6 +89,8 @@
       noteBanner.classList.add('hidden');
       compactBar.classList.add('hidden');
     } else {
+      noteBanner.classList.remove('hidden');
+      compactBar.classList.add('hidden');
       document.getElementById('digitalNoteTag').textContent = 'DIGITAL-ONLY (' + digitalItems.length + ')';
       const namesHTML = digitalItems.map(function (d) {
         const shortTitle = String(d.title || '').split('(')[0].trim();
@@ -91,24 +100,135 @@
     }
   }
 
-  async function loadCatalogData() {
-    const params = new URLSearchParams(window.location.search);
-    const customUrl = params.get('catalog');
-    if (customUrl) {
-      const res = await fetch(customUrl);
-      if (!res.ok) throw new Error('Failed to load catalog from ' + customUrl + ' (HTTP ' + res.status + ')');
-      return await res.json();
+  function showErrorBanner(msg) {
+    const banner = document.getElementById('errorBanner');
+    if (!banner) return;
+    banner.style.display = 'block';
+    banner.textContent = msg;
+  }
+
+  function clearErrorBanner() {
+    const banner = document.getElementById('errorBanner');
+    if (!banner) return;
+    banner.style.display = 'none';
+    banner.textContent = '';
+  }
+
+  function showCatalogLoader(visible) {
+    const loader = document.getElementById('catalogLoaderScreen');
+    if (!loader) return;
+
+    const noteBanner = document.getElementById('digitalNoteBanner');
+    const compactBar = document.getElementById('compactCountBar');
+    const gridEl = document.getElementById('albumGrid');
+    const digSection = document.getElementById('digitalOnlySection');
+    const emptyBox = document.getElementById('emptyState');
+    const closeBtn = document.getElementById('closeCatalogLoaderBtn');
+    const urlInput = document.getElementById('catalogUrlInput');
+    const infoEl = document.getElementById('activeCatalogInfo');
+
+    if (visible) {
+      loader.classList.remove('hidden');
+      if (noteBanner) noteBanner.classList.add('hidden');
+      if (compactBar) compactBar.classList.add('hidden');
+      if (gridEl) gridEl.classList.add('hidden');
+      if (digSection) digSection.classList.add('hidden');
+      if (emptyBox) emptyBox.classList.add('hidden');
+      if (closeBtn) closeBtn.classList.toggle('hidden', !hasLoadedCatalog);
+      if (urlInput && activeCatalogUrl) {
+        urlInput.value = activeCatalogUrl;
+      }
+      if (infoEl) {
+        if (activeCatalogUrl) {
+          infoEl.classList.remove('hidden');
+          infoEl.textContent = 'Active catalog URL: ' + activeCatalogUrl;
+        } else {
+          infoEl.classList.add('hidden');
+          infoEl.textContent = '';
+        }
+      }
+    } else {
+      loader.classList.add('hidden');
+      const hasDigital = ALBUMS.some(function (a) { return !!a.digitalOnly; });
+      if (!hasDigital) {
+        if (noteBanner) noteBanner.classList.add('hidden');
+        if (compactBar) compactBar.classList.add('hidden');
+      } else if (safeGetItem(NOTE_DISMISSED_KEY) === '1') {
+        if (noteBanner) noteBanner.classList.add('hidden');
+        if (compactBar) compactBar.classList.remove('hidden');
+      } else {
+        if (noteBanner) noteBanner.classList.remove('hidden');
+        if (compactBar) compactBar.classList.add('hidden');
+      }
     }
-    if (window.CD_HUNT_CATALOG) {
-      return window.CD_HUNT_CATALOG;
-    }
+  }
+
+  function resetAppStateForCatalog() {
+    state.search = '';
+    state.category = 'All';
+    state.huntingOnly = false;
+    state.viewMode = 'grid';
+    state.acquiredMap = {};
+    state.coverCache = {};
+    state.lightboxIndex = 0;
+    pendingQueue.length = 0;
+    queuedIds.clear();
+    inFlightIds.clear();
+
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput) searchInput.value = '';
+    const clearBtn = document.getElementById('clearSearchBtn');
+    if (clearBtn) clearBtn.classList.remove('visible');
+    const huntBtn = document.getElementById('huntingOnlyBtn');
+    if (huntBtn) huntBtn.classList.remove('btn-active-filter');
+  }
+
+  function syncQueryParamUrl(catalogUrl) {
     try {
-      const res = await fetch('./data/catalog.json');
-      if (res.ok) return await res.json();
+      if (window.history && typeof window.history.replaceState === 'function' && window.location) {
+        const params = new URLSearchParams(window.location.search || '');
+        params.set('catalog', catalogUrl);
+        const basePath = window.location.pathname || '';
+        window.history.replaceState(null, '', basePath + '?' + params.toString());
+      }
     } catch (e) {
-      // Ignore file:// fetch errors
+      // Ignore sandboxed history errors
     }
-    throw new Error('No catalog data found. Ensure data/catalog.js is present or pass ?catalog=<url>.');
+  }
+
+  async function loadAndApplyCatalogFromUrl(rawUrl) {
+    const normalizedUrl = normalizeCatalogUrl(rawUrl);
+    if (!normalizedUrl) {
+      throw new Error('Please enter a valid metadata JSON URL.');
+    }
+
+    const res = await fetch(normalizedUrl);
+    if (!res.ok) {
+      throw new Error('Failed to load catalog from ' + normalizedUrl + ' (HTTP ' + res.status + ')');
+    }
+    const catalog = await res.json();
+    if (typeof validateCatalog === 'function') {
+      const validation = validateCatalog(catalog);
+      if (!validation.valid) {
+        throw new Error('Catalog validation failed: ' + validation.errors.join('; '));
+      }
+    }
+
+    clearErrorBanner();
+    activeCatalogUrl = normalizedUrl;
+    if (typeof storage.setActiveCatalogUrl === 'function') {
+      storage.setActiveCatalogUrl(normalizedUrl);
+    }
+    syncQueryParamUrl(normalizedUrl);
+
+    resetAppStateForCatalog();
+    applyCatalogData(catalog);
+    loadStateFromStorage();
+    document.getElementById('viewModeLabel').textContent = state.viewMode === 'single' ? 'Grid View' : '1-Col View';
+    hasLoadedCatalog = true;
+    showCatalogLoader(false);
+    renderCategoryPills();
+    renderAll();
   }
 
   const state = {
@@ -964,30 +1084,92 @@
         stepLightbox(dx < 0 ? 1 : -1);
       }
     }, { passive: true });
+
+    // Catalog Metadata Loader Controls
+    async function submitCatalogUrl(rawUrl) {
+      try {
+        await loadAndApplyCatalogFromUrl(rawUrl);
+        showToast('Catalog loaded successfully');
+      } catch (err) {
+        showErrorBanner('App Initialization Error: ' + (err && err.message ? err.message : String(err)));
+        showCatalogLoader(true);
+      }
+    }
+
+    const openLoaderBtn = document.getElementById('openCatalogLoaderBtn');
+    if (openLoaderBtn) {
+      openLoaderBtn.addEventListener('click', function () {
+        showCatalogLoader(true);
+      });
+    }
+
+    const closeLoaderBtn = document.getElementById('closeCatalogLoaderBtn');
+    if (closeLoaderBtn) {
+      closeLoaderBtn.addEventListener('click', function () {
+        if (!hasLoadedCatalog) return;
+        clearErrorBanner();
+        showCatalogLoader(false);
+        renderAll();
+      });
+    }
+
+    const loadUrlBtn = document.getElementById('loadCatalogUrlBtn');
+    const urlInput = document.getElementById('catalogUrlInput');
+    if (loadUrlBtn && urlInput) {
+      loadUrlBtn.addEventListener('click', function () {
+        submitCatalogUrl(urlInput.value);
+      });
+      urlInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submitCatalogUrl(urlInput.value);
+        }
+      });
+    }
+
+    const presetOsakaBtn = document.getElementById('loadPresetOsakaBtn');
+    if (presetOsakaBtn) {
+      presetOsakaBtn.addEventListener('click', function () {
+        const presetUrl = presetOsakaBtn.getAttribute('data-preset-url') || DEFAULT_OSAKA_CATALOG_URL;
+        if (urlInput) urlInput.value = presetUrl;
+        submitCatalogUrl(presetUrl);
+      });
+    }
   }
 
   async function initApp() {
+    setupIntersectionObserver();
+    bindEvents();
+
     try {
-      const catalog = await loadCatalogData();
-      if (typeof validateCatalog === 'function') {
-        const validation = validateCatalog(catalog);
-        if (!validation.valid) {
-          throw new Error('Catalog validation failed: ' + validation.errors.join('; '));
+      const params = new URLSearchParams(window.location.search || '');
+      const queryUrl = params.get('catalog');
+      const savedUrl = typeof storage.getActiveCatalogUrl === 'function' ? storage.getActiveCatalogUrl() : null;
+      const initialUrl = queryUrl || savedUrl;
+
+      if (initialUrl) {
+        await loadAndApplyCatalogFromUrl(initialUrl);
+      } else if (window.CD_HUNT_CATALOG) {
+        const catalog = window.CD_HUNT_CATALOG;
+        if (typeof validateCatalog === 'function') {
+          const validation = validateCatalog(catalog);
+          if (!validation.valid) {
+            throw new Error('Catalog validation failed: ' + validation.errors.join('; '));
+          }
         }
+        applyCatalogData(catalog);
+        loadStateFromStorage();
+        document.getElementById('viewModeLabel').textContent = state.viewMode === 'single' ? 'Grid View' : '1-Col View';
+        hasLoadedCatalog = true;
+        showCatalogLoader(false);
+        renderCategoryPills();
+        renderAll();
+      } else {
+        showCatalogLoader(true);
       }
-      applyCatalogData(catalog);
-      loadStateFromStorage();
-      document.getElementById('viewModeLabel').textContent = state.viewMode === 'single' ? 'Grid View' : '1-Col View';
-      setupIntersectionObserver();
-      bindEvents();
-      renderCategoryPills();
-      renderAll();
     } catch (err) {
-      const banner = document.getElementById('errorBanner');
-      if (banner) {
-        banner.style.display = 'block';
-        banner.textContent = 'App Initialization Error: ' + (err && err.message ? err.message : String(err));
-      }
+      showErrorBanner('App Initialization Error: ' + (err && err.message ? err.message : String(err)));
+      showCatalogLoader(true);
       console.error(err);
     }
   }

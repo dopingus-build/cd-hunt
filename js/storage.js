@@ -69,12 +69,45 @@
     });
   }
 
+  const CATALOG_URL_KEY = 'cd_hunt_catalog_url_v1';
+
+  /**
+   * Read the persisted custom/active catalog metadata URL.
+   * @returns {string | null}
+   */
+  function getActiveCatalogUrl() {
+    const val = safeGetItem(CATALOG_URL_KEY);
+    return val && val.trim() ? val.trim() : null;
+  }
+
+  /**
+   * Persist the active catalog metadata URL.
+   * @param {string} url
+   */
+  function setActiveCatalogUrl(url) {
+    const trimmed = String(url || '').trim();
+    if (trimmed) {
+      safeSetItem(CATALOG_URL_KEY, trimmed);
+    }
+  }
+
+  /**
+   * Clear the persisted catalog metadata URL.
+   */
+  function clearActiveCatalogUrl() {
+    safeRemoveItem(CATALOG_URL_KEY);
+  }
+
   const storageApi = {
+    CATALOG_URL_KEY: CATALOG_URL_KEY,
     safeGetItem: safeGetItem,
     safeSetItem: safeSetItem,
     safeRemoveItem: safeRemoveItem,
     getStorageKeys: getStorageKeys,
-    purgeLegacyCoverCaches: purgeLegacyCoverCaches
+    purgeLegacyCoverCaches: purgeLegacyCoverCaches,
+    getActiveCatalogUrl: getActiveCatalogUrl,
+    setActiveCatalogUrl: setActiveCatalogUrl,
+    clearActiveCatalogUrl: clearActiveCatalogUrl
   };
 
   if (root) {
