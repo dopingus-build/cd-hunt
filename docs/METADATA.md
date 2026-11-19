@@ -6,18 +6,52 @@ This document specifies the versioned schema, loading rules, and cover-resolutio
 
 ## Loading Modes
 
-`index.html` (via `js/app.js`) separates UI logic from catalog data and resolves the catalog in the following order:
+`index.html` (via `js/app.js` and `normalizeCatalogUrl` in `js/validate.js`) separates UI logic from catalog data and resolves the catalog in the following order:
 
-1. **Custom JSON or Repository URL (`?catalog=<url>`):** Fetches and loads the JSON file or repository `index.json` from the URL query parameter. Standard GitHub `https://github.com/<owner>/<repo>/blob/<ref>/<path>` URLs are automatically converted to `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>`, and bare repository URLs (`https://github.com/<owner>/<repo>` or `/tree/<branch>`) resolve to that repository's `index.json` so its presets can be picked directly.
-2. **Saved Catalog URL (`localStorage` key `cd_hunt_catalog_url_v1`):** If no `?catalog=` parameter is present, reloads the previously selected URL catalog automatically.
+1. **Custom JSON or Repository URL (`?catalog=<url>`):** Fetches and loads the target JSON from the query parameter after normalizing GitHub URLs:
+   - **GitHub `/blob/` or `/raw/` file URL:** `https://github.com/<owner>/<repo>/blob/<ref>/<path>` → `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>` (query/hash fragments stripped).
+   - **GitHub `/tree/<branch>` URL:** `https://github.com/<owner>/<repo>/tree/<branch>` → `https://raw.githubusercontent.com/<owner>/<repo>/<branch>/index.json`.
+   - **Bare GitHub repository URL:** `https://github.com/<owner>/<repo>` (including trailing `/` or `.git`) → `https://raw.githubusercontent.com/<owner>/<repo>/main/index.json`.
+   - When the fetched JSON is a repository `index.json` (has `catalogs[]` and no `items[]`), the Catalog Loader displays that repository's presets resolved relative to its raw base URL.
+2. **Saved Catalog URL (`localStorage` key `cd_hunt_catalog_url_v1`):** If no `?catalog=` parameter is present, reloads the previously loaded catalog JSON file URL automatically.
 3. **Catalog Loader Screen:** On first visit (with no `?catalog=` or saved URL), displays the interactive Catalog Loader where users can:
    - Pick a dynamic preset fetched from [`dopingus-build/cd-metadata/index.json`](https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/index.json),
-   - Paste any public metadata JSON URL or GitHub metadata repository URL (`https://github.com/<owner>/<repo>`, with a **Copy Share Link** button once a catalog is loaded to share `?catalog=<url>`), or
+   - Paste any public metadata JSON URL or GitHub metadata repository URL (`https://github.com/<owner>/<repo>`, with **Copy Share Link** enabled once a catalog is loaded to share `?catalog=<url>`), or
    - Load a local `.json` file directly from their device.
 
 > **Note:** External catalog JSON files (such as `2026-japan.json` in `dopingus-build/cd-metadata` or [`docs/sample-catalog.json`](./sample-catalog.json)) conform to [`schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json) (`schemaVersion: 1`) and are validated at load time by `js/validate.js`.
 >
 > **For LLMs & Coding Agents:** See [`docs/AGENT_CATALOG_GUIDE.md`](./AGENT_CATALOG_GUIDE.md) for step-by-step instructions on researching catalog numbers, Gojūon shelf filing, used pricing, MusicBrainz/iTunes cover verification, and adding entries safely to existing catalogs.
+
+---
+
+## Repository Index Format (`index.json`)
+
+A flat metadata repository (like [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata)) exposes a root `index.json` so CD Hunt can populate presets dynamically when pointed at a repository URL:
+
+```json
+{
+  "schemaVersion": 1,
+  "catalogs": [
+    {
+      "id": "2026-japan",
+      "title": "2026 Japan (Osaka) CD Hunt",
+      "subtitle": "53 physical CDs + 2 digital-only releases",
+      "file": "2026-japan.json"
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `schemaVersion` | `integer` | Recommended (`1`) | Index format version marker (`1`). |
+| `catalogs` | `Array<Object>` | **Required** | List of preset catalog entries shown as buttons in `#catalogPresetsList`. |
+| `catalogs[].id` | `string` | Optional | Short slug (`data-preset-id`). |
+| `catalogs[].title` | `string` | Recommended | Button heading displayed in the preset list. |
+| `catalogs[].subtitle` | `string` | Optional | Secondary description shown below the preset title. |
+| `catalogs[].file` | `string` | Required unless `url` is set | Root-relative catalog JSON filename resolved against the repository's raw base URL. |
+| `catalogs[].url` | `string` | Optional | Explicit catalog URL (normalized with `normalizeCatalogUrl`) overriding `file`. |
 
 ---
 

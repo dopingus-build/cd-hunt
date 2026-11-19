@@ -1,3 +1,7 @@
+/**
+ * @fileoverview Client-side schemaVersion: 1 catalog validator and GitHub URL normalizer.
+ * Attaches validateCatalog and normalizeCatalogUrl to window / window.CDHunt and exports via CommonJS for Node tests.
+ */
 (function (root) {
   'use strict';
 

@@ -1,3 +1,7 @@
+/**
+ * @fileoverview Offline SVG jewel-case + obi generator and two-stage cover art resolver
+ * (MusicBrainz/Cover Art Archive followed by Apple iTunes Search API; attaches to window.CDHunt.coverResolver).
+ */
 (function (root) {
   'use strict';
 

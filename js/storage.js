@@ -1,3 +1,7 @@
+/**
+ * @fileoverview Sandbox-safe localStorage wrapper, active catalog URL persistence,
+ * and deterministic per-catalog storage prefix derivation (window.CDHunt.storage / CommonJS).
+ */
 (function (root) {
   'use strict';
 

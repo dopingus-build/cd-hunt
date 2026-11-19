@@ -1,25 +1,25 @@
-# CD Hunt Shopping Checklist & Cover Album — Project Handover
+# CD Hunt — Cover Album & Checklist (Project Handover)
 
 ## 1. Project Overview & Goal
-This project is a mobile-first, zero-dependency web application (`index.html`) designed for hunting used CDs in person across stores (e.g., Mandarake, Suruga-ya, Book Off, Disk Union in Nipponbashi, Namba, and Umeda).
+`cd-hunt` is a mobile-first, catalog-agnostic, zero-dependency web application (`index.html`) designed for hunting physical CDs and music releases in person across stores (such as Mandarake, Suruga-ya, Book Off, and Disk Union).
 
 - **Primary Artifact:** `index.html` (Zero-dependency HTML shell linking `css/styles.css` and modular JS in `js/`; hosted directly on GitHub Pages alongside `.nojekyll`).
-- **Catalog Data & Metadata:** Stored externally in [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata) as flat root-level JSON files (`index.json` + `2026-japan.json`). On first load without `?catalog=` or a saved URL, the app shows the Catalog Loader screen where users can pick a dynamic preset from `cd-metadata/index.json`, paste either a public metadata JSON URL or a bare GitHub repository URL (`https://github.com/<owner>/<repo>` to load its `index.json`, with auto `blob`/`tree`/repo → `raw` conversion), or load a local `.json` file. See [`METADATA.md`](./METADATA.md), [`AGENT_CATALOG_GUIDE.md`](./AGENT_CATALOG_GUIDE.md), [`schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json), [`sample-catalog.json`](./sample-catalog.json), and [`js/validate.js`](../js/validate.js).
-- **Master Google Sheet:** [Osaka CD Shopping Checklist](https://docs.google.com/spreadsheets/d/1fVOtXaNniW62Ze0iZcQxGXRLaCbDlUBHjGZNRkO9u6A/edit) (44 physical CD rows + 2 digital-only rows).
-- **Catalog Size in Web App:** **55 total entries** (**53 physical CDs** across 4 aisles, plus **2 digital-only tracks** separated so they do not inflate the physical shelf-hunting progress counter).
+- **Catalog Data & Metadata:** Stored externally in [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata) as flat root-level JSON files (`index.json` + `2026-japan.json`) or in any user-provided public repository / `.json` file. On first load without `?catalog=` or a saved URL, the app shows the Catalog Loader screen where users can pick a dynamic preset from `cd-metadata/index.json`, paste a direct metadata JSON URL or bare GitHub repository URL (`https://github.com/<owner>/<repo>` or `/tree/<branch>` to load `index.json`), or load a local `.json` file. See [`METADATA.md`](./METADATA.md), [`AGENT_CATALOG_GUIDE.md`](./AGENT_CATALOG_GUIDE.md), [`schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json), [`sample-catalog.json`](./sample-catalog.json), and [`js/validate.js`](../js/validate.js).
+- **Origin Master Google Sheet (Reference Catalog):** [Osaka CD Shopping Checklist](https://docs.google.com/spreadsheets/d/1fVOtXaNniW62Ze0iZcQxGXRLaCbDlUBHjGZNRkO9u6A/edit) (44 physical CD rows + 2 digital-only rows, expanded into the `2026-japan.json` preset).
+- **Reference Preset Catalog (`2026-japan.json`):** **55 total entries** (**53 physical CDs** across 4 aisles, plus **2 digital-only tracks** separated so they do not inflate the physical shelf-hunting progress counter).
 
 ---
 
 ## 2. Core Architecture & Constraints (CRITICAL)
-When continuing development on `index.html` in Antigravity (`agy`), strictly maintain these architectural rules:
+When continuing development on `cd-hunt`, strictly maintain these architectural rules:
 
 1. **Zero External Dependencies / Zero CDN Scripts:**
-   - Do **not** add Tailwind CDN (`cdn.tailwindcss.com`) or external icon/font scripts. Sandboxed preview panes and offline mobile environments in Osaka shops will block or hang on external runtime scripts.
-   - All styling uses embedded CSS custom properties (`:root`) and clean responsive CSS Grid/Flexbox.
+   - Do **not** add Tailwind CDN (`cdn.tailwindcss.com`) or external icon/font scripts. Sandboxed preview panes and offline mobile environments in shops will block or hang on external runtime scripts.
+   - All styling uses embedded CSS custom properties (`:root`) in `css/styles.css` and responsive CSS Grid/Flexbox.
 2. **Sandbox-Safe Storage Layer (`safeGetItem` / `safeSetItem`):**
    - `window.localStorage` calls are wrapped in `try/catch` with a fallback `memoryStore` object so sandboxed iframes never throw `SecurityError`.
 3. **Instant First Paint + Viewport Lazy Loading:**
-   - All 55 cards render immediately on load using offline data-URI Japanese Jewel Case + Obi Strip SVGs (`buildJewelCaseDataURI`).
+   - All loaded catalog cards render immediately on load using offline data-URI Japanese Jewel Case + Obi Strip SVGs (`buildJewelCaseDataURI`).
    - Official album jackets load asynchronously via `IntersectionObserver` (`rootMargin: '250px 0px'`) and a 3-worker concurrency queue (`MAX_WORKERS = 3`).
 4. **No Hotlinked Third-Party Image URLs:**
    - Do **not** hardcode URLs from VGMdb, Wikia/Fandom, or CDJapan—they aggressively block hotlinking or return wrong promo art (e.g., Steam game art instead of soundtrack CD jackets). Rely on the two-stage verified resolver or user-added custom variants.
@@ -39,15 +39,15 @@ When continuing development on `index.html` in Antigravity (`agy`), strictly mai
 
 ## 4. `localStorage` Schema Keys
 Storage keys are automatically derived per catalog (`cd_hunt_<slug>_<fnv1aHex>`) via `CDHunt.storage.deriveStoragePrefix(...)` from the catalog URL, local file name, or catalog title + item IDs so separate lists never collide:
-- `cd_hunt_catalog_url_v1`: Active normalized metadata JSON URL (restored automatically on next visit when `?catalog=` is not supplied).
-- `<derivedPrefix>_checklist_v2`: Object mapping `album.id` → `boolean` (e.g., `{ "cd-01": true }`) or compatible checklist array format. Tracks acquired physical CDs (`0 / 53` for Osaka) and saved digital tracks.
+- `cd_hunt_catalog_url_v1`: Active normalized metadata JSON file URL (restored automatically on next visit when `?catalog=` is not supplied).
+- `<derivedPrefix>_checklist_v2`: Object mapping `album.id` → `boolean` (e.g., `{ "cd-01": true }`) or compatible checklist array format. Tracks acquired physical CDs (`0 / N`, e.g., `0 / 53` for `2026-japan.json`) and saved digital tracks.
 - `<derivedPrefix>_cover_cache_v6`: Object mapping `album.id` → `{ variants: Array, selectedIndex: number }`. (Older `v1`–`v5` keys are automatically purged on startup).
 - `<derivedPrefix>_view_mode_v1`: `'grid'` or `'single'` (toggles between responsive multi-column cover grid and 1-column detailed card view).
 - `<derivedPrefix>_note_dismissed_v1`: `'1'` if the top digital-only reminder banner has been dismissed.
 
 ---
 
-## 5. Catalog Breakdown (53 Physical + 2 Digital-Only)
+## 5. Reference Catalog Breakdown (`cd-metadata/2026-japan.json`: 53 Physical + 2 Digital-Only)
 1. **Video Game Soundtracks (`cd-01` to `cd-02`):**
    - *Breath of Fire III OST* (`CPCA-1004`), *Breath of Fire IV OST* (`CPCA-1043~4` / `CPCA-1044`).
 2. **Anime Themes & Chara (`cd-03` to `cd-44`, including `cd-11b`):**

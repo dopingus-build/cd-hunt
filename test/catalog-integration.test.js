@@ -10,15 +10,15 @@ const ROOT_DIR = path.join(__dirname, '..');
 const HTML_PATH = path.join(ROOT_DIR, 'index.html');
 const LEGACY_HTML_PATH = path.join(ROOT_DIR, 'osaka_cd_cover_album.html');
 const CSS_PATH = path.join(ROOT_DIR, 'css', 'styles.css');
-const OSAKA_METADATA_PATH = path.join(ROOT_DIR, '..', 'cd-metadata', '2026-japan.json');
-const OSAKA_INDEX_PATH = path.join(ROOT_DIR, '..', 'cd-metadata', 'index.json');
+const EXTERNAL_METADATA_PATH = path.join(ROOT_DIR, '..', 'cd-metadata', '2026-japan.json');
+const EXTERNAL_INDEX_PATH = path.join(ROOT_DIR, '..', 'cd-metadata', 'index.json');
 const SAMPLE_CATALOG_PATH = path.join(ROOT_DIR, 'docs', 'sample-catalog.json');
 
 function getPresetTestFixtures() {
-  if (fs.existsSync(OSAKA_INDEX_PATH) && fs.existsSync(OSAKA_METADATA_PATH)) {
-    const catalogJson = JSON.parse(fs.readFileSync(OSAKA_METADATA_PATH, 'utf8'));
+  if (fs.existsSync(EXTERNAL_INDEX_PATH) && fs.existsSync(EXTERNAL_METADATA_PATH)) {
+    const catalogJson = JSON.parse(fs.readFileSync(EXTERNAL_METADATA_PATH, 'utf8'));
     return {
-      indexJson: JSON.parse(fs.readFileSync(OSAKA_INDEX_PATH, 'utf8')),
+      indexJson: JSON.parse(fs.readFileSync(EXTERNAL_INDEX_PATH, 'utf8')),
       catalogJson,
       expectedTitle: 'Osaka CD Cover Album',
       expectedPhysical: 53,
@@ -262,12 +262,12 @@ async function bootApp({
     fetch:
       fetchImpl ||
       (async (url) => {
-        if (String(url).endsWith('/index.json') && fs.existsSync(OSAKA_INDEX_PATH)) {
+        if (String(url).endsWith('/index.json') && fs.existsSync(EXTERNAL_INDEX_PATH)) {
           return {
             ok: true,
             status: 200,
             async json() {
-              return JSON.parse(fs.readFileSync(OSAKA_INDEX_PATH, 'utf8'));
+              return JSON.parse(fs.readFileSync(EXTERNAL_INDEX_PATH, 'utf8'));
             }
           };
         }

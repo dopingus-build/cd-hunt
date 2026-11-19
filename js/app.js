@@ -1,3 +1,7 @@
+/**
+ * @fileoverview Main CD Hunt application controller: catalog/repository loading,
+ * filtering, state persistence, lazy cover queueing, modals, and Crate Flip lightbox.
+ */
 (function () {
   'use strict';
 

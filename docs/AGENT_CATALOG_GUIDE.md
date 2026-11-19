@@ -211,7 +211,20 @@ curl -fsSL "https://itunes.apple.com/search?term=${QUERY}&country=jp&entity=song
    ```
 2. If you added a **new catalog file** in `cd-metadata/`:
    - Place the `.json` file at the **root** of `dopingus-build/cd-metadata` (keep the repo flat).
-   - Register it in `cd-metadata/index.json` under `catalogs` with `id`, `title`, `subtitle`, and `file` so it appears automatically in the app's **Preset Catalogs** list.
+   - Register it in `cd-metadata/index.json` under `catalogs` (with `id`, `title`, `subtitle`, and `file`, plus optional `url`) so it appears automatically in the app's **Preset Catalogs** list and whenever someone pastes `https://github.com/<owner>/<repo>` into CD Hunt:
+     ```json
+     {
+       "schemaVersion": 1,
+       "catalogs": [
+         {
+           "id": "2026-japan",
+           "title": "2026 Japan (Osaka) CD Hunt",
+           "subtitle": "53 physical CDs + 2 digital-only releases",
+           "file": "2026-japan.json"
+         }
+       ]
+     }
+     ```
 3. Run the `cd-hunt` test suite (`node --test test/*.test.js`). Note that when `../cd-metadata` exists locally, `test/catalog-integration.test.js` automatically validates all metadata JSON files and `index.json`.
 
 ---
