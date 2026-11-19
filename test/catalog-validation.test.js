@@ -7,12 +7,16 @@ const path = require('node:path');
 
 let validateCatalog = null;
 let normalizeCatalogUrl = null;
+let storageModule = null;
 let deriveStoragePrefix = null;
+let coverResolverModule = null;
 let loadError = null;
 
 try {
   ({ validateCatalog, normalizeCatalogUrl } = require('../js/validate.js'));
-  ({ deriveStoragePrefix } = require('../js/storage.js'));
+  storageModule = require('../js/storage.js');
+  ({ deriveStoragePrefix } = storageModule);
+  coverResolverModule = require('../js/cover-resolver.js');
 } catch (err) {
   loadError = err;
 }
@@ -198,11 +202,14 @@ describe('normalizeCatalogUrl helper', () => {
     );
   });
 
-  it('preserves already-raw and arbitrary JSON URLs', () => {
+  it('preserves already-raw and arbitrary JSON URLs and handles empty input', () => {
     const normalize = getNormalizer();
     const rawUrl = 'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json';
     assert.equal(normalize(rawUrl), rawUrl);
     assert.equal(normalize('https://example.com/catalog.json'), 'https://example.com/catalog.json');
+    assert.equal(normalize(''), '');
+    assert.equal(normalize(null), '');
+    assert.equal(normalize(undefined), '');
   });
 });
 
@@ -402,6 +409,11 @@ describe('categories array validation', () => {
     assert.ok(result.errors.some((e) => e.includes('All')));
   });
 
+  it('accepts an empty categories array for auto-derivation', () => {
+    const validate = getValidator();
+    assert.deepEqual(validate(makeValidCatalog({ categories: [] })), { valid: true, errors: [] });
+  });
+
   it('rejects item whose category is not in provided non-empty categories', () => {
     const validate = getValidator();
     const result = validate(
@@ -582,4 +594,484 @@ describe('items optional fields and cover resolution rules', () => {
       assert.ok(result.errors.some((e) => e.includes(domain)));
     });
   }
+
+  it('rejects non-object entries inside mbEditions', () => {
+    const validate = getValidator();
+    const resultNull = validate(
+      makeValidCatalog({
+        items: [makeValidItem({ mbEditions: [null] })]
+      })
+    );
+    assert.equal(resultNull.valid, false);
+    assert.ok(resultNull.errors.includes('items[0].mbEditions[0] must be an object'));
+
+    const resultStr = validate(
+      makeValidCatalog({
+        items: [makeValidItem({ mbEditions: ['ABCD-1001'] })]
+      })
+    );
+    assert.equal(resultStr.valid, false);
+    assert.ok(resultStr.errors.includes('items[0].mbEditions[0] must be an object'));
+  });
+});
+
+function withMockBrowserGlobals(overrides, fn) {
+  const saved = {
+    hasWindow: Object.prototype.hasOwnProperty.call(globalThis, 'window'),
+    window: globalThis.window,
+    hasImage: Object.prototype.hasOwnProperty.call(globalThis, 'Image'),
+    Image: globalThis.Image,
+    hasFetch: Object.prototype.hasOwnProperty.call(globalThis, 'fetch'),
+    fetch: globalThis.fetch,
+    hasSetTimeout: Object.prototype.hasOwnProperty.call(globalThis, 'setTimeout'),
+    setTimeout: globalThis.setTimeout
+  };
+  for (const [k, v] of Object.entries(overrides)) {
+    if (v === undefined) {
+      delete globalThis[k];
+    } else {
+      globalThis[k] = v;
+    }
+  }
+  const restore = () => {
+    for (const key of ['window', 'Image', 'fetch', 'setTimeout']) {
+      const flag = 'has' + key.charAt(0).toUpperCase() + key.slice(1);
+      if (saved[flag]) {
+        globalThis[key] = saved[key];
+      } else {
+        delete globalThis[key];
+      }
+    }
+  };
+  try {
+    const out = fn();
+    if (out && typeof out.then === 'function') {
+      return out.finally(restore);
+    }
+    restore();
+    return out;
+  } catch (err) {
+    restore();
+    throw err;
+  }
+}
+
+describe('Storage module unit tests (js/storage.js)', () => {
+  it('handles string, empty/undefined, non-alphanumeric title, and sparse item contexts in deriveStoragePrefix', () => {
+    assert.ifError(loadError);
+    const strPrefix = storageModule.deriveStoragePrefix('  My Custom Slug  ');
+    assert.match(strPrefix, /^cd_hunt_my_custom_slug_[0-9a-f]{8}$/);
+
+    const emptyPrefix = storageModule.deriveStoragePrefix();
+    const emptyObjPrefix = storageModule.deriveStoragePrefix({});
+    assert.match(emptyPrefix, /^cd_hunt_catalog_[0-9a-f]{8}$/);
+    assert.match(emptyObjPrefix, /^cd_hunt_catalog_[0-9a-f]{8}$/);
+    assert.notEqual(emptyPrefix, emptyObjPrefix);
+    assert.equal(emptyPrefix, storageModule.deriveStoragePrefix(null));
+
+    const jpOnlyTitlePrefix = storageModule.deriveStoragePrefix({
+      meta: { title: '日本語コレクション' },
+      items: [null, { id: 'cd-01' }, {}]
+    });
+    assert.match(jpOnlyTitlePrefix, /^cd_hunt_catalog_[0-9a-f]{8}$/);
+  });
+
+  it('derives all expected localStorage key names via getStorageKeys', () => {
+    const keys = storageModule.getStorageKeys({ fileName: 'tokyo.json', meta: { title: 'Tokyo Hunt' } });
+    assert.match(keys.prefix, /^cd_hunt_tokyo_hunt_[0-9a-f]{8}$/);
+    assert.equal(keys.checklistKey, keys.prefix + '_checklist_v2');
+    assert.equal(keys.coverCacheKey, keys.prefix + '_cover_cache_v6');
+    assert.equal(keys.viewModeKey, keys.prefix + '_view_mode_v1');
+    assert.equal(keys.noteDismissedKey, keys.prefix + '_note_dismissed_v1');
+  });
+
+  it('supports working window.localStorage and active catalog URL helpers', () => {
+    const store = new Map();
+    const mockLocalStorage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k)
+    };
+
+    withMockBrowserGlobals({ window: { localStorage: mockLocalStorage } }, () => {
+      storageModule.safeSetItem('test_k', 'val_1');
+      assert.equal(storageModule.safeGetItem('test_k'), 'val_1');
+      storageModule.safeRemoveItem('test_k');
+      assert.equal(storageModule.safeGetItem('test_k'), null);
+
+      storageModule.setActiveCatalogUrl('   ');
+      assert.equal(storageModule.getActiveCatalogUrl(), null);
+      storageModule.setActiveCatalogUrl('  https://example.com/list.json  ');
+      assert.equal(storageModule.getActiveCatalogUrl(), 'https://example.com/list.json');
+      storageModule.clearActiveCatalogUrl();
+      assert.equal(storageModule.getActiveCatalogUrl(), null);
+
+      const ctx = { fileName: 'purge-test.json' };
+      const prefix = storageModule.deriveStoragePrefix(ctx);
+      ['v1', 'v2', 'v3', 'v4', 'v5', 'v6'].forEach((v) => {
+        store.set(prefix + '_cover_cache_' + v, '{}');
+      });
+      storageModule.purgeLegacyCoverCaches(ctx);
+      ['v1', 'v2', 'v3', 'v4', 'v5'].forEach((v) => {
+        assert.equal(store.has(prefix + '_cover_cache_' + v), false);
+      });
+      assert.equal(store.has(prefix + '_cover_cache_v6'), true);
+    });
+  });
+
+  it('falls back to in-memory store when window.localStorage throws SecurityError', () => {
+    const throwingStorage = {
+      getItem() {
+        throw new Error('SecurityError');
+      },
+      setItem() {
+        throw new Error('SecurityError');
+      },
+      removeItem() {
+        throw new Error('SecurityError');
+      }
+    };
+
+    withMockBrowserGlobals({ window: { localStorage: throwingStorage } }, () => {
+      assert.equal(storageModule.safeGetItem('never_set_key'), null);
+      storageModule.safeSetItem('mem_only_key', 'fallback_val');
+      assert.equal(storageModule.safeGetItem('mem_only_key'), 'fallback_val');
+      storageModule.safeRemoveItem('mem_only_key');
+      assert.equal(storageModule.safeGetItem('mem_only_key'), null);
+    });
+  });
+});
+
+describe('Cover resolver unit tests (js/cover-resolver.js)', () => {
+  it('escapes HTML and attribute strings safely', () => {
+    assert.ifError(loadError);
+    assert.equal(coverResolverModule.escapeHTML('A & <"B">'), 'A &amp; &lt;&quot;B&quot;&gt;');
+    assert.equal(coverResolverModule.escapeHTML(null), '');
+    assert.equal(coverResolverModule.escapeAttr(`"a' & 'b"`), '&quot;a&#39; &amp; &#39;b&quot;');
+    assert.equal(coverResolverModule.escapeAttr(undefined), '');
+  });
+
+  it('generates SVG jewel-case data URIs for physical, digital, and minimal fallback items', () => {
+    const uri = coverResolverModule.buildJewelCaseDataURI({
+      accent: '#3b82f6',
+      regCatNo: 'SRCL-12539 (通常盤)',
+      artistJa: 'VeryLongJapaneseArtistNameThatExceeds22Chars',
+      titleJa: 'VeryLongJapaneseReleaseTitleExceeding24Chars',
+      kana: 'ヤ / Y',
+      price: '¥500–¥900',
+      digitalOnly: false
+    });
+    assert.ok(uri.startsWith('data:image/svg+xml;charset=UTF-8,'));
+    const svg = decodeURIComponent(uri.slice('data:image/svg+xml;charset=UTF-8,'.length));
+    assert.ok(svg.includes('#3b82f6'));
+    assert.ok(svg.includes('SRCL-12539'));
+    assert.ok(svg.includes('通常盤'));
+    assert.ok(svg.includes('VeryLongJapaneseArtist'));
+    assert.equal(svg.includes('VeryLongJapaneseArtistName'), false);
+
+    const digUri = coverResolverModule.buildJewelCaseDataURI({
+      artist: 'Artist & <Co>',
+      title: 'Digital Track',
+      digitalOnly: true
+    });
+    const digSvg = decodeURIComponent(digUri.slice('data:image/svg+xml;charset=UTF-8,'.length));
+    assert.ok(digSvg.includes('#e11d48'));
+    assert.ok(digSvg.includes('>N<'));
+    assert.ok(digSvg.includes('配信限定'));
+    assert.ok(digSvg.includes('Artist &amp; &lt;Co&gt;'));
+
+    const blankUri = coverResolverModule.buildJewelCaseDataURI({});
+    assert.ok(blankUri.startsWith('data:image/svg+xml;charset=UTF-8,'));
+  });
+
+  it('classifies iTunes edition strings with Regular priority', () => {
+    assert.deepEqual(coverResolverModule.classifyItunesEdition('Any Album', true), {
+      label: '配信 Digital',
+      isRegular: true,
+      score: 100
+    });
+    assert.equal(coverResolverModule.classifyItunesEdition('Title (通常盤)', false).score, 120);
+    assert.equal(coverResolverModule.classifyItunesEdition('Title - Regular Edition', false).score, 120);
+    assert.equal(coverResolverModule.classifyItunesEdition('Title Standard', false).score, 120);
+    assert.equal(coverResolverModule.classifyItunesEdition('Plain Album Title', false).score, 100);
+    assert.deepEqual(coverResolverModule.classifyItunesEdition('Title (期間生産限定盤)', false), {
+      label: 'アニメ盤 Anime',
+      isRegular: false,
+      score: 50
+    });
+    assert.equal(coverResolverModule.classifyItunesEdition('Title Anime Ver.', false).score, 50);
+    assert.deepEqual(coverResolverModule.classifyItunesEdition('Title (初回生産限定盤 DVD付)', false), {
+      label: '初回盤 Limited',
+      isRegular: false,
+      score: 40
+    });
+    assert.equal(coverResolverModule.classifyItunesEdition('Title Deluxe', false).score, 40);
+    assert.equal(coverResolverModule.classifyItunesEdition("Collector's Edition", false).score, 80);
+  });
+
+  it('verifies image dimensions, errors, missing Image constructor, and timeouts in verifyImageLoad', async () => {
+    const missing = await withMockBrowserGlobals({ Image: undefined }, () =>
+      coverResolverModule.verifyImageLoad('https://example.com/a.jpg')
+    );
+    assert.equal(missing, false);
+
+    class GoodImage {
+      set src(_val) {
+        this.naturalWidth = 500;
+        this.naturalHeight = 500;
+        if (this.onload) this.onload();
+      }
+    }
+    const ok = await withMockBrowserGlobals({ Image: GoodImage }, () =>
+      coverResolverModule.verifyImageLoad('https://example.com/good.jpg')
+    );
+    assert.equal(ok, true);
+
+    class TinyImage {
+      set src(_val) {
+        this.naturalWidth = 40;
+        this.naturalHeight = 500;
+        if (this.onload) this.onload();
+      }
+    }
+    const tooSmall = await withMockBrowserGlobals({ Image: TinyImage }, () =>
+      coverResolverModule.verifyImageLoad('https://example.com/tiny.jpg')
+    );
+    assert.equal(tooSmall, false);
+
+    class ErrorImage {
+      set src(_val) {
+        if (this.onerror) this.onerror();
+      }
+    }
+    const errored = await withMockBrowserGlobals({ Image: ErrorImage }, () =>
+      coverResolverModule.verifyImageLoad('https://example.com/err.jpg')
+    );
+    assert.equal(errored, false);
+
+    class HangingImage {
+      set src(_val) {}
+    }
+    const timedOut = await withMockBrowserGlobals(
+      {
+        Image: HangingImage,
+        setTimeout: (cb) => {
+          cb();
+          return 1;
+        }
+      },
+      () => coverResolverModule.verifyImageLoad('https://example.com/hang.jpg')
+    );
+    assert.equal(timedOut, false);
+  });
+
+  it('resolves and deduplicates MusicBrainz Cover Art Archive variants while tolerating errors', async () => {
+    const noFetch = await withMockBrowserGlobals({ fetch: undefined }, () =>
+      coverResolverModule.tryMusicBrainzCovers({ mbEditions: [{ catno: 'A-1', label: 'Reg' }] })
+    );
+    assert.deepEqual(noFetch, []);
+
+    const requestedUrls = [];
+    class SelectableImage {
+      set src(url) {
+        if (url.includes('rel-fail')) {
+          this.naturalWidth = 0;
+          this.naturalHeight = 0;
+          if (this.onerror) this.onerror();
+          return;
+        }
+        this.naturalWidth = 500;
+        this.naturalHeight = 500;
+        if (this.onload) this.onload();
+      }
+    }
+
+    const mockFetch = async (url) => {
+      requestedUrls.push(url);
+      if (url.includes('catno:THROW')) throw new Error('network error');
+      if (url.includes('catno:HTTP500')) return { ok: false, status: 500 };
+      if (url.includes('catno:SRCL-1')) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              releases: [null, { id: 'rel-fail' }, { id: 'rel-reg' }, { id: 'rel-extra' }]
+            };
+          }
+        };
+      }
+      if (url.includes('catno:SRCL-REG')) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              releases: [{ id: 'rel-by-regcat', title: 'Reg' }]
+            };
+          }
+        };
+      }
+      if (url.includes('catno:SRCL-2')) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              releases: [{ id: 'rel-reg' }, { id: 'rel-ltd' }]
+            };
+          }
+        };
+      }
+      return { ok: true, async json() { return {}; } };
+    };
+
+    const variants = await withMockBrowserGlobals({ fetch: mockFetch, Image: SelectableImage }, () =>
+      coverResolverModule.tryMusicBrainzCovers({
+        regCatNo: 'SRCL-REG',
+        mbEditions: [
+          null,
+          { catno: '' },
+          { catno: 'THROW', label: 'Throw' },
+          { catno: 'HTTP500', label: 'Fail' },
+          { catno: 'SRCL-1' },
+          { catno: 'SRCL-REG', label: 'Standard Disc' },
+          { catno: 'SRCL-2', label: '通常盤 Regular' }
+        ]
+      })
+    );
+
+    assert.equal(requestedUrls.some((u) => u.includes('SRCL-1')), true);
+    assert.deepEqual(variants, [
+      {
+        url: 'https://coverartarchive.org/release/rel-reg/front-500',
+        label: '通常盤 Regular',
+        catNo: 'SRCL-1',
+        source: 'musicbrainz',
+        isRegular: false
+      },
+      {
+        url: 'https://coverartarchive.org/release/rel-by-regcat/front-500',
+        label: 'Standard Disc',
+        catNo: 'SRCL-REG',
+        source: 'musicbrainz',
+        isRegular: true
+      },
+      {
+        url: 'https://coverartarchive.org/release/rel-ltd/front-500',
+        label: '通常盤 Regular',
+        catNo: 'SRCL-2',
+        source: 'musicbrainz',
+        isRegular: true
+      }
+    ]);
+  });
+
+  it('resolves, validates with requiredGroups, caps at 6, and sorts Apple iTunes covers', async () => {
+    const emptyNoQuery = await withMockBrowserGlobals({ fetch: async () => ({}) }, () =>
+      coverResolverModule.tryItunesCovers({ id: 'x' })
+    );
+    assert.deepEqual(emptyNoQuery, []);
+
+    const emptyNoFetch = await withMockBrowserGlobals({ fetch: undefined }, () =>
+      coverResolverModule.tryItunesCovers({ itunesQuery: 'test' })
+    );
+    assert.deepEqual(emptyNoFetch, []);
+
+    class MockArtImage {
+      set src(url) {
+        if (url.includes('broken')) {
+          if (this.onerror) this.onerror();
+          return;
+        }
+        this.naturalWidth = 600;
+        this.naturalHeight = 600;
+        if (this.onload) this.onload();
+      }
+    }
+
+    const queriedUrls = [];
+    const mockFetch = async (url) => {
+      queriedUrls.push(url);
+      if (url.includes('country=jp') && url.includes('entity=album')) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              results: [
+                { trackName: 'Unrelated', collectionName: 'Other', artistName: 'Nobody', artworkUrl100: 'https://ex.com/0/100x100bb.jpg' },
+                { trackName: 'slash', collectionName: 'slash (初回限定盤)', artistName: 'yama', artworkUrl100: 'https://ex.com/1/100x100bb.jpg' },
+                { trackName: 'slash', collectionName: 'slash (通常盤)', artistName: 'yama', artworkUrl100: 'https://ex.com/2/100x100bb.jpg' },
+                { trackName: 'slash', collectionName: 'slash (通常盤)', artistName: 'yama', artworkUrl100: 'https://ex.com/2/100x100bb.jpg' },
+                { trackName: 'slash', collectionName: 'slash (Broken)', artistName: 'yama', artworkUrl100: 'https://ex.com/broken/100x100bb.jpg' },
+                { trackName: 'slash', collectionName: 'slash (アニメ盤)', artistName: 'yama', artworkUrl100: 'https://ex.com/3/100x100bb.jpg' },
+                { trackName: 'slash', collectionName: 'slash', artistName: 'yama', artworkUrl100: 'https://ex.com/4/100x100bb.jpg' },
+                { trackName: 'slash', collectionName: 'slash Standard', artistName: 'yama', artworkUrl100: 'https://ex.com/5/100x100bb.jpg' }
+              ]
+            };
+          }
+        };
+      }
+      if (url.includes('country=us') && url.includes('entity=album')) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              results: [
+                { trackName: 'slash', collectionName: 'slash Regular', artistName: 'yama', artworkUrl100: 'https://ex.com/6/100x100bb.jpg' },
+                { trackName: 'slash', collectionName: 'slash Extra', artistName: 'yama', artworkUrl100: 'https://ex.com/7/100x100bb.jpg' }
+              ]
+            };
+          }
+        };
+      }
+      return { ok: false, status: 500 };
+    };
+
+    const physicalResults = await withMockBrowserGlobals({ fetch: mockFetch, Image: MockArtImage }, () =>
+      coverResolverModule.tryItunesCovers({
+        regCatNo: 'SRCL-12539',
+        itunesQuery: 'slash yama',
+        requiredGroups: [['slash'], ['yama']]
+      })
+    );
+
+    assert.equal(physicalResults.length, 6);
+    assert.equal(physicalResults[0].url, 'https://ex.com/2/600x600bb.jpg');
+    assert.equal(physicalResults[0].source, 'itunes-jp');
+    assert.equal(physicalResults[0].catNo, 'SRCL-12539');
+    assert.equal(physicalResults[0].isRegular, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(physicalResults[0], 'score'), false);
+    assert.equal(physicalResults[physicalResults.length - 1].label, '初回盤 Limited');
+    assert.equal(physicalResults[physicalResults.length - 1].catNo, '');
+
+    const digitalFetch = async (url) => {
+      if (url.includes('entity=song') && url.includes('country=jp')) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              results: [
+                { trackName: 'DigSong', collectionName: 'DigSingle', artistName: 'DigArtist', artworkUrl100: 'https://ex.com/dig/100x100bb.jpg' }
+              ]
+            };
+          }
+        };
+      }
+      throw new Error('skip');
+    };
+    const digitalResults = await withMockBrowserGlobals({ fetch: digitalFetch, Image: MockArtImage }, () =>
+      coverResolverModule.tryItunesCovers({
+        digitalOnly: true,
+        itunesQuery: 'DigSong DigArtist',
+        requiredGroups: [['digsong'], ['digartist']]
+      })
+    );
+    assert.deepEqual(digitalResults, [
+      {
+        url: 'https://ex.com/dig/600x600bb.jpg',
+        label: '配信 Digital',
+        catNo: '',
+        source: 'itunes-jp',
+        isRegular: true
+      }
+    ]);
+  });
 });
