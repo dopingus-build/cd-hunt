@@ -2,7 +2,7 @@
 
 A mobile-first, zero-dependency web application for hunting physical CDs/vinyl and tracking checklists across stores, hosted as a static site on GitHub Pages (`https://dopingus-build.github.io/cd-hunt/`).
 
-Catalog metadata lives separately in the flat public repository [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata) (with `index.json` listing available preset catalogs such as `2026-japan.json`). Any user can load a preset, paste a public metadata JSON URL (GitHub `blob` URLs are auto-converted to `raw.githubusercontent.com`), or upload a local `.json` file from their device.
+Catalog metadata lives separately in the flat public repository [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata) (with `index.json` listing available preset catalogs such as `2026-japan.json`). Any user can load a preset, paste either a direct metadata JSON file URL (GitHub `blob` URLs are auto-converted to `raw.githubusercontent.com`) or a GitHub metadata repository URL (`https://github.com/<owner>/<repo>` to load its `index.json`), or upload a local `.json` file from their device.
 
 ## Project Structure
 
@@ -35,7 +35,7 @@ cd-hunt/
 ## Using Your Own Metadata
 
 1. Create a JSON file with `"schemaVersion": 1` following [`docs/METADATA.md`](./docs/METADATA.md) and [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json) (see [`docs/sample-catalog.json`](./docs/sample-catalog.json) as a template; if using an LLM or coding agent, point it to [`docs/AGENT_CATALOG_GUIDE.md`](./docs/AGENT_CATALOG_GUIDE.md)).
-2. Open the app (`index.html`), paste your URL (`https://github.com/<owner>/<repo>/blob/...` or `raw.githubusercontent.com`) or load a local `.json` file directly.
+2. Open the app (`index.html`), paste either a direct file URL (`https://github.com/<owner>/<repo>/blob/...` or `raw.githubusercontent.com`) or a GitHub repository URL (`https://github.com/<owner>/<repo>` containing an `index.json`), or load a local `.json` file directly.
 3. For URL-loaded catalogs, your active URL is saved in `localStorage` (`cd_hunt_catalog_url_v1`), synced to `?catalog=`, and shareable via **Copy Share Link**. Progress keys are automatically derived per catalog so separate lists never collide.
 
 ## Running Tests

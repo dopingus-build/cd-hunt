@@ -8,11 +8,11 @@ This document specifies the versioned schema, loading rules, and cover-resolutio
 
 `index.html` (via `js/app.js`) separates UI logic from catalog data and resolves the catalog in the following order:
 
-1. **Custom JSON URL (`?catalog=<url>`):** Fetches and loads the JSON file from the URL query parameter. Standard GitHub `https://github.com/<owner>/<repo>/blob/<ref>/<path>` URLs are automatically converted to `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>`.
+1. **Custom JSON or Repository URL (`?catalog=<url>`):** Fetches and loads the JSON file or repository `index.json` from the URL query parameter. Standard GitHub `https://github.com/<owner>/<repo>/blob/<ref>/<path>` URLs are automatically converted to `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>`, and bare repository URLs (`https://github.com/<owner>/<repo>` or `/tree/<branch>`) resolve to that repository's `index.json` so its presets can be picked directly.
 2. **Saved Catalog URL (`localStorage` key `cd_hunt_catalog_url_v1`):** If no `?catalog=` parameter is present, reloads the previously selected URL catalog automatically.
 3. **Catalog Loader Screen:** On first visit (with no `?catalog=` or saved URL), displays the interactive Catalog Loader where users can:
    - Pick a dynamic preset fetched from [`dopingus-build/cd-metadata/index.json`](https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/index.json),
-   - Paste any public JSON URL (with a **Copy Share Link** button to share `?catalog=<url>`), or
+   - Paste any public metadata JSON URL or GitHub metadata repository URL (`https://github.com/<owner>/<repo>`, with a **Copy Share Link** button once a catalog is loaded to share `?catalog=<url>`), or
    - Load a local `.json` file directly from their device.
 
 > **Note:** External catalog JSON files (such as `2026-japan.json` in `dopingus-build/cd-metadata` or [`docs/sample-catalog.json`](./sample-catalog.json)) conform to [`schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json) (`schemaVersion: 1`) and are validated at load time by `js/validate.js`.

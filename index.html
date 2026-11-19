@@ -87,7 +87,7 @@
           <span class="tag-sky">CATALOG LOADER</span>
           <h2 style="margin:6px 0 4px; font-size:18px; font-weight:800;">Load CD Hunt Metadata</h2>
           <p style="margin:0; font-size:12.5px; color:var(--text-muted);">
-            Paste a URL to a public metadata JSON file (GitHub <code>blob</code> URLs are automatically converted to <code>raw.githubusercontent.com</code>), pick a preset below, or load a local JSON file.
+            Paste a URL to a public metadata JSON file or a GitHub metadata repository (GitHub <code>blob</code>, <code>tree</code>, and repository URLs are automatically resolved to <code>raw.githubusercontent.com</code>), pick a preset below, or load a local JSON file.
           </p>
         </div>
         <button id="closeCatalogLoaderBtn" type="button" class="btn hidden">Cancel</button>
@@ -99,7 +99,7 @@
           class="search-input"
           style="padding-left:12px;"
           type="url"
-          placeholder="https://github.com/owner/repo/blob/main/catalog.json"
+          placeholder="https://github.com/owner/cd-metadata or .../blob/main/catalog.json"
         />
         <input id="catalogFileInput" type="file" accept=".json,application/json" class="hidden" />
         <div class="catalog-loader-actions">

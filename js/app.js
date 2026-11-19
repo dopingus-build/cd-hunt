@@ -40,6 +40,8 @@
   let activeCatalogLabel = null;
   let presetsPromise = null;
   let presetsLoaded = false;
+  let activeMetadataBaseUrl = METADATA_RAW_BASE_URL;
+  let customRepoLoaded = false;
 
   function deriveCategories(items) {
     const cats = [{ key: 'All', label: 'All Releases', dot: '#a1a1aa' }];
@@ -126,9 +128,10 @@
     banner.textContent = '';
   }
 
-  function renderCatalogPresets(catalogs) {
+  function renderCatalogPresets(catalogs, baseUrl) {
     const listEl = document.getElementById('catalogPresetsList');
     if (!listEl) return;
+    const resolvedBase = baseUrl || activeMetadataBaseUrl || METADATA_RAW_BASE_URL;
 
     if (!Array.isArray(catalogs) || catalogs.length === 0) {
       listEl.innerHTML = '<span class="preset-sub">No presets found in index.json — paste a URL or load a local JSON file.</span>';
@@ -138,7 +141,7 @@
     listEl.innerHTML = catalogs.map(function (entry) {
       const presetUrl = entry.url
         ? normalizeCatalogUrl(entry.url)
-        : METADATA_RAW_BASE_URL + String(entry.file || '').replace(/^\/+/, '');
+        : resolvedBase + String(entry.file || '').replace(/^\/+/, '');
       const title = entry.title || entry.id || entry.file || 'Catalog';
       const subtitle = entry.subtitle || presetUrl;
       return (
@@ -151,7 +154,7 @@
   }
 
   function loadCatalogPresets() {
-    if (presetsLoaded) return Promise.resolve();
+    if (presetsLoaded || customRepoLoaded) return Promise.resolve();
     if (presetsPromise) return presetsPromise;
 
     const listEl = document.getElementById('catalogPresetsList');
@@ -164,11 +167,12 @@
         const res = await fetch(METADATA_INDEX_URL);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const indexData = await res.json();
+        if (customRepoLoaded) return;
         const list = indexData && Array.isArray(indexData.catalogs) ? indexData.catalogs : [];
         presetsLoaded = true;
-        renderCatalogPresets(list);
+        renderCatalogPresets(list, activeMetadataBaseUrl);
       } catch (err) {
-        if (listEl) {
+        if (!customRepoLoaded && listEl) {
           listEl.innerHTML = '<span class="preset-sub">Presets unavailable offline — paste a URL or load a local JSON file.</span>';
         }
       } finally {
@@ -317,18 +321,42 @@
     renderAll();
   }
 
+  function isCatalogIndex(data) {
+    return Boolean(
+      data &&
+      typeof data === 'object' &&
+      !Array.isArray(data) &&
+      Array.isArray(data.catalogs) &&
+      !Array.isArray(data.items)
+    );
+  }
+
   async function loadAndApplyCatalogFromUrl(rawUrl) {
     const normalizedUrl = normalizeCatalogUrl(rawUrl);
     if (!normalizedUrl) {
-      throw new Error('Please enter a valid metadata JSON URL.');
+      throw new Error('Please enter a valid metadata JSON or repository URL.');
     }
 
     const res = await fetch(normalizedUrl);
     if (!res.ok) {
       throw new Error('Failed to load catalog from ' + normalizedUrl + ' (HTTP ' + res.status + ')');
     }
-    const catalog = await res.json();
-    applyValidatedCatalog(catalog, { sourceUrl: normalizedUrl });
+    const data = await res.json();
+    if (isCatalogIndex(data)) {
+      const baseUrl = normalizedUrl.replace(/\/[^/]*$/, '/');
+      activeMetadataBaseUrl = baseUrl;
+      customRepoLoaded = true;
+      presetsLoaded = true;
+      activeCatalogLabel = 'Loaded repository index: ' + normalizedUrl;
+      clearErrorBanner();
+      showCatalogLoader(true);
+      const urlInput = document.getElementById('catalogUrlInput');
+      if (urlInput) urlInput.value = normalizedUrl;
+      renderCatalogPresets(data.catalogs, baseUrl);
+      return { type: 'index', url: normalizedUrl, catalogs: data.catalogs };
+    }
+    applyValidatedCatalog(data, { sourceUrl: normalizedUrl });
+    return { type: 'catalog', url: normalizedUrl };
   }
 
   const state = {
@@ -962,8 +990,12 @@
   function bindEvents() {
     async function submitCatalogUrl(rawUrl) {
       try {
-        await loadAndApplyCatalogFromUrl(rawUrl);
-        showToast('Catalog loaded successfully');
+        const res = await loadAndApplyCatalogFromUrl(rawUrl);
+        if (res && res.type === 'index') {
+          showToast('Repository presets loaded (' + res.catalogs.length + ')');
+        } else {
+          showToast('Catalog loaded successfully');
+        }
       } catch (err) {
         showErrorBanner('App Initialization Error: ' + (err && err.message ? err.message : String(err)));
         showCatalogLoader(true);

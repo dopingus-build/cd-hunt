@@ -277,7 +277,8 @@
   }
 
   /**
-   * Normalize a catalog metadata URL, converting GitHub blob/raw URLs to raw.githubusercontent.com.
+   * Normalize a catalog metadata URL, converting GitHub blob/raw, tree, or repository root URLs
+   * to raw.githubusercontent.com URLs.
    * @param {string} rawUrl
    * @returns {string}
    */
@@ -288,7 +289,19 @@
       /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:blob|raw)\/([^?#]+?)(?:[?#].*)?$/i
     );
     if (match) {
-      return 'https://raw.githubusercontent.com/' + match[1] + '/' + match[2] + '/' + match[3];
+      return 'https://raw.githubusercontent.com/' + match[1] + '/' + match[2].replace(/\.git$/i, '') + '/' + match[3];
+    }
+    const treeMatch = trimmed.match(
+      /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^?#]+?)\/?(?:[?#].*)?$/i
+    );
+    if (treeMatch) {
+      return 'https://raw.githubusercontent.com/' + treeMatch[1] + '/' + treeMatch[2].replace(/\.git$/i, '') + '/' + treeMatch[3].replace(/\/+$/, '') + '/index.json';
+    }
+    const repoMatch = trimmed.match(
+      /^https?:\/\/github\.com\/([^/]+)\/([^/?#]+?)(?:\.git)?\/?(?:[?#].*)?$/i
+    );
+    if (repoMatch) {
+      return 'https://raw.githubusercontent.com/' + repoMatch[1] + '/' + repoMatch[2].replace(/\.git$/i, '') + '/main/index.json';
     }
     return trimmed;
   }

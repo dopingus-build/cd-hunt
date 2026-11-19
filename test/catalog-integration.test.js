@@ -572,6 +572,64 @@ describe('Catalog Loader screen, dynamic presets, local file picker, and share l
     assert.equal(app.elements.get('brandTitle').textContent, 'Tokyo Vinyl & CD Hunt');
     assert.equal(app.elements.get('progressBadge').textContent, '0 / 1');
   });
+
+  it('loads index.json from a bare GitHub repository URL and resolves its presets cleanly', async () => {
+    const aliceCatalog = makeValidRemoteCatalog();
+    aliceCatalog.meta.title = 'Alice Osaka Hunt';
+    const aliceIndex = {
+      schemaVersion: 1,
+      catalogs: [
+        {
+          id: 'alice-list',
+          title: 'Alice Wishlist',
+          subtitle: '1 physical CD',
+          file: 'alice-list.json'
+        }
+      ]
+    };
+    const fetchedUrls = [];
+
+    const app = await bootApp({
+      fetchImpl: async (url) => {
+        fetchedUrls.push(url);
+        if (url === 'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/index.json') {
+          return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+        }
+        if (url === 'https://raw.githubusercontent.com/alice/my-cd-metadata/main/index.json') {
+          return { ok: true, status: 200, async json() { return aliceIndex; } };
+        }
+        if (url === 'https://raw.githubusercontent.com/alice/my-cd-metadata/main/alice-list.json') {
+          return { ok: true, status: 200, async json() { return aliceCatalog; } };
+        }
+        throw new Error('Unexpected fetch URL: ' + url);
+      }
+    });
+
+    app.elements.get('catalogUrlInput').value = 'https://github.com/alice/my-cd-metadata';
+    await app.clickElement('loadCatalogUrlBtn');
+
+    const expectedIndexUrl = 'https://raw.githubusercontent.com/alice/my-cd-metadata/main/index.json';
+    const expectedCatalogUrl = 'https://raw.githubusercontent.com/alice/my-cd-metadata/main/alice-list.json';
+    assert.ok(fetchedUrls.includes(expectedIndexUrl));
+    assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), false);
+    assert.equal(app.elements.get('activeCatalogInfo').textContent, 'Loaded repository index: ' + expectedIndexUrl);
+
+    const presetsHtml = app.elements.get('catalogPresetsList').innerHTML;
+    assert.ok(presetsHtml.includes('Alice Wishlist'));
+    assert.ok(presetsHtml.includes(expectedCatalogUrl));
+
+    app.triggerDocumentClick('load-preset', {
+      'data-preset-url': expectedCatalogUrl
+    });
+    await app.flush();
+
+    assert.ok(fetchedUrls.includes(expectedCatalogUrl));
+    assert.equal(app.localStorage.getItem('cd_hunt_catalog_url_v1'), expectedCatalogUrl);
+    assert.ok(app.historyUpdates.some((u) => u.includes(encodeURIComponent(expectedCatalogUrl))));
+    assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), true);
+    assert.equal(app.elements.get('brandTitle').textContent, 'Alice Osaka Hunt');
+    assert.equal(app.elements.get('progressBadge').textContent, '0 / 1');
+  });
 });
 
 describe('Invalid catalog rejection on startup', () => {

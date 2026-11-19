@@ -174,6 +174,30 @@ describe('normalizeCatalogUrl helper', () => {
     );
   });
 
+  it('converts bare GitHub repository and branch tree URLs to raw index.json URLs', () => {
+    const normalize = getNormalizer();
+    assert.equal(
+      normalize('https://github.com/owner/cd-metadata'),
+      'https://raw.githubusercontent.com/owner/cd-metadata/main/index.json'
+    );
+    assert.equal(
+      normalize('https://github.com/owner/cd-metadata/'),
+      'https://raw.githubusercontent.com/owner/cd-metadata/main/index.json'
+    );
+    assert.equal(
+      normalize('https://github.com/owner/cd-metadata.git?tab=readme-ov-file#readme'),
+      'https://raw.githubusercontent.com/owner/cd-metadata/main/index.json'
+    );
+    assert.equal(
+      normalize('https://github.com/owner/cd-metadata/tree/dev'),
+      'https://raw.githubusercontent.com/owner/cd-metadata/dev/index.json'
+    );
+    assert.equal(
+      normalize('https://github.com/owner/cd-metadata/tree/feature/v2/'),
+      'https://raw.githubusercontent.com/owner/cd-metadata/feature/v2/index.json'
+    );
+  });
+
   it('preserves already-raw and arbitrary JSON URLs', () => {
     const normalize = getNormalizer();
     const rawUrl = 'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json';
