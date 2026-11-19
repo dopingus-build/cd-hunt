@@ -43,12 +43,60 @@
     }
   }
 
+  function fnv1aHex(str) {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      hash ^= str.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+  }
+
   /**
-   * Derive namespaced localStorage keys for a catalog prefix.
-   * @param {string} [storagePrefix]
+   * Deterministically derive a unique, readable localStorage prefix from catalog context.
+   * @param {string | { sourceUrl?: string, fileName?: string, meta?: object, items?: Array }} [context]
+   * @returns {string}
    */
-  function getStorageKeys(storagePrefix) {
-    const prefix = String(storagePrefix || 'osaka_cd').replace(/[^a-zA-Z0-9_-]/g, '_');
+  function deriveStoragePrefix(context) {
+    let identity = 'default';
+    let slugSource = 'catalog';
+
+    if (typeof context === 'string' && context.trim().length > 0) {
+      identity = context.trim();
+      slugSource = identity;
+    } else if (context && typeof context === 'object') {
+      const sourceUrl = context.sourceUrl ? String(context.sourceUrl).trim() : '';
+      const fileName = context.fileName ? String(context.fileName).trim() : '';
+      const title = context.meta && context.meta.title ? String(context.meta.title).trim() : '';
+      const itemIds = Array.isArray(context.items)
+        ? context.items.map(function (i) { return (i && i.id) || ''; }).join(',')
+        : '';
+
+      if (sourceUrl) {
+        identity = 'url:' + sourceUrl;
+      } else if (fileName) {
+        identity = 'file:' + fileName;
+      } else {
+        identity = 'inline:' + title + ':' + itemIds;
+      }
+      slugSource = title || fileName || sourceUrl || 'catalog';
+    }
+
+    const slug = slugSource
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 20) || 'catalog';
+
+    return 'cd_hunt_' + slug + '_' + fnv1aHex(identity);
+  }
+
+  /**
+   * Derive namespaced localStorage keys for a catalog context.
+   * @param {string | { sourceUrl?: string, fileName?: string, meta?: object, items?: Array }} [context]
+   */
+  function getStorageKeys(context) {
+    const prefix = deriveStoragePrefix(context);
     return {
       prefix: prefix,
       checklistKey: prefix + '_checklist_v2',
@@ -59,11 +107,11 @@
   }
 
   /**
-   * Remove legacy v1-v5 cover cache entries for the active storage prefix.
-   * @param {string} [storagePrefix]
+   * Remove legacy v1-v5 cover cache entries for the active storage context.
+   * @param {string | { sourceUrl?: string, fileName?: string, meta?: object, items?: Array }} [context]
    */
-  function purgeLegacyCoverCaches(storagePrefix) {
-    const prefix = String(storagePrefix || 'osaka_cd').replace(/[^a-zA-Z0-9_-]/g, '_');
+  function purgeLegacyCoverCaches(context) {
+    const prefix = deriveStoragePrefix(context);
     ['v1', 'v2', 'v3', 'v4', 'v5'].forEach(function (ver) {
       safeRemoveItem(prefix + '_cover_cache_' + ver);
     });
@@ -103,6 +151,7 @@
     safeGetItem: safeGetItem,
     safeSetItem: safeSetItem,
     safeRemoveItem: safeRemoveItem,
+    deriveStoragePrefix: deriveStoragePrefix,
     getStorageKeys: getStorageKeys,
     purgeLegacyCoverCaches: purgeLegacyCoverCaches,
     getActiveCatalogUrl: getActiveCatalogUrl,

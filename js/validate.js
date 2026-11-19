@@ -1,11 +1,12 @@
 (function (root) {
   'use strict';
 
+  const SUPPORTED_SCHEMA_VERSION = 1;
+
   const META_STRING_FIELDS = [
     'title',
     'subtitle',
     'documentTitle',
-    'storagePrefix',
     'searchPlaceholder',
     'digitalSectionTitle',
     'digitalSectionSubtitle'
@@ -79,15 +80,15 @@
       return;
     }
 
+    if (meta.storagePrefix !== undefined) {
+      errors.push('meta.storagePrefix is no longer supported; storage prefix is always derived automatically');
+    }
+
     for (let i = 0; i < META_STRING_FIELDS.length; i++) {
       const field = META_STRING_FIELDS[i];
       if (meta[field] !== undefined && typeof meta[field] !== 'string') {
         errors.push('meta.' + field + ' must be a string');
       }
-    }
-
-    if (typeof meta.storagePrefix === 'string' && meta.storagePrefix.trim().length === 0) {
-      errors.push('meta.storagePrefix must not be empty or whitespace-only');
     }
   }
 
@@ -243,6 +244,18 @@
 
     if (!isPlainObject(catalog)) {
       return { valid: false, errors: ['Catalog root must be a non-null plain object'] };
+    }
+
+    if (catalog.$schema !== undefined && !isNonEmptyString(catalog.$schema)) {
+      errors.push('$schema must be a non-empty string when provided');
+    }
+
+    if (catalog.schemaVersion === undefined) {
+      errors.push('schemaVersion is required and must be integer ' + SUPPORTED_SCHEMA_VERSION);
+    } else if (!Number.isInteger(catalog.schemaVersion)) {
+      errors.push('schemaVersion must be an integer');
+    } else if (catalog.schemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+      errors.push('Unsupported schemaVersion ' + catalog.schemaVersion + '; expected ' + SUPPORTED_SCHEMA_VERSION);
     }
 
     validateMeta(catalog.meta, errors);

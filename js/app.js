@@ -13,7 +13,8 @@
     throw new Error('Required CDHunt modules (storage, coverResolver) are not loaded.');
   }
 
-  const DEFAULT_OSAKA_CATALOG_URL = 'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json';
+  const METADATA_RAW_BASE_URL = 'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/';
+  const METADATA_INDEX_URL = METADATA_RAW_BASE_URL + 'index.json';
 
   const safeGetItem = storage.safeGetItem;
   const safeSetItem = storage.safeSetItem;
@@ -25,16 +26,20 @@
   const tryMusicBrainzCovers = coverResolver.tryMusicBrainzCovers;
   const tryItunesCovers = coverResolver.tryItunesCovers;
 
-  let CHECKLIST_KEY = 'osaka_cd_checklist_v2';
-  let COVER_CACHE_KEY = 'osaka_cd_cover_cache_v6';
-  let VIEW_MODE_KEY = 'osaka_cd_view_mode_v1';
-  let NOTE_DISMISSED_KEY = 'osaka_cd_note_dismissed_v1';
+  let CHECKLIST_KEY = 'cd_hunt_default_checklist_v2';
+  let COVER_CACHE_KEY = 'cd_hunt_default_cover_cache_v6';
+  let VIEW_MODE_KEY = 'cd_hunt_default_view_mode_v1';
+  let NOTE_DISMISSED_KEY = 'cd_hunt_default_note_dismissed_v1';
 
   let ALBUMS = [];
   let CATEGORIES = [];
   let CATALOG_META = {};
+  let ACTIVE_STORAGE_CONTEXT = {};
   let hasLoadedCatalog = false;
   let activeCatalogUrl = null;
+  let activeCatalogLabel = null;
+  let presetsPromise = null;
+  let presetsLoaded = false;
 
   function deriveCategories(items) {
     const cats = [{ key: 'All', label: 'All Releases', dot: '#a1a1aa' }];
@@ -55,7 +60,7 @@
     return cats;
   }
 
-  function applyCatalogData(catalog) {
+  function applyCatalogData(catalog, sourceContext) {
     const data = catalog && typeof catalog === 'object' ? catalog : {};
     CATALOG_META = data.meta && typeof data.meta === 'object' ? data.meta : {};
     ALBUMS = Array.isArray(data.items) ? data.items : [];
@@ -63,7 +68,14 @@
       ? data.categories
       : deriveCategories(ALBUMS);
 
-    const keys = storage.getStorageKeys(CATALOG_META.storagePrefix);
+    ACTIVE_STORAGE_CONTEXT = {
+      sourceUrl: sourceContext && sourceContext.sourceUrl ? sourceContext.sourceUrl : '',
+      fileName: sourceContext && sourceContext.fileName ? sourceContext.fileName : '',
+      meta: CATALOG_META,
+      items: ALBUMS
+    };
+
+    const keys = storage.getStorageKeys(ACTIVE_STORAGE_CONTEXT);
     CHECKLIST_KEY = keys.checklistKey;
     COVER_CACHE_KEY = keys.coverCacheKey;
     VIEW_MODE_KEY = keys.viewModeKey;
@@ -114,6 +126,59 @@
     banner.textContent = '';
   }
 
+  function renderCatalogPresets(catalogs) {
+    const listEl = document.getElementById('catalogPresetsList');
+    if (!listEl) return;
+
+    if (!Array.isArray(catalogs) || catalogs.length === 0) {
+      listEl.innerHTML = '<span class="preset-sub">No presets found in index.json — paste a URL or load a local JSON file.</span>';
+      return;
+    }
+
+    listEl.innerHTML = catalogs.map(function (entry) {
+      const presetUrl = entry.url
+        ? normalizeCatalogUrl(entry.url)
+        : METADATA_RAW_BASE_URL + String(entry.file || '').replace(/^\/+/, '');
+      const title = entry.title || entry.id || entry.file || 'Catalog';
+      const subtitle = entry.subtitle || presetUrl;
+      return (
+        '<button type="button" class="btn preset-btn" data-action="load-preset" data-preset-url="' + escapeAttr(presetUrl) + '" data-preset-id="' + escapeAttr(entry.id || '') + '">' +
+          '<span>' + escapeHTML(title) + '</span>' +
+          '<span class="preset-sub">' + escapeHTML(subtitle) + '</span>' +
+        '</button>'
+      );
+    }).join('');
+  }
+
+  function loadCatalogPresets() {
+    if (presetsLoaded) return Promise.resolve();
+    if (presetsPromise) return presetsPromise;
+
+    const listEl = document.getElementById('catalogPresetsList');
+    if (listEl && !listEl.innerHTML) {
+      listEl.innerHTML = '<span class="preset-sub">Loading presets from cd-metadata...</span>';
+    }
+
+    presetsPromise = (async function () {
+      try {
+        const res = await fetch(METADATA_INDEX_URL);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const indexData = await res.json();
+        const list = indexData && Array.isArray(indexData.catalogs) ? indexData.catalogs : [];
+        presetsLoaded = true;
+        renderCatalogPresets(list);
+      } catch (err) {
+        if (listEl) {
+          listEl.innerHTML = '<span class="preset-sub">Presets unavailable offline — paste a URL or load a local JSON file.</span>';
+        }
+      } finally {
+        presetsPromise = null;
+      }
+    })();
+
+    return presetsPromise;
+  }
+
   function showCatalogLoader(visible) {
     const loader = document.getElementById('catalogLoaderScreen');
     if (!loader) return;
@@ -124,6 +189,7 @@
     const digSection = document.getElementById('digitalOnlySection');
     const emptyBox = document.getElementById('emptyState');
     const closeBtn = document.getElementById('closeCatalogLoaderBtn');
+    const shareBtn = document.getElementById('copyShareLinkBtn');
     const urlInput = document.getElementById('catalogUrlInput');
     const infoEl = document.getElementById('activeCatalogInfo');
 
@@ -135,18 +201,20 @@
       if (digSection) digSection.classList.add('hidden');
       if (emptyBox) emptyBox.classList.add('hidden');
       if (closeBtn) closeBtn.classList.toggle('hidden', !hasLoadedCatalog);
-      if (urlInput && activeCatalogUrl) {
-        urlInput.value = activeCatalogUrl;
+      if (shareBtn) shareBtn.classList.toggle('hidden', !activeCatalogUrl);
+      if (urlInput) {
+        urlInput.value = activeCatalogUrl || '';
       }
       if (infoEl) {
-        if (activeCatalogUrl) {
+        if (activeCatalogLabel) {
           infoEl.classList.remove('hidden');
-          infoEl.textContent = 'Active catalog URL: ' + activeCatalogUrl;
+          infoEl.textContent = activeCatalogLabel;
         } else {
           infoEl.classList.add('hidden');
           infoEl.textContent = '';
         }
       }
+      loadCatalogPresets();
     } else {
       loader.classList.add('hidden');
       const hasDigital = ALBUMS.some(function (a) { return !!a.digitalOnly; });
@@ -187,13 +255,66 @@
     try {
       if (window.history && typeof window.history.replaceState === 'function' && window.location) {
         const params = new URLSearchParams(window.location.search || '');
-        params.set('catalog', catalogUrl);
+        if (catalogUrl) {
+          params.set('catalog', catalogUrl);
+        } else {
+          params.delete('catalog');
+        }
         const basePath = window.location.pathname || '';
-        window.history.replaceState(null, '', basePath + '?' + params.toString());
+        const queryStr = params.toString();
+        window.history.replaceState(null, '', queryStr ? basePath + '?' + queryStr : basePath);
       }
     } catch (e) {
       // Ignore sandboxed history errors
     }
+  }
+
+  function buildShareUrl(catalogUrl) {
+    const origin = window.location && window.location.origin && window.location.origin !== 'null'
+      ? window.location.origin
+      : '';
+    const pathname = (window.location && window.location.pathname) || '';
+    return origin + pathname + '?catalog=' + encodeURIComponent(catalogUrl);
+  }
+
+  function applyValidatedCatalog(catalog, options) {
+    const opts = options || {};
+    if (typeof validateCatalog === 'function') {
+      const validation = validateCatalog(catalog);
+      if (!validation.valid) {
+        throw new Error('Catalog validation failed: ' + validation.errors.join('; '));
+      }
+    }
+
+    clearErrorBanner();
+
+    if (opts.sourceUrl) {
+      activeCatalogUrl = opts.sourceUrl;
+      activeCatalogLabel = 'Active catalog URL: ' + opts.sourceUrl;
+      if (typeof storage.setActiveCatalogUrl === 'function') {
+        storage.setActiveCatalogUrl(opts.sourceUrl);
+      }
+      syncQueryParamUrl(opts.sourceUrl);
+    } else if (opts.fileName) {
+      activeCatalogUrl = null;
+      activeCatalogLabel = 'Active local file: ' + opts.fileName;
+      if (typeof storage.clearActiveCatalogUrl === 'function') {
+        storage.clearActiveCatalogUrl();
+      }
+      syncQueryParamUrl(null);
+    } else {
+      activeCatalogUrl = null;
+      activeCatalogLabel = null;
+    }
+
+    resetAppStateForCatalog();
+    applyCatalogData(catalog, opts);
+    loadStateFromStorage();
+    document.getElementById('viewModeLabel').textContent = state.viewMode === 'single' ? 'Grid View' : '1-Col View';
+    hasLoadedCatalog = true;
+    showCatalogLoader(false);
+    renderCategoryPills();
+    renderAll();
   }
 
   async function loadAndApplyCatalogFromUrl(rawUrl) {
@@ -207,28 +328,7 @@
       throw new Error('Failed to load catalog from ' + normalizedUrl + ' (HTTP ' + res.status + ')');
     }
     const catalog = await res.json();
-    if (typeof validateCatalog === 'function') {
-      const validation = validateCatalog(catalog);
-      if (!validation.valid) {
-        throw new Error('Catalog validation failed: ' + validation.errors.join('; '));
-      }
-    }
-
-    clearErrorBanner();
-    activeCatalogUrl = normalizedUrl;
-    if (typeof storage.setActiveCatalogUrl === 'function') {
-      storage.setActiveCatalogUrl(normalizedUrl);
-    }
-    syncQueryParamUrl(normalizedUrl);
-
-    resetAppStateForCatalog();
-    applyCatalogData(catalog);
-    loadStateFromStorage();
-    document.getElementById('viewModeLabel').textContent = state.viewMode === 'single' ? 'Grid View' : '1-Col View';
-    hasLoadedCatalog = true;
-    showCatalogLoader(false);
-    renderCategoryPills();
-    renderAll();
+    applyValidatedCatalog(catalog, { sourceUrl: normalizedUrl });
   }
 
   const state = {
@@ -261,7 +361,7 @@
   }
 
   function loadStateFromStorage() {
-    storage.purgeLegacyCoverCaches(CATALOG_META.storagePrefix);
+    storage.purgeLegacyCoverCaches(ACTIVE_STORAGE_CONTEXT);
 
     const savedView = safeGetItem(VIEW_MODE_KEY);
     if (savedView === 'single' || savedView === 'grid') {
@@ -833,6 +933,17 @@
   }
 
   function copyText(text) {
+    if (window.navigator && window.navigator.clipboard && typeof window.navigator.clipboard.writeText === 'function') {
+      window.navigator.clipboard.writeText(text).then(
+        function () { showToast('Copied: ' + text); },
+        function () { fallbackCopyText(text); }
+      );
+      return;
+    }
+    fallbackCopyText(text);
+  }
+
+  function fallbackCopyText(text) {
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.position = 'fixed';
@@ -849,12 +960,28 @@
   }
 
   function bindEvents() {
+    async function submitCatalogUrl(rawUrl) {
+      try {
+        await loadAndApplyCatalogFromUrl(rawUrl);
+        showToast('Catalog loaded successfully');
+      } catch (err) {
+        showErrorBanner('App Initialization Error: ' + (err && err.message ? err.message : String(err)));
+        showCatalogLoader(true);
+      }
+    }
+
     document.addEventListener('click', function (e) {
       const target = e.target.closest('[data-action]');
       if (!target) return;
       const action = target.getAttribute('data-action');
 
-      if (action === 'set-cat') {
+      if (action === 'load-preset') {
+        e.stopPropagation();
+        const presetUrl = target.getAttribute('data-preset-url');
+        const urlInput = document.getElementById('catalogUrlInput');
+        if (urlInput && presetUrl) urlInput.value = presetUrl;
+        submitCatalogUrl(presetUrl);
+      } else if (action === 'set-cat') {
         e.stopPropagation();
         state.category = target.getAttribute('data-cat') || 'All';
         renderCategoryPills();
@@ -1086,16 +1213,6 @@
     }, { passive: true });
 
     // Catalog Metadata Loader Controls
-    async function submitCatalogUrl(rawUrl) {
-      try {
-        await loadAndApplyCatalogFromUrl(rawUrl);
-        showToast('Catalog loaded successfully');
-      } catch (err) {
-        showErrorBanner('App Initialization Error: ' + (err && err.message ? err.message : String(err)));
-        showCatalogLoader(true);
-      }
-    }
-
     const openLoaderBtn = document.getElementById('openCatalogLoaderBtn');
     if (openLoaderBtn) {
       openLoaderBtn.addEventListener('click', function () {
@@ -1127,12 +1244,42 @@
       });
     }
 
-    const presetOsakaBtn = document.getElementById('loadPresetOsakaBtn');
-    if (presetOsakaBtn) {
-      presetOsakaBtn.addEventListener('click', function () {
-        const presetUrl = presetOsakaBtn.getAttribute('data-preset-url') || DEFAULT_OSAKA_CATALOG_URL;
-        if (urlInput) urlInput.value = presetUrl;
-        submitCatalogUrl(presetUrl);
+    const loadFileBtn = document.getElementById('loadCatalogFileBtn');
+    const fileInput = document.getElementById('catalogFileInput');
+    if (loadFileBtn && fileInput) {
+      loadFileBtn.addEventListener('click', function () {
+        fileInput.click();
+      });
+      fileInput.addEventListener('change', async function (e) {
+        const files = (e && e.target && e.target.files) || fileInput.files;
+        const file = files && files[0];
+        if (!file) return;
+        try {
+          const text = typeof file.text === 'function'
+            ? await file.text()
+            : await new Promise(function (resolve, reject) {
+                const reader = new FileReader();
+                reader.onload = function () { resolve(String(reader.result || '')); };
+                reader.onerror = function () { reject(new Error('Failed to read file')); };
+                reader.readAsText(file);
+              });
+          const parsed = JSON.parse(text);
+          applyValidatedCatalog(parsed, { fileName: file.name || 'local-catalog.json' });
+          showToast('Loaded local file: ' + (file.name || 'catalog.json'));
+        } catch (err) {
+          showErrorBanner('App Initialization Error: ' + (err && err.message ? err.message : String(err)));
+          showCatalogLoader(true);
+        } finally {
+          fileInput.value = '';
+        }
+      });
+    }
+
+    const shareBtn = document.getElementById('copyShareLinkBtn');
+    if (shareBtn) {
+      shareBtn.addEventListener('click', function () {
+        if (!activeCatalogUrl) return;
+        copyText(buildShareUrl(activeCatalogUrl));
       });
     }
   }
@@ -1150,20 +1297,7 @@
       if (initialUrl) {
         await loadAndApplyCatalogFromUrl(initialUrl);
       } else if (window.CD_HUNT_CATALOG) {
-        const catalog = window.CD_HUNT_CATALOG;
-        if (typeof validateCatalog === 'function') {
-          const validation = validateCatalog(catalog);
-          if (!validation.valid) {
-            throw new Error('Catalog validation failed: ' + validation.errors.join('; '));
-          }
-        }
-        applyCatalogData(catalog);
-        loadStateFromStorage();
-        document.getElementById('viewModeLabel').textContent = state.viewMode === 'single' ? 'Grid View' : '1-Col View';
-        hasLoadedCatalog = true;
-        showCatalogLoader(false);
-        renderCategoryPills();
-        renderAll();
+        applyValidatedCatalog(window.CD_HUNT_CATALOG, {});
       } else {
         showCatalogLoader(true);
       }

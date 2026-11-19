@@ -4,14 +4,15 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
 
 let validateCatalog = null;
 let normalizeCatalogUrl = null;
+let deriveStoragePrefix = null;
 let loadError = null;
 
 try {
   ({ validateCatalog, normalizeCatalogUrl } = require('../js/validate.js'));
+  ({ deriveStoragePrefix } = require('../js/storage.js'));
 } catch (err) {
   loadError = err;
 }
@@ -26,6 +27,12 @@ function getNormalizer() {
   assert.ifError(loadError);
   assert.equal(typeof normalizeCatalogUrl, 'function', 'js/validate.js must export a normalizeCatalogUrl function');
   return normalizeCatalogUrl;
+}
+
+function getPrefixDeriver() {
+  assert.ifError(loadError);
+  assert.equal(typeof deriveStoragePrefix, 'function', 'js/storage.js must export deriveStoragePrefix');
+  return deriveStoragePrefix;
 }
 
 function makeValidItem(overrides = {}) {
@@ -54,11 +61,12 @@ function makeValidItem(overrides = {}) {
 function makeValidCatalog(overrides = {}) {
   return Object.assign(
     {
+      $schema: 'https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json',
+      schemaVersion: 1,
       meta: {
         title: 'Test CD Cover Album',
         subtitle: 'Crate Browser (通常盤 Priority)',
         documentTitle: 'Test CD Cover Album & Checklist',
-        storagePrefix: 'test_cd',
         searchPlaceholder: 'Search artist or catalog...',
         digitalSectionTitle: 'Digital-Only Releases',
         digitalSectionSubtitle: 'No physical CD exists.'
@@ -73,31 +81,75 @@ function makeValidCatalog(overrides = {}) {
   );
 }
 
-describe('Catalog validation module export', () => {
-  it('exports validateCatalog and normalizeCatalogUrl from ../js/validate.js', () => {
+describe('Catalog validation & storage module exports', () => {
+  it('exports validateCatalog, normalizeCatalogUrl, and deriveStoragePrefix', () => {
     getValidator();
     getNormalizer();
+    getPrefixDeriver();
+  });
+});
+
+describe('Versioned JSON Schema (schemas/catalog.v1.schema.json)', () => {
+  it('exists, parses cleanly, and enforces schemaVersion: 1 and no storagePrefix', () => {
+    const schemaPath = path.join(__dirname, '..', 'schemas', 'catalog.v1.schema.json');
+    const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
+    assert.equal(schema.$id, 'https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json');
+    assert.deepEqual(schema.required, ['schemaVersion', 'items']);
+    assert.equal(schema.properties.schemaVersion.const, 1);
+    assert.equal(schema.properties.meta.additionalProperties, false);
+    assert.equal(schema.properties.meta.properties.storagePrefix, undefined);
   });
 });
 
 describe('Sample catalog (docs/sample-catalog.json)', () => {
-  it('passes validation with zero errors', () => {
+  it('passes validation with zero errors and declares schemaVersion: 1', () => {
     const validate = getValidator();
     const samplePath = path.join(__dirname, '..', 'docs', 'sample-catalog.json');
     const data = JSON.parse(fs.readFileSync(samplePath, 'utf8'));
+    assert.equal(data.schemaVersion, 1);
+    assert.equal(data.$schema, 'https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json');
+    assert.equal(data.meta.storagePrefix, undefined);
     assert.deepEqual(validate(data), { valid: true, errors: [] });
   });
 });
 
-describe('External metadata catalog (cd-metadata/2026-japan.json)', () => {
-  it('passes validation with zero errors when sibling cd-metadata repo is present', () => {
+describe('External metadata repository (cd-metadata)', () => {
+  it('validates 2026-japan.json and index.json when sibling cd-metadata repo is present', () => {
     const validate = getValidator();
     const osakaPath = path.join(__dirname, '..', '..', 'cd-metadata', '2026-japan.json');
+    const indexPath = path.join(__dirname, '..', '..', 'cd-metadata', 'index.json');
     if (!fs.existsSync(osakaPath)) return;
+
     const data = JSON.parse(fs.readFileSync(osakaPath, 'utf8'));
+    assert.equal(data.schemaVersion, 1);
+    assert.equal(data.$schema, 'https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json');
+    assert.equal(data.meta.storagePrefix, undefined);
     assert.deepEqual(validate(data), { valid: true, errors: [] });
     assert.equal(data.items.filter((i) => !i.digitalOnly).length, 53);
     assert.equal(data.items.filter((i) => !!i.digitalOnly).length, 2);
+
+    const indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    assert.equal(indexData.schemaVersion, 1);
+    assert.ok(Array.isArray(indexData.catalogs));
+    assert.ok(indexData.catalogs.some((c) => c.file === '2026-japan.json'));
+  });
+});
+
+describe('deriveStoragePrefix uniqueness & determinism', () => {
+  it('derives deterministic unique prefixes for distinct URLs, filenames, and inline catalogs', () => {
+    const derive = getPrefixDeriver();
+    const urlA = derive({ sourceUrl: 'https://raw.githubusercontent.com/alice/cds/main/japan.json', meta: { title: 'Japan CD Hunt' } });
+    const urlB = derive({ sourceUrl: 'https://raw.githubusercontent.com/bob/cds/main/japan.json', meta: { title: 'Japan CD Hunt' } });
+    const fileA = derive({ fileName: 'list-a.json', meta: { title: 'My Hunt' } });
+    const fileB = derive({ fileName: 'list-b.json', meta: { title: 'My Hunt' } });
+    const inlineA = derive({ meta: { title: 'Shared Title' }, items: [{ id: 'cd-01' }] });
+    const inlineB = derive({ meta: { title: 'Shared Title' }, items: [{ id: 'cd-02' }] });
+
+    assert.match(urlA, /^cd_hunt_[a-z0-9_]+_[0-9a-f]{8}$/);
+    assert.equal(urlA, derive({ sourceUrl: 'https://raw.githubusercontent.com/alice/cds/main/japan.json', meta: { title: 'Japan CD Hunt' } }));
+    assert.notEqual(urlA, urlB);
+    assert.notEqual(fileA, fileB);
+    assert.notEqual(inlineA, inlineB);
   });
 });
 
@@ -176,11 +228,49 @@ describe('Top-level structure validation', () => {
     assert.deepEqual(result, { valid: true, errors: [] });
   });
 
-  it('accepts a valid catalog when optional meta and categories are omitted', () => {
+  it('accepts a valid catalog when optional $schema, meta, and categories are omitted', () => {
     const validate = getValidator();
-    const result = validate({ items: [makeValidItem()] });
+    const result = validate({ schemaVersion: 1, items: [makeValidItem()] });
     assert.deepEqual(result, { valid: true, errors: [] });
   });
+});
+
+describe('schemaVersion and $schema validation', () => {
+  it('rejects missing schemaVersion', () => {
+    const validate = getValidator();
+    const catalog = makeValidCatalog();
+    delete catalog.schemaVersion;
+    const result = validate(catalog);
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some((e) => e.includes('schemaVersion')));
+  });
+
+  for (const [label, badVer] of [
+    ['string', '1'],
+    ['float', 1.5],
+    ['null', null],
+    ['unsupported version 2', 2],
+    ['unsupported version 0', 0]
+  ]) {
+    it(`rejects invalid schemaVersion (${label})`, () => {
+      const validate = getValidator();
+      const result = validate(makeValidCatalog({ schemaVersion: badVer }));
+      assert.equal(result.valid, false);
+      assert.ok(result.errors.some((e) => e.includes('schemaVersion')));
+    });
+  }
+
+  for (const [label, badSchema] of [
+    ['empty string', '   '],
+    ['number', 123]
+  ]) {
+    it(`rejects invalid $schema (${label})`, () => {
+      const validate = getValidator();
+      const result = validate(makeValidCatalog({ $schema: badSchema }));
+      assert.equal(result.valid, false);
+      assert.ok(result.errors.some((e) => e.includes('$schema')));
+    });
+  }
 });
 
 describe('meta object validation', () => {
@@ -201,7 +291,6 @@ describe('meta object validation', () => {
     'title',
     'subtitle',
     'documentTitle',
-    'storagePrefix',
     'searchPlaceholder',
     'digitalSectionTitle',
     'digitalSectionSubtitle'
@@ -216,16 +305,14 @@ describe('meta object validation', () => {
     });
   }
 
-  for (const badPrefix of ['', '   ']) {
-    it(`rejects empty/whitespace-only meta.storagePrefix (${JSON.stringify(badPrefix)})`, () => {
-      const validate = getValidator();
-      const catalog = makeValidCatalog();
-      catalog.meta.storagePrefix = badPrefix;
-      const result = validate(catalog);
-      assert.equal(result.valid, false);
-      assert.ok(result.errors.some((e) => e.includes('storagePrefix')));
-    });
-  }
+  it('rejects deprecated meta.storagePrefix', () => {
+    const validate = getValidator();
+    const catalog = makeValidCatalog();
+    catalog.meta.storagePrefix = 'custom_prefix';
+    const result = validate(catalog);
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some((e) => e.includes('storagePrefix')));
+  });
 });
 
 describe('categories array validation', () => {

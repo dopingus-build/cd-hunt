@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json",
+  "title": "CD Hunt Catalog Schema v1",
+  "description": "Schema for external JSON catalog files loaded by CD Hunt.",
+  "type": "object",
+  "required": ["schemaVersion", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional URI pointing to the catalog JSON Schema."
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Catalog metadata schema version marker. Must be 1."
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string" },
+        "subtitle": { "type": "string" },
+        "documentTitle": { "type": "string" },
+        "searchPlaceholder": { "type": "string" },
+        "digitalSectionTitle": { "type": "string" },
+        "digitalSectionSubtitle": { "type": "string" }
+      }
+    },
+    "categories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "label", "dot"],
+        "additionalProperties": false,
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "label": { "type": "string", "minLength": 1 },
+          "dot": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "category",
+          "artist",
+          "title",
+          "catalog",
+          "kana",
+          "filing",
+          "price"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]+$"
+          },
+          "category": { "type": "string", "minLength": 1 },
+          "digitalOnly": { "type": "boolean" },
+          "artist": { "type": "string", "minLength": 1 },
+          "artistJa": { "type": "string" },
+          "title": { "type": "string", "minLength": 1 },
+          "titleJa": { "type": "string" },
+          "regCatNo": { "type": "string" },
+          "catalog": { "type": "string", "minLength": 1 },
+          "mbEditions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["catno"],
+              "properties": {
+                "catno": { "type": "string", "minLength": 1 },
+                "label": { "type": "string" }
+              }
+            }
+          },
+          "kana": { "type": "string", "minLength": 1 },
+          "filing": { "type": "string", "minLength": 1 },
+          "price": { "type": "string" },
+          "itunesQuery": { "type": "string" },
+          "requiredGroups": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "accent": { "type": "string" }
+        }
+      }
+    }
+  }
+}

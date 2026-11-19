@@ -1,18 +1,21 @@
 # Catalog Metadata Structure & Requirements
 
-This document specifies the schema, loading rules, and cover-resolution requirements for creating or customizing a CD/music hunt catalog for `osaka_cd_cover_album.html`.
+This document specifies the versioned schema, loading rules, and cover-resolution requirements for creating or customizing a CD/music hunt catalog for `index.html`.
 
 ---
 
 ## Loading Modes
 
-`osaka_cd_cover_album.html` (via `js/app.js`) separates UI logic from catalog data and resolves the catalog in the following order:
+`index.html` (via `js/app.js`) separates UI logic from catalog data and resolves the catalog in the following order:
 
 1. **Custom JSON URL (`?catalog=<url>`):** Fetches and loads the JSON file from the URL query parameter. Standard GitHub `https://github.com/<owner>/<repo>/blob/<ref>/<path>` URLs are automatically converted to `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>`.
-2. **Saved Catalog URL (`localStorage` key `cd_hunt_catalog_url_v1`):** If no `?catalog=` parameter is present, reloads the previously selected catalog URL automatically.
-3. **Catalog Loader Screen:** On first visit (with no `?catalog=` or saved URL), displays the interactive Catalog Loader where users can paste any public JSON URL or click the quick-select button for `https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json`. Once loaded, the URL is persisted to `localStorage` and synced to `?catalog=`.
+2. **Saved Catalog URL (`localStorage` key `cd_hunt_catalog_url_v1`):** If no `?catalog=` parameter is present, reloads the previously selected URL catalog automatically.
+3. **Catalog Loader Screen:** On first visit (with no `?catalog=` or saved URL), displays the interactive Catalog Loader where users can:
+   - Pick a dynamic preset fetched from [`dopingus-build/cd-metadata/index.json`](https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/index.json),
+   - Paste any public JSON URL (with a **Copy Share Link** button to share `?catalog=<url>`), or
+   - Load a local `.json` file directly from their device.
 
-> **Note:** External catalog JSON files (such as `2026-japan.json` in `dopingus-build/cd-metadata` or [`docs/sample-catalog.json`](./sample-catalog.json)) share the exact schema below and are validated at load time by `js/validate.js`.
+> **Note:** External catalog JSON files (such as `2026-japan.json` in `dopingus-build/cd-metadata` or [`docs/sample-catalog.json`](./sample-catalog.json)) conform to [`schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json) (`schemaVersion: 1`) and are validated at load time by `js/validate.js`.
 
 ---
 
@@ -20,6 +23,8 @@ This document specifies the schema, loading rules, and cover-resolution requirem
 
 ```json
 {
+  "$schema": "https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json",
+  "schemaVersion": 1,
   "meta": { },
   "categories": [ ],
   "items": [ ]
@@ -28,34 +33,35 @@ This document specifies the schema, loading rules, and cover-resolution requirem
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `meta` | `Object` | Optional (recommended) | App branding, labels, and `localStorage` namespace prefix. |
+| `$schema` | `string` | Optional (recommended) | URI pointing to [`https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json) for editor autocomplete & validation. |
+| `schemaVersion` | `integer` | **Required** | Version marker for the catalog format. Must be `1`. |
+| `meta` | `Object` | Optional (recommended) | App branding and UI labels. |
 | `categories` | `Array<Object>` | Optional | Ordered list of filter pills shown in the header. Auto-derived from `items[].category` if omitted or empty. |
 | `items` | `Array<Object>` | **Required** | Array of release objects (physical CDs and optional digital-only tracks). |
 
 ---
 
-## 1. `meta` Object (Branding & Storage Configuration)
+## 1. `meta` Object (Branding & Labels)
 
-All `meta` fields are optional strings; if omitted, the HTML defaults apply.
+All `meta` fields are optional strings; if omitted, the HTML defaults apply. (`meta.storagePrefix` is disallowed — storage keys are always derived automatically to guarantee uniqueness.)
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `title` | `string` | `"Osaka CD Cover Album"` | Main `<h1>` header title (`#brandTitle`). |
-| `subtitle` | `string` | `"Crate Browser (通常盤 Priority)"` | Subtitle displayed beneath the header title (`#brandSub`). |
-| `documentTitle` | `string` | `"Osaka CD Cover Album & Checklist"` | Browser tab `<title>`. |
-| `storagePrefix` | `string` | `"osaka_cd"` | Namespace prefix for `localStorage` keys. Sanitized via `.replace(/[^a-zA-Z0-9_-]/g, '_')`. |
+| `title` | `string` | `"CD Hunt"` | Main `<h1>` header title (`#brandTitle`). |
+| `subtitle` | `string` | `"Cover Album & Crate Checklist (通常盤 Priority)"` | Subtitle displayed beneath the header title (`#brandSub`). |
+| `documentTitle` | `string` | `"CD Hunt — Cover Album & Checklist"` | Browser tab `<title>`. |
 | `searchPlaceholder` | `string` | HTML placeholder | Placeholder text for `#searchInput`. |
 | `digitalSectionTitle` | `string` | `"Digital-Only Releases (Skip Physical Hunting)"` | Heading for `#digitalOnlySection`. |
 | `digitalSectionSubtitle` | `string` | `"No physical CD exists in stores — excluded from the physical hunting counter."` | Subtitle for `#digitalOnlySection`. |
 
 ### `localStorage` Namespacing
 
-Using `storagePrefix` prevents progress and cached covers from colliding across different hunts hosted on the same domain:
+`js/storage.js` (`deriveStoragePrefix`) automatically derives a unique, deterministic `<prefix>` (`cd_hunt_<slug>_<fnv1aHex>`) from the catalog's source URL, local file name, or title + item IDs so separate catalogs never collide:
 
-- `<storagePrefix>_checklist_v2` — Map of `{ [item.id]: boolean }` tracking acquired/saved items.
-- `<storagePrefix>_cover_cache_v6` — Map of `{ [item.id]: { variants, selectedIndex } }` storing resolved cover art variants.
-- `<storagePrefix>_view_mode_v1` — `'grid'` or `'single'`.
-- `<storagePrefix>_note_dismissed_v1` — `'1'` when the digital-only reminder banner is dismissed.
+- `<prefix>_checklist_v2` — Map of `{ [item.id]: boolean }` tracking acquired/saved items.
+- `<prefix>_cover_cache_v6` — Map of `{ [item.id]: { variants, selectedIndex } }` storing resolved cover art variants.
+- `<prefix>_view_mode_v1` — `'grid'` or `'single'`.
+- `<prefix>_note_dismissed_v1` — `'1'` when the digital-only reminder banner is dismissed.
 
 ---
 
@@ -151,11 +157,12 @@ See [`sample-catalog.json`](./sample-catalog.json) for a ready-to-use JSON file,
 
 ```json
 {
+  "$schema": "https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json",
+  "schemaVersion": 1,
   "meta": {
     "title": "Tokyo Vinyl & CD Hunt",
     "subtitle": "Disk Union & Recofan Checklist",
     "documentTitle": "Tokyo Hunt Checklist",
-    "storagePrefix": "tokyo_hunt",
     "searchPlaceholder": "Search artist, title, or catalog #..."
   },
   "items": [

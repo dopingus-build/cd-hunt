@@ -1,17 +1,17 @@
-# Osaka CD Shopping Checklist & Cover Album — Project Handover
+# CD Hunt Shopping Checklist & Cover Album — Project Handover
 
 ## 1. Project Overview & Goal
-This project is a mobile-first, offline-capable web application (`osaka_cd_cover_album.html`) and companion Google Sheet designed for hunting used Japanese CDs in person across Osaka (e.g., Mandarake, Suruga-ya, Book Off, Disk Union in Nipponbashi, Namba, and Umeda).
+This project is a mobile-first, zero-dependency web application (`index.html`) designed for hunting used CDs in person across stores (e.g., Mandarake, Suruga-ya, Book Off, Disk Union in Nipponbashi, Namba, and Umeda).
 
-- **Primary Artifact:** `osaka_cd_cover_album.html` (Zero-dependency HTML shell linking `css/styles.css` and modular JS in `js/`; `index.html` redirects to it for GitHub Pages alongside `.nojekyll`).
-- **Catalog Data & Metadata:** Stored externally in [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata) as flat root-level JSON files (Osaka list: `2026-japan.json`). On first load without `?catalog=` or a saved URL, the app shows the Catalog Loader screen where users can paste any public metadata URL (with auto `blob` → `raw` conversion) or click the `2026-japan.json` preset. See [`METADATA.md`](./METADATA.md), [`sample-catalog.json`](./sample-catalog.json), and [`js/validate.js`](../js/validate.js).
+- **Primary Artifact:** `index.html` (Zero-dependency HTML shell linking `css/styles.css` and modular JS in `js/`; hosted directly on GitHub Pages alongside `.nojekyll`).
+- **Catalog Data & Metadata:** Stored externally in [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata) as flat root-level JSON files (`index.json` + `2026-japan.json`). On first load without `?catalog=` or a saved URL, the app shows the Catalog Loader screen where users can pick a dynamic preset from `cd-metadata/index.json`, paste any public metadata URL (with auto `blob` → `raw` conversion), or load a local `.json` file. See [`METADATA.md`](./METADATA.md), [`schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json), [`sample-catalog.json`](./sample-catalog.json), and [`js/validate.js`](../js/validate.js).
 - **Master Google Sheet:** [Osaka CD Shopping Checklist](https://docs.google.com/spreadsheets/d/1fVOtXaNniW62Ze0iZcQxGXRLaCbDlUBHjGZNRkO9u6A/edit) (44 physical CD rows + 2 digital-only rows).
 - **Catalog Size in Web App:** **55 total entries** (**53 physical CDs** across 4 aisles, plus **2 digital-only tracks** separated so they do not inflate the physical shelf-hunting progress counter).
 
 ---
 
 ## 2. Core Architecture & Constraints (CRITICAL)
-When continuing development on `osaka_cd_cover_album.html` in Antigravity (`agy`), strictly maintain these architectural rules:
+When continuing development on `index.html` in Antigravity (`agy`), strictly maintain these architectural rules:
 
 1. **Zero External Dependencies / Zero CDN Scripts:**
    - Do **not** add Tailwind CDN (`cdn.tailwindcss.com`) or external icon/font scripts. Sandboxed preview panes and offline mobile environments in Osaka shops will block or hang on external runtime scripts.
@@ -38,11 +38,12 @@ When continuing development on `osaka_cd_cover_album.html` in Antigravity (`agy`
 ---
 
 ## 4. `localStorage` Schema Keys
+Storage keys are automatically derived per catalog (`cd_hunt_<slug>_<fnv1aHex>`) via `CDHunt.storage.deriveStoragePrefix(...)` from the catalog URL, local file name, or catalog title + item IDs so separate lists never collide:
 - `cd_hunt_catalog_url_v1`: Active normalized metadata JSON URL (restored automatically on next visit when `?catalog=` is not supplied).
-- `osaka_cd_checklist_v2`: Object mapping `album.id` → `boolean` (e.g., `{ "cd-01": true }`) or compatible checklist array format. Tracks acquired physical CDs (`0 / 53`) and saved digital tracks.
-- `osaka_cd_cover_cache_v6`: Object mapping `album.id` → `{ variants: Array, selectedIndex: number }`. (Older `v1`–`v5` keys are automatically purged on startup).
-- `osaka_cd_view_mode_v1`: `'grid'` or `'single'` (toggles between responsive multi-column cover grid and 1-column detailed card view).
-- `osaka_cd_note_dismissed_v1`: `'1'` if the top digital-only reminder banner has been dismissed.
+- `<derivedPrefix>_checklist_v2`: Object mapping `album.id` → `boolean` (e.g., `{ "cd-01": true }`) or compatible checklist array format. Tracks acquired physical CDs (`0 / 53` for Osaka) and saved digital tracks.
+- `<derivedPrefix>_cover_cache_v6`: Object mapping `album.id` → `{ variants: Array, selectedIndex: number }`. (Older `v1`–`v5` keys are automatically purged on startup).
+- `<derivedPrefix>_view_mode_v1`: `'grid'` or `'single'` (toggles between responsive multi-column cover grid and 1-column detailed card view).
+- `<derivedPrefix>_note_dismissed_v1`: `'1'` if the top digital-only reminder banner has been dismissed.
 
 ---
 
@@ -62,7 +63,7 @@ When continuing development on `osaka_cd_cover_album.html` in Antigravity (`agy`
 ---
 
 ## 6. How to Resume in Antigravity (`agy`)
-1. Open the repository root containing `osaka_cd_cover_album.html`, `css/`, `js/`, `docs/`, and `test/` (and the companion `cd-metadata` repository containing `2026-japan.json`).
+1. Open the repository root containing `index.html`, `css/`, `js/`, `schemas/`, `docs/`, and `test/` (and the companion `cd-metadata` repository containing `index.json` and `2026-japan.json`).
 2. If transferring existing progress from another browser, open the app, click **Backup** in the top bar, copy the JSON string, and paste it into **Backup → Import & Restore** in the new browser.
 3. Prompt Antigravity with:
-   > *"Read `docs/HANDOVER.md`, `docs/METADATA.md`, and `osaka_cd_cover_album.html`. Keep the zero-CDN modular architecture, external metadata loader, `通常盤`-first cover resolution, and `localStorage` keys intact, and help me with [next feature/edit]."*
+   > *"Read `docs/HANDOVER.md`, `docs/METADATA.md`, and `index.html`. Keep the zero-CDN modular architecture, `schemaVersion: 1` validation, external metadata loader, `通常盤`-first cover resolution, and derived `localStorage` keys intact, and help me with [next feature/edit]."*

@@ -7,13 +7,17 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const ROOT_DIR = path.join(__dirname, '..');
-const HTML_PATH = path.join(ROOT_DIR, 'osaka_cd_cover_album.html');
+const HTML_PATH = path.join(ROOT_DIR, 'index.html');
+const LEGACY_HTML_PATH = path.join(ROOT_DIR, 'osaka_cd_cover_album.html');
 const CSS_PATH = path.join(ROOT_DIR, 'css', 'styles.css');
 const OSAKA_METADATA_PATH = path.join(ROOT_DIR, '..', 'cd-metadata', '2026-japan.json');
+const OSAKA_INDEX_PATH = path.join(ROOT_DIR, '..', 'cd-metadata', 'index.json');
 const VALIDATE_PATH = path.join(ROOT_DIR, 'js', 'validate.js');
 const STORAGE_PATH = path.join(ROOT_DIR, 'js', 'storage.js');
 const COVER_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'cover-resolver.js');
 const APP_PATH = path.join(ROOT_DIR, 'js', 'app.js');
+
+const { deriveStoragePrefix } = require('../js/storage.js');
 
 function readAppHtml() {
   return fs.readFileSync(HTML_PATH, 'utf8');
@@ -35,6 +39,7 @@ function createElementStub(id, initialClasses = []) {
     textContent: '',
     value: '',
     href: '',
+    files: [],
     style: {},
     classList: {
       add(...tokens) {
@@ -79,6 +84,9 @@ function createElementStub(id, initialClasses = []) {
     getAttribute(name) {
       return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null;
     },
+    click() {
+      this.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} });
+    },
     addEventListener(type, fn) {
       if (!listeners[type]) listeners[type] = [];
       listeners[type].push(fn);
@@ -100,12 +108,7 @@ function buildDomElements(html) {
     const id = match[1];
     const classMatch = fullTag.match(/\bclass=["']([^"']+)["']/);
     const initialClasses = classMatch ? classMatch[1].split(/\s+/).filter(Boolean) : [];
-    const el = createElementStub(id, initialClasses);
-    const presetMatch = fullTag.match(/\bdata-preset-url=["']([^"']+)["']/);
-    if (presetMatch) {
-      el.setAttribute('data-preset-url', presetMatch[1]);
-    }
-    elements.set(id, el);
+    elements.set(id, createElementStub(id, initialClasses));
   }
   return elements;
 }
@@ -130,7 +133,8 @@ async function bootApp({
   catalogObject,
   savedCatalogUrl,
   search = '',
-  pathname = '/cd-hunt/osaka_cd_cover_album.html',
+  origin = 'https://dopingus-build.github.io',
+  pathname = '/cd-hunt/',
   fetchImpl
 } = {}) {
   const html = readAppHtml();
@@ -145,8 +149,9 @@ async function bootApp({
     localStorage.setItem('cd_hunt_catalog_url_v1', savedCatalogUrl);
   }
 
+  const copiedTexts = [];
   const historyUpdates = [];
-  const locationObj = { search, pathname };
+  const locationObj = { search, origin, pathname };
 
   const documentStub = {
     title: '',
@@ -208,6 +213,13 @@ async function bootApp({
     document: documentStub,
     localStorage,
     location: locationObj,
+    navigator: {
+      clipboard: {
+        async writeText(txt) {
+          copiedTexts.push(txt);
+        }
+      }
+    },
     history: {
       replaceState(_state, _title, nextUrl) {
         historyUpdates.push(nextUrl);
@@ -217,8 +229,17 @@ async function bootApp({
     },
     fetch:
       fetchImpl ||
-      (async () => {
-        throw new Error('Unexpected network fetch in offline test');
+      (async (url) => {
+        if (String(url).endsWith('/index.json') && fs.existsSync(OSAKA_INDEX_PATH)) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return JSON.parse(fs.readFileSync(OSAKA_INDEX_PATH, 'utf8'));
+            }
+          };
+        }
+        throw new Error('Unexpected network fetch in offline test: ' + url);
       })
   };
   sandbox.window = sandbox;
@@ -237,16 +258,16 @@ async function bootApp({
   vm.runInContext(appScript, context);
 
   async function flush() {
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
 
-  // Wait for async initApp() microtasks to settle
   await flush();
 
   return {
     elements,
     localStorage,
     historyUpdates,
+    copiedTexts,
     document: documentStub,
     window: context,
     flush,
@@ -254,6 +275,19 @@ async function bootApp({
       const el = elements.get(id);
       assert.ok(el, `Element #${id} must exist`);
       el.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} });
+      await flush();
+    },
+    async selectLocalFile(name, jsonContent) {
+      const fileInput = elements.get('catalogFileInput');
+      assert.ok(fileInput, 'Element #catalogFileInput must exist');
+      const fileObj = {
+        name,
+        async text() {
+          return typeof jsonContent === 'string' ? jsonContent : JSON.stringify(jsonContent);
+        }
+      };
+      fileInput.files = [fileObj];
+      fileInput.dispatchEvent({ type: 'change', target: fileInput });
       await flush();
     },
     triggerDocumentClick(action, attrs = {}) {
@@ -276,11 +310,12 @@ async function bootApp({
 
 function makeValidRemoteCatalog() {
   return {
+    $schema: 'https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json',
+    schemaVersion: 1,
     meta: {
       title: 'Tokyo Vinyl & CD Hunt',
       subtitle: 'Disk Union Crate Browser',
       documentTitle: 'Tokyo Hunt',
-      storagePrefix: 'tokyo_hunt',
       searchPlaceholder: 'Search Tokyo list...'
     },
     items: [
@@ -305,19 +340,21 @@ function makeValidRemoteCatalog() {
   };
 }
 
-describe('HTML asset & script wiring', () => {
-  it('links ./css/styles.css and loads modular js scripts without bundled data/catalog.js', () => {
+describe('HTML entrypoint generalization & script wiring', () => {
+  it('uses index.html as the main app without legacy osaka_cd_cover_album.html', () => {
+    assert.equal(fs.existsSync(LEGACY_HTML_PATH), false, 'osaka_cd_cover_album.html should be removed');
     const html = readAppHtml();
     assert.ok(fs.existsSync(CSS_PATH), 'css/styles.css must exist');
+    assert.ok(html.includes('<title>CD Hunt'), 'index.html should use generic CD Hunt default title');
     assert.ok(
       html.includes('<link rel="stylesheet" href="./css/styles.css" />'),
-      'Expected <link rel="stylesheet" href="./css/styles.css" /> in HTML'
+      'Expected <link rel="stylesheet" href="./css/styles.css" /> in index.html'
     );
-    assert.equal(
-      html.includes('./data/catalog.js'),
-      false,
-      'data/catalog.js should no longer be bundled in cd-hunt HTML'
-    );
+    assert.equal(html.includes('./data/catalog.js'), false, 'data/catalog.js must not be bundled');
+    assert.ok(html.includes('id="catalogFileInput"'), 'Local JSON file input should exist');
+    assert.ok(html.includes('id="loadCatalogFileBtn"'), 'Local JSON file button should exist');
+    assert.ok(html.includes('id="copyShareLinkBtn"'), 'Copy Share Link button should exist');
+    assert.ok(html.includes('id="catalogPresetsList"'), 'Dynamic presets container should exist');
 
     const expectedScripts = [
       '<script src="./js/validate.js"></script>',
@@ -329,7 +366,7 @@ describe('HTML asset & script wiring', () => {
     let lastIdx = -1;
     for (const tag of expectedScripts) {
       const idx = html.indexOf(tag);
-      assert.notEqual(idx, -1, `Expected ${tag} in HTML`);
+      assert.notEqual(idx, -1, `Expected ${tag} in index.html`);
       assert.ok(idx > lastIdx, `Expected ${tag} to appear in dependency order`);
       lastIdx = idx;
     }
@@ -353,44 +390,62 @@ describe('Browser and Node dual export for js/validate.js', () => {
   });
 });
 
-describe('Catalog Loader screen & external cd-metadata integration', () => {
-  it('shows the Catalog Loader screen on first load when no ?catalog= or saved URL exists', async () => {
-    const app = await bootApp();
-    assert.notEqual(app.elements.get('errorBanner').style.display, 'block');
-    assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), false);
-    assert.equal(app.elements.get('albumGrid').classList.contains('hidden'), true);
-    assert.equal(app.elements.get('digitalOnlySection').classList.contains('hidden'), true);
-  });
-
-  it('loads 2026-japan.json via the Osaka preset button and persists the URL', async () => {
-    const osakaJson = JSON.parse(fs.readFileSync(OSAKA_METADATA_PATH, 'utf8'));
-    let fetchedUrl = null;
+describe('Catalog Loader screen, dynamic presets, local file picker, and share link', () => {
+  it('shows Catalog Loader on first load and populates dynamic presets from cd-metadata/index.json', async () => {
+    const indexJson = JSON.parse(fs.readFileSync(OSAKA_INDEX_PATH, 'utf8'));
+    const fetchedUrls = [];
 
     const app = await bootApp({
       fetchImpl: async (url) => {
-        fetchedUrl = url;
+        fetchedUrls.push(url);
         return {
           ok: true,
           status: 200,
           async json() {
-            return osakaJson;
+            return indexJson;
           }
         };
       }
     });
 
-    await app.clickElement('loadPresetOsakaBtn');
+    assert.notEqual(app.elements.get('errorBanner').style.display, 'block');
+    assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), false);
+    assert.equal(app.elements.get('copyShareLinkBtn').classList.contains('hidden'), true);
+    assert.equal(app.elements.get('albumGrid').classList.contains('hidden'), true);
+    assert.ok(fetchedUrls.includes('https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/index.json'));
 
-    assert.equal(
-      fetchedUrl,
-      'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json'
-    );
+    const presetsHtml = app.elements.get('catalogPresetsList').innerHTML;
+    assert.ok(presetsHtml.includes('data-action="load-preset"'));
+    assert.ok(presetsHtml.includes('2026 Japan (Osaka) CD Hunt'));
+    assert.ok(presetsHtml.includes('https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json'));
+  });
+
+  it('loads 2026-japan.json when clicking a dynamic preset button and persists the URL', async () => {
+    const indexJson = JSON.parse(fs.readFileSync(OSAKA_INDEX_PATH, 'utf8'));
+    const osakaJson = JSON.parse(fs.readFileSync(OSAKA_METADATA_PATH, 'utf8'));
+    const fetchedUrls = [];
+
+    const app = await bootApp({
+      fetchImpl: async (url) => {
+        fetchedUrls.push(url);
+        if (String(url).endsWith('/index.json')) {
+          return { ok: true, status: 200, async json() { return indexJson; } };
+        }
+        return { ok: true, status: 200, async json() { return osakaJson; } };
+      }
+    });
+
+    app.triggerDocumentClick('load-preset', {
+      'data-preset-url': 'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json'
+    });
+    await app.flush();
+
+    assert.ok(fetchedUrls.includes('https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json'));
     assert.equal(
       app.localStorage.getItem('cd_hunt_catalog_url_v1'),
       'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json'
     );
     assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), true);
-    assert.notEqual(app.elements.get('errorBanner').style.display, 'block');
     assert.equal(app.elements.get('brandTitle').textContent, 'Osaka CD Cover Album');
     assert.equal(app.elements.get('progressBadge').textContent, '0 / 53');
 
@@ -400,20 +455,17 @@ describe('Catalog Loader screen & external cd-metadata integration', () => {
     assert.equal(digitalCards.length, 2);
   });
 
-  it('converts a pasted GitHub blob URL to raw.githubusercontent.com, persists it, and syncs ?catalog=', async () => {
+  it('converts pasted GitHub blob URL, syncs ?catalog=, and copies share link via #copyShareLinkBtn', async () => {
     const remoteCatalog = makeValidRemoteCatalog();
-    let fetchedUrl = null;
+    const fetchedUrls = [];
 
     const app = await bootApp({
       fetchImpl: async (url) => {
-        fetchedUrl = url;
-        return {
-          ok: true,
-          status: 200,
-          async json() {
-            return remoteCatalog;
-          }
-        };
+        fetchedUrls.push(url);
+        if (String(url).endsWith('/index.json')) {
+          return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+        }
+        return { ok: true, status: 200, async json() { return remoteCatalog; } };
       }
     });
 
@@ -421,15 +473,51 @@ describe('Catalog Loader screen & external cd-metadata integration', () => {
     await app.clickElement('loadCatalogUrlBtn');
 
     const expectedRaw = 'https://raw.githubusercontent.com/example/my-cds/main/tokyo.json';
-    assert.equal(fetchedUrl, expectedRaw);
+    assert.ok(fetchedUrls.includes(expectedRaw));
     assert.equal(app.localStorage.getItem('cd_hunt_catalog_url_v1'), expectedRaw);
     assert.ok(app.historyUpdates.some((u) => u.includes(encodeURIComponent(expectedRaw))));
-    assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), true);
     assert.equal(app.elements.get('brandTitle').textContent, 'Tokyo Vinyl & CD Hunt');
-    assert.equal(app.elements.get('progressBadge').textContent, '0 / 1');
+
+    await app.clickElement('openCatalogLoaderBtn');
+    assert.equal(app.elements.get('copyShareLinkBtn').classList.contains('hidden'), false);
+    await app.clickElement('copyShareLinkBtn');
+    assert.equal(
+      app.copiedTexts[0],
+      'https://dopingus-build.github.io/cd-hunt/?catalog=' + encodeURIComponent(expectedRaw)
+    );
   });
 
-  it('automatically reloads the catalog from saved localStorage URL on subsequent visit', async () => {
+  it('loads a local JSON file via #catalogFileInput, hides Copy Share Link, and derives unique storage keys', async () => {
+    const localCatalog = makeValidRemoteCatalog();
+    const app = await bootApp();
+
+    await app.selectLocalFile('my-local.json', localCatalog);
+
+    assert.notEqual(app.elements.get('errorBanner').style.display, 'block');
+    assert.equal(app.elements.get('catalogLoaderScreen').classList.contains('hidden'), true);
+    assert.equal(app.localStorage.getItem('cd_hunt_catalog_url_v1'), null);
+    assert.equal(app.elements.get('brandTitle').textContent, 'Tokyo Vinyl & CD Hunt');
+    assert.equal(app.elements.get('progressBadge').textContent, '0 / 1');
+
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'tok-01' });
+    assert.equal(app.elements.get('progressBadge').textContent, '1 / 1');
+
+    const expectedPrefix = deriveStoragePrefix({
+      fileName: 'my-local.json',
+      meta: localCatalog.meta,
+      items: localCatalog.items
+    });
+    assert.deepEqual(
+      JSON.parse(app.localStorage.getItem(expectedPrefix + '_checklist_v2')),
+      { 'tok-01': true }
+    );
+
+    await app.clickElement('openCatalogLoaderBtn');
+    assert.equal(app.elements.get('copyShareLinkBtn').classList.contains('hidden'), true);
+    assert.ok(app.elements.get('activeCatalogInfo').textContent.includes('my-local.json'));
+  });
+
+  it('automatically reloads catalog from saved localStorage URL on subsequent visit', async () => {
     const remoteCatalog = makeValidRemoteCatalog();
     const savedRaw = 'https://raw.githubusercontent.com/example/my-cds/main/tokyo.json';
     let fetchedUrl = null;
@@ -456,53 +544,63 @@ describe('Catalog Loader screen & external cd-metadata integration', () => {
 });
 
 describe('Invalid catalog rejection on startup', () => {
+  it('displays errorBanner for missing or unsupported schemaVersion', async () => {
+    const missingVer = makeValidRemoteCatalog();
+    delete missingVer.schemaVersion;
+    const appMissing = await bootApp({ catalogObject: missingVer });
+    assert.equal(appMissing.elements.get('errorBanner').style.display, 'block');
+    assert.ok(appMissing.elements.get('errorBanner').textContent.includes('schemaVersion'));
+
+    const badVer = makeValidRemoteCatalog();
+    badVer.schemaVersion = 2;
+    const appBadVer = await bootApp({ catalogObject: badVer });
+    assert.equal(appBadVer.elements.get('errorBanner').style.display, 'block');
+    assert.ok(appBadVer.elements.get('errorBanner').textContent.includes('schemaVersion'));
+  });
+
+  it('displays errorBanner when deprecated meta.storagePrefix is present', async () => {
+    const bad = makeValidRemoteCatalog();
+    bad.meta.storagePrefix = 'legacy_prefix';
+
+    const app = await bootApp({ catalogObject: bad });
+    assert.equal(app.elements.get('errorBanner').style.display, 'block');
+    assert.ok(app.elements.get('errorBanner').textContent.includes('storagePrefix'));
+    assert.equal(app.elements.get('albumGrid').innerHTML, '');
+  });
+
   it('displays errorBanner and leaves albumGrid empty for duplicate item IDs', async () => {
     const base = makeValidRemoteCatalog();
     base.items.push(Object.assign({}, base.items[0], { title: 'Duplicate ID Item' }));
 
     const app = await bootApp({ catalogObject: base });
-    const errorBanner = app.elements.get('errorBanner');
-    const albumGrid = app.elements.get('albumGrid');
-
-    assert.equal(errorBanner.style.display, 'block');
-    assert.ok(errorBanner.textContent.toLowerCase().includes('duplicate'));
-    assert.equal(albumGrid.innerHTML, '');
+    assert.equal(app.elements.get('errorBanner').style.display, 'block');
+    assert.ok(app.elements.get('errorBanner').textContent.toLowerCase().includes('duplicate'));
+    assert.equal(app.elements.get('albumGrid').innerHTML, '');
   });
 
-  it('displays errorBanner and leaves albumGrid empty when required fields are missing', async () => {
-    const bad = makeValidRemoteCatalog();
-    delete bad.items[0].artist;
+  it('displays errorBanner when required fields or requiredGroups are missing', async () => {
+    const noArtist = makeValidRemoteCatalog();
+    delete noArtist.items[0].artist;
+    const app1 = await bootApp({ catalogObject: noArtist });
+    assert.equal(app1.elements.get('errorBanner').style.display, 'block');
+    assert.ok(app1.elements.get('errorBanner').textContent.includes('artist'));
 
-    const app = await bootApp({ catalogObject: bad });
-    const errorBanner = app.elements.get('errorBanner');
-    const albumGrid = app.elements.get('albumGrid');
-
-    assert.equal(errorBanner.style.display, 'block');
-    assert.ok(errorBanner.textContent.includes('artist'));
-    assert.equal(albumGrid.innerHTML, '');
-  });
-
-  it('displays errorBanner when itunesQuery is provided without requiredGroups', async () => {
-    const bad = makeValidRemoteCatalog();
-    delete bad.items[0].requiredGroups;
-
-    const app = await bootApp({ catalogObject: bad });
-    const errorBanner = app.elements.get('errorBanner');
-    const albumGrid = app.elements.get('albumGrid');
-
-    assert.equal(errorBanner.style.display, 'block');
-    assert.ok(errorBanner.textContent.includes('requiredGroups'));
-    assert.equal(albumGrid.innerHTML, '');
+    const noGroups = makeValidRemoteCatalog();
+    delete noGroups.items[0].requiredGroups;
+    const app2 = await bootApp({ catalogObject: noGroups });
+    assert.equal(app2.elements.get('errorBanner').style.display, 'block');
+    assert.ok(app2.elements.get('errorBanner').textContent.includes('requiredGroups'));
   });
 });
 
-describe('Remote ?catalog=<url> JSON loading and validation', () => {
-  it('loads valid remote JSON, updates branding, auto-derives categories, and hides digital-only UI when none exist', async () => {
+describe('Remote ?catalog=<url> JSON loading and derived storage persistence', () => {
+  it('loads valid remote JSON, updates branding, auto-derives categories, and persists checklist under derived key', async () => {
     const remoteCatalog = makeValidRemoteCatalog();
+    const remoteUrl = 'https://example.com/custom.json';
     let requestedUrl = null;
 
     const app = await bootApp({
-      search: '?catalog=https://example.com/custom.json',
+      search: '?catalog=' + encodeURIComponent(remoteUrl),
       fetchImpl: async (url) => {
         requestedUrl = url;
         return {
@@ -515,7 +613,7 @@ describe('Remote ?catalog=<url> JSON loading and validation', () => {
       }
     });
 
-    assert.equal(requestedUrl, 'https://example.com/custom.json');
+    assert.equal(requestedUrl, remoteUrl);
     assert.notEqual(app.elements.get('errorBanner').style.display, 'block');
     assert.equal(app.elements.get('brandTitle').textContent, 'Tokyo Vinyl & CD Hunt');
     assert.equal(app.elements.get('progressBadge').textContent, '0 / 1');
@@ -525,6 +623,19 @@ describe('Remote ?catalog=<url> JSON loading and validation', () => {
     const pillsHtml = app.elements.get('categoryPills').innerHTML;
     assert.ok(pillsHtml.includes('All Releases'));
     assert.ok(pillsHtml.includes('J-Rock'));
+
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'tok-01' });
+    assert.equal(app.elements.get('progressBadge').textContent, '1 / 1');
+
+    const expectedPrefix = deriveStoragePrefix({
+      sourceUrl: remoteUrl,
+      meta: remoteCatalog.meta,
+      items: remoteCatalog.items
+    });
+    assert.deepEqual(
+      JSON.parse(app.localStorage.getItem(expectedPrefix + '_checklist_v2')),
+      { 'tok-01': true }
+    );
   });
 
   it('rejects invalid remote JSON with a prohibited hotlinked domain and displays errorBanner', async () => {
@@ -546,24 +657,6 @@ describe('Remote ?catalog=<url> JSON loading and validation', () => {
     assert.equal(errorBanner.style.display, 'block');
     assert.ok(errorBanner.textContent.includes('vgmdb.net'));
     assert.equal(app.elements.get('albumGrid').innerHTML, '');
-  });
-});
-
-describe('Storage namespacing and checklist persistence integration', () => {
-  it('persists acquired state under <storagePrefix>_checklist_v2 and updates progressBadge', async () => {
-    const catalog = makeValidRemoteCatalog();
-    catalog.meta.storagePrefix = 'custom_prefix';
-
-    const app = await bootApp({ catalogObject: catalog });
-    assert.equal(app.elements.get('progressBadge').textContent, '0 / 1');
-
-    app.triggerDocumentClick('toggle-acq', { 'data-id': 'tok-01' });
-
-    assert.equal(app.elements.get('progressBadge').textContent, '1 / 1');
-    assert.deepEqual(
-      JSON.parse(app.localStorage.getItem('custom_prefix_checklist_v2')),
-      { 'tok-01': true }
-    );
   });
 });
 
