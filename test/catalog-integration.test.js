@@ -913,6 +913,17 @@ describe('Responsive CSS grid containment regression', () => {
       '.lb-details must set min-width: 0 to allow horizontal flex strips to scroll within viewport'
     );
   });
+
+  it('defines GPU-accelerated carousel transition animations with reduced-motion support in css/styles.css', () => {
+    const css = fs.readFileSync(CSS_PATH, 'utf8');
+    assert.ok(css.includes('@keyframes carouselSlideNext'));
+    assert.ok(css.includes('@keyframes carouselSlidePrev'));
+    assert.ok(css.includes('@keyframes carouselEditionFlip'));
+    assert.ok(css.includes('.carousel-anim-next'));
+    assert.ok(css.includes('.carousel-anim-prev'));
+    assert.ok(css.includes('.carousel-anim-flip'));
+    assert.ok(css.includes('prefers-reduced-motion: reduce'));
+  });
 });
 
 function makeRichTestCatalog({ includeDigital = true } = {}) {
@@ -1146,17 +1157,20 @@ describe('Two-stage cover resolution, variant selection/cycling, fallback, and b
     assert.equal(cacheAfterLookup['cd-01'].variants[0].url, 'https://coverartarchive.org/release/mb-reg/front-500');
     assert.ok(app.elements.get('art-slot-cd-01').innerHTML.includes('1/3'));
 
-    // Cycle variant with cycle-one and step-var
+    // Cycle variant with cycle-one and step-var and check carousel animation classes
     app.triggerDocumentClick('cycle-one', { 'data-id': 'cd-01' });
     await app.flush();
     assert.ok(app.elements.get('art-slot-cd-01').innerHTML.includes('2/3'));
+    assert.equal(app.elements.get('art-slot-cd-01').classList.contains('carousel-anim-next'), true);
 
     app.triggerDocumentClick('step-var', { 'data-id': 'cd-01', 'data-delta': '-1' });
     assert.ok(app.elements.get('art-slot-cd-01').innerHTML.includes('1/3'));
+    assert.equal(app.elements.get('art-slot-cd-01').classList.contains('carousel-anim-prev'), true);
 
-    // Select specific variant index
+    // Select specific variant index (2 > 0 -> carousel-anim-next)
     app.triggerDocumentClick('select-var', { 'data-id': 'cd-01', 'data-idx': '2' });
     assert.ok(app.elements.get('art-slot-cd-01').innerHTML.includes('3/3'));
+    assert.equal(app.elements.get('art-slot-cd-01').classList.contains('carousel-anim-next'), true);
 
     // Simulate broken cover image onerror -> splices active variant out and saves updated cache
     app.triggerImageError('cd-01');
@@ -1218,33 +1232,54 @@ describe('Crate Flip Lightbox modal, navigation, and custom cover variant manage
       fetchImpl: async () => ({ ok: true, async json() { return { releases: [], results: [] }; } })
     });
 
-    // Open via #openCrateFlipBtn
+    // Open via #openCrateFlipBtn (applies flip entrance)
     await app.clickElement('openCrateFlipBtn');
     const modal = app.elements.get('lightboxModal');
+    const lbArtBox = app.elements.get('lbArtBox');
     assert.equal(modal.classList.contains('open'), true);
+    assert.equal(lbArtBox.classList.contains('carousel-anim-flip'), true);
     assert.equal(app.elements.get('lbCounter').textContent, '1 / 3');
     assert.equal(app.elements.get('lbArtist').textContent, 'yama');
 
-    // Step via buttons
+    // Step via buttons (directional carousel classes)
     await app.clickElement('lbNextBtn');
     assert.equal(app.elements.get('lbCounter').textContent, '2 / 3');
     assert.equal(app.elements.get('lbArtist').textContent, 'Yoshino Aoki');
+    assert.equal(lbArtBox.classList.contains('carousel-anim-next'), true);
     await app.clickElement('lbPrevBtn');
     assert.equal(app.elements.get('lbCounter').textContent, '1 / 3');
+    assert.equal(lbArtBox.classList.contains('carousel-anim-prev'), true);
 
     // Step via keyboard (ignores when INPUT focused)
     await app.triggerKeydown('ArrowRight', 'INPUT');
     assert.equal(app.elements.get('lbCounter').textContent, '1 / 3');
     await app.triggerKeydown('ArrowRight');
     assert.equal(app.elements.get('lbCounter').textContent, '2 / 3');
+    assert.equal(lbArtBox.classList.contains('carousel-anim-next'), true);
     await app.triggerKeydown('ArrowLeft');
     assert.equal(app.elements.get('lbCounter').textContent, '1 / 3');
+    assert.equal(lbArtBox.classList.contains('carousel-anim-prev'), true);
 
     // Swipe navigation on #lbStage (dx < -45 -> next, dx > 45 -> prev)
     await app.swipeLightbox(-80);
     assert.equal(app.elements.get('lbCounter').textContent, '2 / 3');
+    assert.equal(lbArtBox.classList.contains('carousel-anim-next'), true);
     await app.swipeLightbox(80);
     assert.equal(app.elements.get('lbCounter').textContent, '1 / 3');
+    assert.equal(lbArtBox.classList.contains('carousel-anim-prev'), true);
+
+    // Rapid consecutive synchronous clicks never block or drop steps
+    const nextBtn = app.elements.get('lbNextBtn');
+    nextBtn.click();
+    assert.equal(app.elements.get('lbCounter').textContent, '2 / 3');
+    nextBtn.click();
+    assert.equal(app.elements.get('lbCounter').textContent, '3 / 3');
+    assert.equal(app.elements.get('lbArtist').textContent, 'Hanatan');
+    app.elements.get('lbPrevBtn').click();
+    assert.equal(app.elements.get('lbCounter').textContent, '2 / 3');
+    app.elements.get('lbPrevBtn').click();
+    assert.equal(app.elements.get('lbCounter').textContent, '1 / 3');
+    await app.flush();
 
     // Copy catalog in lightbox & toggle acquired
     await app.clickElement('lbCatalogBtn');
@@ -1276,9 +1311,13 @@ describe('Crate Flip Lightbox modal, navigation, and custom cover variant manage
     assert.equal(cache['cd-01'].variants.length, 0);
     assert.equal(app.elements.get('lbVariantsPanel').classList.contains('hidden'), true);
 
-    // Navigate to digital item in lightbox and verify button label
+    // Navigate via filmstrip (open-lb while modal already open) and verify directional animation & digital button label
     app.triggerDocumentClick('open-lb', { 'data-lb-idx': '2' });
+    assert.equal(lbArtBox.classList.contains('carousel-anim-next'), true);
     assert.equal(app.elements.get('lbAcquireBtn').textContent, '+ Mark Saved (Digital)');
+
+    app.triggerDocumentClick('open-lb', { 'data-lb-idx': '0' });
+    assert.equal(lbArtBox.classList.contains('carousel-anim-prev'), true);
 
     // Escape closes lightbox
     await app.triggerKeydown('Escape');

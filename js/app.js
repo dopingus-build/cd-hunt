@@ -593,13 +593,27 @@
     }
   }
 
-  function selectCoverVariant(id, index) {
+  function triggerCarouselAnimation(el, direction) {
+    if (!el || !el.classList) return;
+    const animClass = direction === 'next'
+      ? 'carousel-anim-next'
+      : direction === 'prev'
+        ? 'carousel-anim-prev'
+        : 'carousel-anim-flip';
+    el.classList.remove('carousel-anim-next', 'carousel-anim-prev', 'carousel-anim-flip');
+    void el.offsetWidth;
+    el.classList.add(animClass);
+  }
+
+  function selectCoverVariant(id, index, directionOverride) {
     const entry = state.coverCache[id];
     if (!entry || !Array.isArray(entry.variants) || entry.variants.length === 0) return;
     const len = entry.variants.length;
+    const prevIdx = entry.selectedIndex || 0;
+    const direction = directionOverride || (index > prevIdx ? 'next' : index < prevIdx ? 'prev' : 'flip');
     entry.selectedIndex = ((index % len) + len) % len;
     saveCoverCache();
-    refreshCardDOM(id);
+    refreshCardDOM(id, direction);
   }
 
   async function handlePerEntryRefresh(id, forceRefetch) {
@@ -609,7 +623,7 @@
     const existing = state.coverCache[id];
     if (!forceRefetch && existing && Array.isArray(existing.variants) && existing.variants.length > 1) {
       const nextIdx = ((existing.selectedIndex || 0) + 1) % existing.variants.length;
-      selectCoverVariant(id, nextIdx);
+      selectCoverVariant(id, nextIdx, 'next');
       showToast('Edition ' + (nextIdx + 1) + '/' + existing.variants.length + ': ' + existing.variants[nextIdx].label);
       return;
     }
@@ -673,13 +687,16 @@
     }).join('');
   }
 
-  function refreshCardDOM(id) {
+  function refreshCardDOM(id, direction) {
     const item = ALBUMS.find(function (a) { return a.id === id; });
     if (!item) return;
     const slot = document.getElementById('art-slot-' + id);
     if (slot) {
       slot.innerHTML = buildCoverInnerHTML(item);
       attachImageErrorHandlers(slot);
+      if (direction) {
+        triggerCarouselAnimation(slot, direction);
+      }
     }
     const pillsBox = document.getElementById('single-variants-' + id);
     if (pillsBox) {
@@ -689,7 +706,7 @@
     if (modal.classList.contains('open')) {
       const filtered = getFilteredAlbums();
       if (filtered[state.lightboxIndex] && filtered[state.lightboxIndex].id === id) {
-        renderLightbox();
+        renderLightbox(direction);
       }
     }
   }
@@ -878,9 +895,16 @@
   function openLightbox(idx) {
     const filtered = getFilteredAlbums();
     if (filtered.length === 0) return;
-    state.lightboxIndex = Math.max(0, Math.min(idx, filtered.length - 1));
-    document.getElementById('lightboxModal').classList.add('open');
-    renderLightbox();
+    const modal = document.getElementById('lightboxModal');
+    const isAlreadyOpen = modal.classList.contains('open');
+    const prevIdx = state.lightboxIndex;
+    const nextIdx = Math.max(0, Math.min(idx, filtered.length - 1));
+    state.lightboxIndex = nextIdx;
+    modal.classList.add('open');
+    const direction = isAlreadyOpen && nextIdx !== prevIdx
+      ? (nextIdx > prevIdx ? 'next' : 'prev')
+      : 'flip';
+    renderLightbox(direction);
   }
 
   function closeLightbox() {
@@ -891,10 +915,10 @@
     const filtered = getFilteredAlbums();
     if (filtered.length === 0) return;
     state.lightboxIndex = (state.lightboxIndex + delta + filtered.length) % filtered.length;
-    renderLightbox();
+    renderLightbox(delta >= 0 ? 'next' : 'prev');
   }
 
-  function renderLightbox() {
+  function renderLightbox(direction) {
     const filtered = getFilteredAlbums();
     if (filtered.length === 0) {
       closeLightbox();
@@ -917,6 +941,9 @@
     const artBox = document.getElementById('lbArtBox');
     artBox.innerHTML = buildCoverInnerHTML(item);
     attachImageErrorHandlers(artBox);
+    if (direction) {
+      triggerCarouselAnimation(artBox, direction);
+    }
 
     const qText = (item.regCatNo || '') + ' ' + item.artist + ' ' + (item.titleJa || item.title) + ' 通常盤 CD';
     document.getElementById('lbGoogleSearchLink').href = 'https://www.google.com/search?tbm=isch&q=' + encodeURIComponent(qText);
