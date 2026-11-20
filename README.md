@@ -34,11 +34,24 @@ cd-hunt/
 │   ├── HANDOVER.md                # Project context & architectural rules
 │   ├── METADATA.md                # Catalog & repository index specification
 │   ├── AGENT_CATALOG_GUIDE.md     # Guide for LLMs/agents creating & editing catalogs
+│   ├── CLOUD_SYNC_PLAN.md         # Concept & plan for Cloudflare Worker + D1 GitHub user sync
 │   └── sample-catalog.json        # Sample schemaVersion: 1 catalog JSON template
+├── worker/
+│   ├── README.md                  # Worker API reference, deployment runbook, & Pages config
+│   ├── wrangler.toml              # Cloudflare Worker config, limits, & public [vars]
+│   ├── schema.sql                 # Cloudflare D1 SQLite schema (user_state & daily_usage)
+│   ├── index.mjs                  # ESM entrypoint re-exporting worker/index.js
+│   └── index.js                   # Zero-scope GitHub OAuth, JWT auth, D1 API & circuit breaker
 └── test/
-    ├── catalog-validation.test.js # Unit tests for validator, URL normalization, & storage prefixing
-    └── catalog-integration.test.js # Integration tests for index.html, presets, & loader
+    ├── catalog-validation.test.js # Unit tests for validator, storage, & cover resolver
+    ├── catalog-integration.test.js # Integration tests for index.html, presets, loader, & UI
+    ├── worker-sync.test.js        # Worker unit tests (JWT, CORS, OAuth, rate limits, pause guard)
+    └── worker-integration.test.js # End-to-end HTTP + node:sqlite Worker integration tests
 ```
+
+## Optional Cloud Sync (Cloudflare Worker + D1)
+
+A Cloudflare Worker backend lives in [`worker/`](./worker/) (Phase 1 implemented; provisioning and frontend integration planned in [`docs/CLOUD_SYNC_PLAN.md`](./docs/CLOUD_SYNC_PLAN.md)). See [`worker/README.md`](./worker/README.md) for endpoint details, zero-scope GitHub OAuth security guarantees, D1 deployment steps, self-pausing free-tier limits, and configuring the Worker URL on GitHub Pages.
 
 ## Using Your Own Metadata
 
@@ -51,7 +64,7 @@ cd-hunt/
 
 ## Running Tests
 
-Requires Node.js (uses built-in `node:test`, zero npm dependencies):
+Requires Node.js `22.5+` (uses built-in `node:test` and `node:sqlite`, zero npm dependencies):
 
 ```sh
 node --test test/*.test.js

@@ -1,0 +1,19 @@
+name = "cd-hunt-sync"
+main = "index.mjs"
+compatibility_date = "2025-01-01"
+
+[vars]
+ALLOWED_ORIGIN = "https://dopingus-build.github.io"
+APP_REDIRECT_URL = "https://dopingus-build.github.io/cd-hunt/"
+GITHUB_CLIENT_ID = ""
+DAILY_REQ_LIMIT = "80000"
+DAILY_WRITE_LIMIT = "80000"
+USER_HOURLY_WRITE_LIMIT = "60"
+MAX_PAYLOAD_BYTES = "131072"
+PAUSE_SYNC = "false"
+
+# Populated during Phase 2 after running `wrangler d1 create cd-hunt-db`:
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "cd-hunt-db"
+# database_id = "<D1_DATABASE_ID>"

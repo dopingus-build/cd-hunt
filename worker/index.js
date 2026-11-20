@@ -1,0 +1,675 @@
+/**
+ * @fileoverview Cloudflare Worker for CD Hunt user-specific cloud sync.
+ * Provides Zero-Scope GitHub OAuth login, HMAC-SHA256 session JWTs, D1 state persistence,
+ * per-user hourly write limits, and a daily free-tier self-pausing circuit breaker.
+ */
+'use strict';
+
+const DEFAULT_ALLOWED_ORIGIN = 'https://dopingus-build.github.io';
+const DEFAULT_APP_REDIRECT_URL = 'https://dopingus-build.github.io/cd-hunt/';
+const DEFAULT_DAILY_REQ_LIMIT = 80000;
+const DEFAULT_DAILY_WRITE_LIMIT = 80000;
+const DEFAULT_USER_HOURLY_WRITE_LIMIT = 60;
+const DEFAULT_MAX_PAYLOAD_BYTES = 131072;
+const OAUTH_STATE_TTL_SECONDS = 600;
+const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+const STORAGE_PREFIX_REGEX = /^cd_hunt_[a-z0-9_]+_[0-9a-f]{8}$/;
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+function getCrypto() {
+  return typeof crypto !== 'undefined' ? crypto : globalThis.crypto;
+}
+
+function getFetch() {
+  return typeof fetch !== 'undefined' ? fetch : globalThis.fetch;
+}
+
+function parsePositiveInt(val, fallback) {
+  const n = Number(val);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function isPlainObject(val) {
+  return val !== null && typeof val === 'object' && !Array.isArray(val);
+}
+
+/**
+ * Format a timestamp in milliseconds to UTC date string `YYYY-MM-DD`.
+ * @param {number} [nowMs]
+ * @returns {string}
+ */
+function getUtcDateString(nowMs) {
+  const ms = typeof nowMs === 'number' ? nowMs : Date.now();
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * Compute ISO timestamp for the next UTC midnight reset (`00:00:00.000Z`).
+ * @param {number} [nowMs]
+ * @returns {string}
+ */
+function getNextUtcMidnightIso(nowMs) {
+  const d = new Date(typeof nowMs === 'number' ? nowMs : Date.now());
+  const nextMidnightMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 0);
+  return new Date(nextMidnightMs).toISOString().replace('.000Z', 'Z');
+}
+
+/**
+ * Compute integer UTC hour window index for per-user rate limiting.
+ * @param {number} [nowMs]
+ * @returns {number}
+ */
+function getHourWindow(nowMs) {
+  const ms = typeof nowMs === 'number' ? nowMs : Date.now();
+  return Math.floor(ms / 3600000);
+}
+
+function getRetryAfterSeconds(nowMs) {
+  const ms = typeof nowMs === 'number' ? nowMs : Date.now();
+  const nextHourMs = (getHourWindow(ms) + 1) * 3600000;
+  return Math.max(1, Math.ceil((nextHourMs - ms) / 1000));
+}
+
+function base64UrlEncodeBytes(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlDecodeToBytes(str) {
+  const s = String(str || '');
+  const padded = s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function base64UrlEncodeString(str) {
+  return base64UrlEncodeBytes(textEncoder.encode(str));
+}
+
+function base64UrlDecodeToString(str) {
+  return textDecoder.decode(base64UrlDecodeToBytes(str));
+}
+
+async function importHmacKey(secret) {
+  return getCrypto().subtle.importKey(
+    'raw',
+    textEncoder.encode(String(secret)),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign', 'verify']
+  );
+}
+
+/**
+ * Sign a compact HMAC-SHA256 JWT.
+ * @param {object} payload
+ * @param {string} secret
+ * @param {number} [ttlSeconds=2592000]
+ * @param {number} [nowMs]
+ * @returns {Promise<string>}
+ */
+async function signToken(payload, secret, ttlSeconds, nowMs) {
+  if (!secret) {
+    throw new Error('JWT secret is required');
+  }
+  const ms = typeof nowMs === 'number' ? nowMs : Date.now();
+  const iat = Math.floor(ms / 1000);
+  const ttl = typeof ttlSeconds === 'number' ? ttlSeconds : SESSION_TTL_SECONDS;
+  const claims = Object.assign({ iat: iat, exp: iat + ttl }, payload || {});
+  const headerB64 = base64UrlEncodeString(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const payloadB64 = base64UrlEncodeString(JSON.stringify(claims));
+  const signingInput = headerB64 + '.' + payloadB64;
+
+  const key = await importHmacKey(secret);
+  const sigBuf = await getCrypto().subtle.sign('HMAC', key, textEncoder.encode(signingInput));
+  return signingInput + '.' + base64UrlEncodeBytes(new Uint8Array(sigBuf));
+}
+
+/**
+ * Verify an HMAC-SHA256 JWT signature and expiration. Returns decoded claims or null.
+ * @param {string} token
+ * @param {string} secret
+ * @param {number} [nowMs]
+ * @returns {Promise<object | null>}
+ */
+async function verifyToken(token, secret, nowMs) {
+  if (!token || !secret || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+
+  try {
+    const header = JSON.parse(base64UrlDecodeToString(parts[0]));
+    if (!header || header.alg !== 'HS256') return null;
+
+    const key = await importHmacKey(secret);
+    const sigBytes = base64UrlDecodeToBytes(parts[2]);
+    const valid = await getCrypto().subtle.verify(
+      'HMAC',
+      key,
+      sigBytes,
+      textEncoder.encode(parts[0] + '.' + parts[1])
+    );
+    if (!valid) return null;
+
+    const claims = JSON.parse(base64UrlDecodeToString(parts[1]));
+    const ms = typeof nowMs === 'number' ? nowMs : Date.now();
+    const nowSec = Math.floor(ms / 1000);
+    if (!claims || typeof claims.exp !== 'number' || nowSec >= claims.exp) {
+      return null;
+    }
+    return claims;
+  } catch (err) {
+    return null;
+  }
+}
+
+function normalizeOrigin(origin) {
+  return String(origin || '').trim().replace(/\/+$/, '');
+}
+
+function isOriginAllowed(origin, env) {
+  if (!origin) return true;
+  const normalized = normalizeOrigin(origin);
+  const allowedOrigin = normalizeOrigin((env && env.ALLOWED_ORIGIN) || DEFAULT_ALLOWED_ORIGIN);
+  if (normalized === allowedOrigin) return true;
+  if (env && String(env.ALLOW_LOCALHOST).toLowerCase() === 'true') {
+    return /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(normalized);
+  }
+  return false;
+}
+
+function buildCorsHeaders(request, env) {
+  const reqOrigin = request && request.headers ? request.headers.get('Origin') : null;
+  const allowedDefault = normalizeOrigin((env && env.ALLOWED_ORIGIN) || DEFAULT_ALLOWED_ORIGIN);
+  const headers = {
+    'Access-Control-Allow-Methods': 'GET, PUT, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '86400'
+  };
+  if (reqOrigin && isOriginAllowed(reqOrigin, env)) {
+    headers['Access-Control-Allow-Origin'] = normalizeOrigin(reqOrigin);
+    headers.Vary = 'Origin';
+  } else {
+    headers['Access-Control-Allow-Origin'] = allowedDefault;
+  }
+  return headers;
+}
+
+function jsonResponse(body, status, extraHeaders) {
+  const headers = Object.assign({ 'Content-Type': 'application/json; charset=utf-8' }, extraHeaders || {});
+  return new Response(JSON.stringify(body), { status: status, headers: headers });
+}
+
+function validateCatalogEntry(prefix, entry) {
+  if (!STORAGE_PREFIX_REGEX.test(prefix)) {
+    return 'Invalid catalog storage prefix "' + prefix + '"';
+  }
+  if (!isPlainObject(entry)) {
+    return 'catalogs["' + prefix + '"] must be an object';
+  }
+  if (entry.updatedAt !== undefined && (typeof entry.updatedAt !== 'number' || !Number.isFinite(entry.updatedAt) || entry.updatedAt < 0)) {
+    return 'catalogs["' + prefix + '"].updatedAt must be a non-negative finite number';
+  }
+  if (entry.checklist !== undefined && !isPlainObject(entry.checklist) && !Array.isArray(entry.checklist)) {
+    return 'catalogs["' + prefix + '"].checklist must be an object or array';
+  }
+  if (entry.customCovers !== undefined) {
+    if (!isPlainObject(entry.customCovers)) {
+      return 'catalogs["' + prefix + '"].customCovers must be an object';
+    }
+    for (const [itemId, coverEntry] of Object.entries(entry.customCovers)) {
+      if (!isPlainObject(coverEntry) || !Array.isArray(coverEntry.variants)) {
+        return 'customCovers["' + itemId + '"] must contain a variants array';
+      }
+      for (let i = 0; i < coverEntry.variants.length; i++) {
+        const v = coverEntry.variants[i];
+        if (!isPlainObject(v) || typeof v.url !== 'string' || v.url.trim().length === 0) {
+          return 'customCovers["' + itemId + '"].variants[' + i + '].url must be a non-empty string';
+        }
+      }
+    }
+  }
+  if (entry.selectedVariants !== undefined && !isPlainObject(entry.selectedVariants)) {
+    return 'catalogs["' + prefix + '"].selectedVariants must be an object';
+  }
+  if (entry.viewMode !== undefined && entry.viewMode !== 'grid' && entry.viewMode !== 'single') {
+    return 'catalogs["' + prefix + '"].viewMode must be "grid" or "single"';
+  }
+  if (entry.noteDismissed !== undefined && typeof entry.noteDismissed !== 'boolean') {
+    return 'catalogs["' + prefix + '"].noteDismissed must be a boolean';
+  }
+  return null;
+}
+
+/**
+ * Validate a client-submitted sync payload against the v1 cloud sync structure.
+ * @param {unknown} payload
+ * @returns {{ valid: boolean, error?: string }}
+ */
+function validateSyncPayload(payload) {
+  if (!isPlainObject(payload)) {
+    return { valid: false, error: 'Payload must be a plain JSON object' };
+  }
+  if (payload.schemaVersion !== 1) {
+    return { valid: false, error: 'schemaVersion must equal 1' };
+  }
+  if (payload.updatedAt !== undefined && (typeof payload.updatedAt !== 'number' || !Number.isFinite(payload.updatedAt) || payload.updatedAt < 0)) {
+    return { valid: false, error: 'updatedAt must be a non-negative finite number' };
+  }
+  if (payload.activeCatalogUrl !== undefined && payload.activeCatalogUrl !== null) {
+    if (typeof payload.activeCatalogUrl !== 'string' || payload.activeCatalogUrl.length > 2048) {
+      return { valid: false, error: 'activeCatalogUrl must be a string <= 2048 characters or null' };
+    }
+  }
+  if (!isPlainObject(payload.catalogs)) {
+    return { valid: false, error: 'catalogs must be a plain object keyed by storage prefix' };
+  }
+  for (const [prefix, entry] of Object.entries(payload.catalogs)) {
+    const err = validateCatalogEntry(prefix, entry);
+    if (err) {
+      return { valid: false, error: err };
+    }
+  }
+  return { valid: true };
+}
+
+function getLimits(env) {
+  return {
+    dailyReqLimit: parsePositiveInt(env && env.DAILY_REQ_LIMIT, DEFAULT_DAILY_REQ_LIMIT),
+    dailyWriteLimit: parsePositiveInt(env && env.DAILY_WRITE_LIMIT, DEFAULT_DAILY_WRITE_LIMIT),
+    userHourlyWriteLimit: parsePositiveInt(env && env.USER_HOURLY_WRITE_LIMIT, DEFAULT_USER_HOURLY_WRITE_LIMIT),
+    maxPayloadBytes: parsePositiveInt(env && env.MAX_PAYLOAD_BYTES, DEFAULT_MAX_PAYLOAD_BYTES)
+  };
+}
+
+async function getDailyUsage(db, utcDate) {
+  if (!db) {
+    return { utc_date: utcDate, req_count: 0, write_count: 0 };
+  }
+  const row = await db
+    .prepare('SELECT utc_date, req_count, write_count FROM daily_usage WHERE utc_date = ?')
+    .bind(utcDate)
+    .first();
+  if (!row) {
+    return { utc_date: utcDate, req_count: 0, write_count: 0 };
+  }
+  return {
+    utc_date: utcDate,
+    req_count: Number(row.req_count) || 0,
+    write_count: Number(row.write_count) || 0
+  };
+}
+
+async function incrementDailyUsage(db, utcDate, isWrite) {
+  await db
+    .prepare(
+      'INSERT INTO daily_usage (utc_date, req_count, write_count) VALUES (?, 1, ?) ' +
+      'ON CONFLICT(utc_date) DO UPDATE SET ' +
+      'req_count = req_count + 1, ' +
+      'write_count = write_count + excluded.write_count'
+    )
+    .bind(utcDate, isWrite ? 1 : 0)
+    .run();
+}
+
+function checkCircuitBreaker(usage, env, isWrite) {
+  if (env && String(env.PAUSE_SYNC).toLowerCase() === 'true') {
+    return { paused: true, reason: 'manual_pause_enabled' };
+  }
+  const limits = getLimits(env);
+  if (usage.req_count >= limits.dailyReqLimit) {
+    return { paused: true, reason: 'daily_free_tier_limit_reached' };
+  }
+  if (isWrite && usage.write_count >= limits.dailyWriteLimit) {
+    return { paused: true, reason: 'daily_free_tier_limit_reached' };
+  }
+  return { paused: false, reason: null };
+}
+
+async function authenticateRequest(request, env, nowMs) {
+  const authHeader = request.headers.get('Authorization') || '';
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match || !env || !env.JWT_SECRET) return null;
+  const claims = await verifyToken(match[1].trim(), env.JWT_SECRET, nowMs);
+  if (!claims || claims.purpose !== 'session' || !claims.sub || !claims.login) {
+    return null;
+  }
+  return claims;
+}
+
+async function handleStatus(env, corsHeaders, nowMs) {
+  const utcDate = getUtcDateString(nowMs);
+  const resetsAt = getNextUtcMidnightIso(nowMs);
+  const limits = getLimits(env);
+  const usage = await getDailyUsage(env && env.DB, utcDate);
+  const circuit = checkCircuitBreaker(usage, env, false);
+
+  return jsonResponse(
+    {
+      ok: true,
+      paused: circuit.paused,
+      reason: circuit.reason,
+      utcDate: utcDate,
+      resetsAt: resetsAt,
+      usage: {
+        reqCount: usage.req_count,
+        writeCount: usage.write_count
+      },
+      limits: limits
+    },
+    200,
+    corsHeaders
+  );
+}
+
+async function handleAuthLogin(url, env, nowMs) {
+  if (!env || !env.GITHUB_CLIENT_ID || !env.JWT_SECRET) {
+    return jsonResponse({ ok: false, error: 'OAuth configuration is incomplete' }, 500);
+  }
+  const nonceBytes = getCrypto().getRandomValues(new Uint8Array(16));
+  const stateToken = await signToken(
+    { purpose: 'oauth_state', nonce: base64UrlEncodeBytes(nonceBytes) },
+    env.JWT_SECRET,
+    OAUTH_STATE_TTL_SECONDS,
+    nowMs
+  );
+
+  const authUrl = new URL('https://github.com/login/oauth/authorize');
+  authUrl.searchParams.set('client_id', env.GITHUB_CLIENT_ID);
+  authUrl.searchParams.set('redirect_uri', url.origin + '/auth/callback');
+  authUrl.searchParams.set('state', stateToken);
+
+  return new Response(null, {
+    status: 302,
+    headers: { Location: authUrl.toString() }
+  });
+}
+
+async function handleAuthCallback(url, env, nowMs) {
+  if (!env || !env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET || !env.JWT_SECRET) {
+    return jsonResponse({ ok: false, error: 'OAuth configuration is incomplete' }, 500);
+  }
+
+  const oauthErr = url.searchParams.get('error');
+  const code = url.searchParams.get('code');
+  const stateParam = url.searchParams.get('state');
+  if (oauthErr || !code || !stateParam) {
+    return jsonResponse({ ok: false, error: oauthErr || 'Missing OAuth code or state' }, 400);
+  }
+
+  const stateClaims = await verifyToken(stateParam, env.JWT_SECRET, nowMs);
+  if (!stateClaims || stateClaims.purpose !== 'oauth_state') {
+    return jsonResponse({ ok: false, error: 'Invalid or expired OAuth state' }, 400);
+  }
+
+  const fetchFn = getFetch();
+  const tokenUrl = (env && env.GITHUB_OAUTH_TOKEN_URL) || 'https://github.com/login/oauth/access_token';
+  const tokenRes = await fetchFn(tokenUrl, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      client_id: env.GITHUB_CLIENT_ID,
+      client_secret: env.GITHUB_CLIENT_SECRET,
+      code: code,
+      redirect_uri: url.origin + '/auth/callback'
+    })
+  });
+  if (!tokenRes.ok) {
+    return jsonResponse({ ok: false, error: 'GitHub token exchange failed' }, 502);
+  }
+
+  const tokenData = await tokenRes.json();
+  const ghAccessToken = tokenData && tokenData.access_token;
+  if (!ghAccessToken) {
+    return jsonResponse({ ok: false, error: 'Missing GitHub access_token' }, 502);
+  }
+
+  const userApiUrl = (env && env.GITHUB_USER_API_URL) || 'https://api.github.com/user';
+  const userRes = await fetchFn(userApiUrl, {
+    headers: {
+      Authorization: 'Bearer ' + ghAccessToken,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'cd-hunt-sync-worker'
+    }
+  });
+  if (!userRes.ok) {
+    return jsonResponse({ ok: false, error: 'Failed to load GitHub user profile' }, 502);
+  }
+
+  const ghUser = await userRes.json();
+  if (!ghUser || !ghUser.id || !ghUser.login) {
+    return jsonResponse({ ok: false, error: 'Incomplete GitHub user profile' }, 502);
+  }
+
+  // Zero-scope design: ghAccessToken is intentionally never stored and is discarded here.
+  const sessionToken = await signToken(
+    {
+      purpose: 'session',
+      sub: String(ghUser.id),
+      login: String(ghUser.login),
+      avatarUrl: String(ghUser.avatar_url || '')
+    },
+    env.JWT_SECRET,
+    SESSION_TTL_SECONDS,
+    nowMs
+  );
+
+  const redirectBase = (env && env.APP_REDIRECT_URL) || DEFAULT_APP_REDIRECT_URL;
+  return new Response(null, {
+    status: 302,
+    headers: { Location: redirectBase + '#auth_token=' + encodeURIComponent(sessionToken) }
+  });
+}
+
+async function handleGetState(request, env, corsHeaders, nowMs) {
+  const claims = await authenticateRequest(request, env, nowMs);
+  if (!claims) {
+    return jsonResponse({ ok: false, error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!env || !env.DB) {
+    return jsonResponse({ ok: false, error: 'D1 database binding is missing' }, 500, corsHeaders);
+  }
+
+  const utcDate = getUtcDateString(nowMs);
+  const resetsAt = getNextUtcMidnightIso(nowMs);
+  const usage = await getDailyUsage(env.DB, utcDate);
+  const circuit = checkCircuitBreaker(usage, env, false);
+  if (circuit.paused) {
+    return jsonResponse({ ok: false, paused: true, reason: circuit.reason, resetsAt: resetsAt }, 503, corsHeaders);
+  }
+
+  await incrementDailyUsage(env.DB, utcDate, false);
+  const row = await env.DB
+    .prepare('SELECT github_id, github_login, state_json, updated_at, hour_window, hour_writes FROM user_state WHERE github_id = ?')
+    .bind(String(claims.sub))
+    .first();
+
+  let parsedState = null;
+  if (row && typeof row.state_json === 'string') {
+    try {
+      parsedState = JSON.parse(row.state_json);
+    } catch (err) {
+      parsedState = null;
+    }
+  }
+
+  return jsonResponse(
+    {
+      ok: true,
+      paused: false,
+      user: {
+        id: String(claims.sub),
+        login: String(claims.login),
+        avatarUrl: String(claims.avatarUrl || '')
+      },
+      state: parsedState,
+      updatedAt: row ? Number(row.updated_at) : null,
+      resetsAt: resetsAt
+    },
+    200,
+    corsHeaders
+  );
+}
+
+async function handlePutState(request, env, corsHeaders, nowMs) {
+  const claims = await authenticateRequest(request, env, nowMs);
+  if (!claims) {
+    return jsonResponse({ ok: false, error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!env || !env.DB) {
+    return jsonResponse({ ok: false, error: 'D1 database binding is missing' }, 500, corsHeaders);
+  }
+
+  const utcDate = getUtcDateString(nowMs);
+  const resetsAt = getNextUtcMidnightIso(nowMs);
+  const limits = getLimits(env);
+  const usage = await getDailyUsage(env.DB, utcDate);
+  const circuit = checkCircuitBreaker(usage, env, true);
+  if (circuit.paused) {
+    return jsonResponse({ ok: false, paused: true, reason: circuit.reason, resetsAt: resetsAt }, 503, corsHeaders);
+  }
+
+  const rawBody = await request.text();
+  const payloadBytes = textEncoder.encode(rawBody).length;
+  if (payloadBytes > limits.maxPayloadBytes) {
+    return jsonResponse(
+      { ok: false, error: 'Payload exceeds maximum allowed size', maxBytes: limits.maxPayloadBytes },
+      413,
+      corsHeaders
+    );
+  }
+
+  let parsedBody;
+  try {
+    parsedBody = JSON.parse(rawBody);
+  } catch (err) {
+    return jsonResponse({ ok: false, error: 'Request body must be valid JSON' }, 400, corsHeaders);
+  }
+
+  const validation = validateSyncPayload(parsedBody);
+  if (!validation.valid) {
+    return jsonResponse({ ok: false, error: validation.error }, 400, corsHeaders);
+  }
+
+  const hourWindow = getHourWindow(nowMs);
+  const existingUser = await env.DB
+    .prepare('SELECT updated_at, hour_window, hour_writes FROM user_state WHERE github_id = ?')
+    .bind(String(claims.sub))
+    .first();
+
+  if (
+    existingUser &&
+    Number(existingUser.hour_window) === hourWindow &&
+    Number(existingUser.hour_writes) >= limits.userHourlyWriteLimit
+  ) {
+    const retryAfter = getRetryAfterSeconds(nowMs);
+    return jsonResponse(
+      {
+        ok: false,
+        error: 'rate_limit_exceeded',
+        retryAfterSeconds: retryAfter
+      },
+      429,
+      Object.assign({ 'Retry-After': String(retryAfter) }, corsHeaders)
+    );
+  }
+
+  const canonicalJson = JSON.stringify(parsedBody);
+  await incrementDailyUsage(env.DB, utcDate, true);
+  await env.DB
+    .prepare(
+      'INSERT INTO user_state (github_id, github_login, state_json, updated_at, hour_window, hour_writes) ' +
+      'VALUES (?, ?, ?, ?, ?, 1) ' +
+      'ON CONFLICT(github_id) DO UPDATE SET ' +
+      'github_login = excluded.github_login, ' +
+      'state_json = excluded.state_json, ' +
+      'updated_at = excluded.updated_at, ' +
+      'hour_window = excluded.hour_window, ' +
+      'hour_writes = CASE ' +
+      'WHEN user_state.hour_window = excluded.hour_window THEN user_state.hour_writes + 1 ' +
+      'ELSE 1 END'
+    )
+    .bind(String(claims.sub), String(claims.login), canonicalJson, nowMs, hourWindow)
+    .run();
+
+  return jsonResponse(
+    {
+      ok: true,
+      paused: false,
+      updatedAt: nowMs,
+      resetsAt: resetsAt
+    },
+    200,
+    corsHeaders
+  );
+}
+
+/**
+ * Cloudflare Worker fetch handler.
+ * @param {Request} request
+ * @param {object} env
+ * @returns {Promise<Response>}
+ */
+async function handleFetch(request, env) {
+  const url = new URL(request.url);
+  const method = String(request.method || 'GET').toUpperCase();
+  const corsHeaders = buildCorsHeaders(request, env);
+  const origin = request.headers.get('Origin');
+  const nowMs = Date.now();
+
+  if (method === 'OPTIONS') {
+    if (!isOriginAllowed(origin, env)) {
+      return jsonResponse({ ok: false, error: 'Origin not allowed' }, 403);
+    }
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
+  if (url.pathname.startsWith('/api/') && !isOriginAllowed(origin, env)) {
+    return jsonResponse({ ok: false, error: 'Origin not allowed' }, 403);
+  }
+
+  if (url.pathname === '/auth/login') {
+    if (method !== 'GET') return jsonResponse({ ok: false, error: 'Method not allowed' }, 405, corsHeaders);
+    return handleAuthLogin(url, env, nowMs);
+  }
+
+  if (url.pathname === '/auth/callback') {
+    if (method !== 'GET') return jsonResponse({ ok: false, error: 'Method not allowed' }, 405, corsHeaders);
+    return handleAuthCallback(url, env, nowMs);
+  }
+
+  if (url.pathname === '/api/status') {
+    if (method !== 'GET') return jsonResponse({ ok: false, error: 'Method not allowed' }, 405, corsHeaders);
+    return handleStatus(env, corsHeaders, nowMs);
+  }
+
+  if (url.pathname === '/api/state') {
+    if (method === 'GET') return handleGetState(request, env, corsHeaders, nowMs);
+    if (method === 'PUT') return handlePutState(request, env, corsHeaders, nowMs);
+    return jsonResponse({ ok: false, error: 'Method not allowed' }, 405, corsHeaders);
+  }
+
+  return jsonResponse({ ok: false, error: 'Not found' }, 404, corsHeaders);
+}
+
+module.exports = {
+  fetch: handleFetch,
+  signToken: signToken,
+  verifyToken: verifyToken,
+  validateSyncPayload: validateSyncPayload,
+  getUtcDateString: getUtcDateString,
+  getNextUtcMidnightIso: getNextUtcMidnightIso,
+  getHourWindow: getHourWindow
+};
