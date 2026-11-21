@@ -1,0 +1,125 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+
+const SITE_URL = process.env.SITE_URL || 'https://dopingus-build.github.io/cd-hunt/';
+const WORKER_URL = (process.env.WORKER_URL || 'https://cd-hunt-sync.tndo.workers.dev').replace(/\/+$/, '');
+const SITE_ORIGIN = new URL(SITE_URL).origin;
+
+describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () => {
+  it('serves index.html with auth controls and ordered scripts from GitHub Pages', async () => {
+    const res = await fetch(SITE_URL);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+
+    assert.ok(html.includes('id="githubAuthBtn"'), 'Expected #githubAuthBtn in live HTML');
+    assert.ok(html.includes('id="githubSignOutBtn"'), 'Expected #githubSignOutBtn in live HTML');
+    assert.ok(html.includes('id="syncStatusPill"'), 'Expected #syncStatusPill in live HTML');
+
+    const orderedScripts = [
+      '<script src="./js/validate.js"></script>',
+      '<script src="./js/storage.js"></script>',
+      '<script src="./js/cover-resolver.js"></script>',
+      '<script src="./js/config.js"></script>',
+      '<script src="./js/sync.js"></script>',
+      '<script src="./js/app.js"></script>'
+    ];
+    let lastIdx = -1;
+    for (const tag of orderedScripts) {
+      const idx = html.indexOf(tag);
+      assert.notEqual(idx, -1, `Missing ${tag} in live index.html`);
+      assert.ok(idx > lastIdx, `Expected ${tag} to appear in dependency order`);
+      lastIdx = idx;
+    }
+  });
+
+  it('serves live JS and CSS static assets with matching syncApiUrl config', async () => {
+    const configRes = await fetch(new URL('js/config.js', SITE_URL));
+    assert.equal(configRes.status, 200);
+    const configText = await configRes.text();
+    assert.ok(configText.includes(WORKER_URL), `Expected live js/config.js to reference ${WORKER_URL}`);
+
+    for (const assetPath of [
+      'js/sync.js',
+      'js/app.js',
+      'js/validate.js',
+      'js/storage.js',
+      'js/cover-resolver.js',
+      'css/styles.css'
+    ]) {
+      const res = await fetch(new URL(assetPath, SITE_URL));
+      assert.equal(res.status, 200, `Expected ${assetPath} to return HTTP 200`);
+    }
+  });
+
+  it('responds cleanly on Worker /api/status with CORS headers and quota metadata', async () => {
+    const res = await fetch(`${WORKER_URL}/api/status`, {
+      headers: { Origin: SITE_ORIGIN }
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('access-control-allow-origin'), SITE_ORIGIN);
+
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(typeof body.paused, 'boolean');
+    assert.match(String(body.utcDate), /^\d{4}-\d{2}-\d{2}$/);
+    assert.ok(body.resetsAt);
+    assert.ok(body.limits && body.limits.dailyReqLimit > 0 && body.limits.dailyWriteLimit > 0);
+  });
+
+  it('allows CORS preflight from SITE_ORIGIN and rejects untrusted foreign origins', async () => {
+    const preflightRes = await fetch(`${WORKER_URL}/api/state`, {
+      method: 'OPTIONS',
+      headers: { Origin: SITE_ORIGIN }
+    });
+    assert.equal(preflightRes.status, 204);
+    assert.equal(preflightRes.headers.get('access-control-allow-origin'), SITE_ORIGIN);
+
+    const methods = preflightRes.headers.get('access-control-allow-methods') || '';
+    const allowHeaders = preflightRes.headers.get('access-control-allow-headers') || '';
+    assert.ok(methods.includes('GET') && methods.includes('PUT'));
+    assert.ok(allowHeaders.toLowerCase().includes('authorization') && allowHeaders.toLowerCase().includes('content-type'));
+
+    const blockedRes = await fetch(`${WORKER_URL}/api/status`, {
+      headers: { Origin: 'https://untrusted.example' }
+    });
+    assert.equal(blockedRes.status, 403);
+  });
+
+  it('redirects /auth/login to zero-scope GitHub OAuth and blocks invalid redirect targets', async () => {
+    const loginRes = await fetch(
+      `${WORKER_URL}/auth/login?redirect=${encodeURIComponent(SITE_URL)}`,
+      { redirect: 'manual' }
+    );
+    assert.equal(loginRes.status, 302);
+
+    const location = loginRes.headers.get('location');
+    assert.ok(location, 'Expected Location header on /auth/login');
+    const ghUrl = new URL(location);
+    assert.equal(ghUrl.origin + ghUrl.pathname, 'https://github.com/login/oauth/authorize');
+    assert.ok(ghUrl.searchParams.get('client_id'));
+    assert.ok(ghUrl.searchParams.get('state'));
+    assert.ok((ghUrl.searchParams.get('redirect_uri') || '').endsWith('/auth/callback'));
+    assert.equal(ghUrl.searchParams.get('scope'), null, 'OAuth login must not request any GitHub scope');
+
+    const badRedirectRes = await fetch(
+      `${WORKER_URL}/auth/login?redirect=${encodeURIComponent('https://evil.example/')}`,
+      { redirect: 'manual' }
+    );
+    assert.equal(badRedirectRes.status, 400);
+  });
+
+  it('rejects unauthenticated and invalid Bearer requests to /api/state with 401', async () => {
+    const missingAuthRes = await fetch(`${WORKER_URL}/api/state`, {
+      headers: { Origin: SITE_ORIGIN }
+    });
+    assert.equal(missingAuthRes.status, 401);
+
+    const invalidAuthRes = await fetch(`${WORKER_URL}/api/state`, {
+      headers: {
+        Origin: SITE_ORIGIN,
+        Authorization: 'Bearer invalid.jwt.token'
+      }
+    });
+    assert.equal(invalidAuthRes.status, 401);
+  });
+});

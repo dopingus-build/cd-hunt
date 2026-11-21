@@ -421,8 +421,11 @@
     }
   }
 
-  async function flushCloudPush() {
-    syncPushTimer = null;
+  async function flushCloudPush(options) {
+    if (syncPushTimer !== null) {
+      clearTimeout(syncPushTimer);
+      syncPushTimer = null;
+    }
     if (!sync || !syncApiUrl || !syncSession) return;
     if (syncPausedUntil) {
       updateSyncUI('Paused until 00:00 UTC', 'warn');
@@ -435,7 +438,9 @@
       activeStoragePrefix,
       hasLoadedCatalog ? state : null
     );
-    const res = await sync.pushCloudState(syncApiUrl, syncSession.token, payload);
+    if (!payload.updatedAt) payload.updatedAt = Date.now();
+    const pushOpts = options && options.keepalive ? { keepalive: true } : undefined;
+    const res = await sync.pushCloudState(syncApiUrl, syncSession.token, payload, undefined, pushOpts);
     if (res.unauthorized) {
       sync.clearAuthSession(storage);
       syncSession = null;
@@ -475,6 +480,11 @@
     clearTimeout(syncPushTimer);
     updateSyncUI('Pending...', 'muted');
     syncPushTimer = setTimeout(flushCloudPush, getSyncDebounceMs());
+  }
+
+  function flushPendingCloudPush(options) {
+    if (syncPushTimer === null) return;
+    flushCloudPush(options);
   }
 
   async function tryLoadUserMetadataRepo(login) {
@@ -624,11 +634,11 @@
   }
 
   async function resolveCoverForAlbum(item) {
+    const mbVariants = await tryMusicBrainzCovers(item);
+    const itunesVariants = await tryItunesCovers(item);
     const existingCustom = ((state.coverCache[item.id] && state.coverCache[item.id].variants) || []).filter(function (v) {
       return v.source === 'custom';
     });
-    const mbVariants = await tryMusicBrainzCovers(item);
-    const itunesVariants = await tryItunesCovers(item);
 
     const merged = [];
     const seen = new Set();
@@ -1501,11 +1511,23 @@
       githubSignOutBtn.addEventListener('click', function () {
         if (!sync) return;
         clearTimeout(syncPushTimer);
+        syncPushTimer = null;
         sync.clearAuthSession(storage);
         syncSession = null;
         syncPausedUntil = null;
         updateSyncUI();
         showToast('Signed out of cloud sync (local progress kept)');
+      });
+    }
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'hidden') {
+        flushPendingCloudPush({ keepalive: true });
+      }
+    });
+    if (typeof window.addEventListener === 'function') {
+      window.addEventListener('pagehide', function () {
+        flushPendingCloudPush({ keepalive: true });
       });
     }
   }

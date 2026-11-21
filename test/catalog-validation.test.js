@@ -1275,6 +1275,26 @@ describe('Cloud sync config and frontend sync module (js/config.js & js/sync.js)
     assert.equal(store.get(prefix + '_view_mode_v1'), 'single');
     assert.equal(store.get(prefix + '_note_dismissed_v1'), '1');
     assert.equal(applied.changedRemote, true);
+
+    // Unbaselined device with no local edits reports updatedAt === 0 and triggers zero redundant startup backfill
+    const freshStore = new Map();
+    let freshActiveUrl = null;
+    const freshStorage = {
+      safeGetItem: (k) => (freshStore.has(k) ? freshStore.get(k) : null),
+      safeSetItem: (k, v) => freshStore.set(k, String(v)),
+      safeRemoveItem: (k) => freshStore.delete(k),
+      getActiveCatalogUrl: () => freshActiveUrl,
+      setActiveCatalogUrl: (u) => { freshActiveUrl = u; }
+    };
+    const freshLocal = syncModule.buildLocalSyncPayload(freshStorage, null, null, null, 999999);
+    assert.equal(freshLocal.updatedAt, 0);
+    const freshMerged = syncModule.mergeAndApplyCloudState(freshStorage, freshLocal, {
+      schemaVersion: 1,
+      updatedAt: 500,
+      activeCatalogUrl: cloudPayload.activeCatalogUrl,
+      catalogs: {}
+    });
+    assert.equal(freshMerged.changedRemote, false);
   });
 
   it('handles pullCloudState and pushCloudState responses across 200, 401, 413, 429, 503, and offline errors', async () => {
@@ -1326,5 +1346,39 @@ describe('Cloud sync config and frontend sync module (js/config.js & js/sync.js)
       true
     );
     assert.equal((await syncModule.pushCloudState('https://sync.example', 'tok', {}, async () => { throw new Error('offline'); })).offline, true);
+  });
+
+  it('forwards keepalive option cleanly on pushCloudState and maintains Wrangler/config security hygiene', async () => {
+    const capturedInits = [];
+    const mockFetch = async (_url, init) => {
+      capturedInits.push(init);
+      return { status: 200, ok: true, async json() { return { ok: true, updatedAt: 10 }; } };
+    };
+
+    await syncModule.pushCloudState('https://sync.example', 'tok', { schemaVersion: 1 }, mockFetch);
+    await syncModule.pushCloudState('https://sync.example', 'tok', { schemaVersion: 1 }, mockFetch, { keepalive: true });
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch;
+    try {
+      await syncModule.pushCloudState('https://sync.example', 'tok', { schemaVersion: 1 }, { keepalive: true });
+      await syncModule.pushCloudState('https://sync.example', 'tok', { schemaVersion: 1 }, undefined, { keepalive: true });
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+
+    assert.equal(capturedInits[0].keepalive, undefined);
+    assert.equal(capturedInits[1].keepalive, true);
+    assert.equal(capturedInits[2].keepalive, true);
+    assert.equal(capturedInits[3].keepalive, true);
+
+    assert.ok(
+      configModule.syncApiUrl === '' || configModule.syncApiUrl.startsWith('https://'),
+      'config syncApiUrl must be empty or HTTPS'
+    );
+
+    const wranglerToml = fs.readFileSync(path.join(__dirname, '..', 'worker', 'wrangler.toml'), 'utf8');
+    assert.equal(/GITHUB_CLIENT_SECRET|JWT_SECRET/.test(wranglerToml), false, 'Secrets must never live in wrangler.toml');
+    assert.ok(wranglerToml.includes('ALLOWED_ORIGINS = "https://dopingus-build.github.io"'));
+    assert.ok(wranglerToml.includes('PAUSE_SYNC = "false"'));
   });
 });

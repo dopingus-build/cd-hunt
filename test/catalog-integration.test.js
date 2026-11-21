@@ -246,9 +246,11 @@ async function bootApp({
   };
   let lastCreatedElement = null;
 
+  const winListeners = {};
   const documentStub = {
     title: '',
     readyState: 'complete',
+    visibilityState: 'visible',
     body: {
       appendChild() {},
       removeChild() {}
@@ -377,6 +379,10 @@ async function bootApp({
     localStorage,
     location: locationObj,
     navigator: navigatorObj,
+    addEventListener(type, fn) {
+      if (!winListeners[type]) winListeners[type] = [];
+      winListeners[type].push(fn);
+    },
     history: {
       replaceState(_state, _title, nextUrl) {
         historyUpdates.push(nextUrl);
@@ -520,6 +526,19 @@ async function bootApp({
       for (const fn of docListeners.click || []) {
         fn(event);
       }
+    },
+    async triggerVisibilityChange(nextState) {
+      documentStub.visibilityState = nextState;
+      for (const fn of docListeners.visibilitychange || []) {
+        fn({});
+      }
+      await flush();
+    },
+    async triggerPageHide() {
+      for (const fn of winListeners.pagehide || []) {
+        fn({});
+      }
+      await flush();
     }
   };
 }
@@ -1856,5 +1875,308 @@ describe('GitHub Cloud Sync integration', () => {
       }
     });
     assert.ok(appOffline.elements.get('syncStatusPill').textContent.includes('Offline'));
+  });
+
+  it('flushes pending debounced pushes immediately with keepalive on visibilitychange/pagehide and skips when idle or signed out', async () => {
+    const sampleCatalog = JSON.parse(fs.readFileSync(SAMPLE_CATALOG_PATH, 'utf8'));
+    const catalogUrl = 'https://cdn.example/sample-catalog.json';
+    const jwt = makeFakeSyncJwt({ login: 'alice' });
+    const putCalls = [];
+
+    const app = await bootApp({
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      syncDebounceMs: 5000,
+      savedCatalogUrl: catalogUrl,
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      fetchImpl: async (url, init = {}) => {
+        const method = String(init.method || 'GET').toUpperCase();
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                user: { login: 'alice' },
+                updatedAt: 1000,
+                state: { schemaVersion: 1, updatedAt: 1000, activeCatalogUrl: catalogUrl, catalogs: {} }
+              };
+            }
+          };
+        }
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'PUT') {
+          putCalls.push({ keepalive: init.keepalive, body: JSON.parse(init.body) });
+          return { ok: true, status: 200, async json() { return { ok: true, updatedAt: Date.now() }; } };
+        }
+        if (url === catalogUrl) {
+          return { ok: true, status: 200, async json() { return sampleCatalog; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+
+    // No pending timer -> visibilitychange / pagehide do not fire redundant PUTs
+    await app.triggerVisibilityChange('hidden');
+    await app.triggerPageHide();
+    assert.equal(putCalls.length, 0);
+
+    // Pending edit -> visibilitychange('hidden') immediately flushes once with keepalive: true
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    await app.triggerVisibilityChange('hidden');
+    await app.triggerPageHide();
+    assert.equal(putCalls.length, 1);
+    assert.equal(putCalls[0].keepalive, true);
+
+    // Sign out with pending edit -> cleared timer must not fire on pagehide
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    await app.clickElement('githubSignOutBtn');
+    await app.triggerPageHide();
+    assert.equal(putCalls.length, 1);
+  });
+
+  it('handles mid-session PUT 413, 401, 503 paused short-circuit, and offline PUT failures', async () => {
+    const sampleCatalog = JSON.parse(fs.readFileSync(SAMPLE_CATALOG_PATH, 'utf8'));
+    const jwt = makeFakeSyncJwt({ login: 'alice' });
+
+    let nextPutStatus = 413;
+    let putCount = 0;
+
+    const app = await bootApp({
+      catalogObject: sampleCatalog,
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      syncDebounceMs: 10,
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      fetchImpl: async (url, init = {}) => {
+        const method = String(init.method || 'GET').toUpperCase();
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return { ok: true, status: 200, async json() { return { user: { login: 'alice' }, state: null, updatedAt: null }; } };
+        }
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'PUT') {
+          putCount++;
+          if (nextPutStatus === 'offline') {
+            throw new Error('put network error');
+          }
+          if (nextPutStatus === 413) {
+            return { ok: false, status: 413, async json() { return { error: 'Payload too large' }; } };
+          }
+          if (nextPutStatus === 503) {
+            return { ok: false, status: 503, async json() { return { paused: true, resetsAt: '00:00 UTC' }; } };
+          }
+          if (nextPutStatus === 401) {
+            return { ok: false, status: 401, async json() { return { error: 'Unauthorized' }; } };
+          }
+          return { ok: true, status: 200, async json() { return { ok: true, updatedAt: Date.now() }; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+
+    // 413 Payload Too Large
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    await app.flush();
+    assert.ok(app.elements.get('syncStatusPill').textContent.includes('Too large for cloud'));
+
+    // Network failure on PUT -> Offline status
+    nextPutStatus = 'offline';
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    await app.flush();
+    assert.ok(app.elements.get('syncStatusPill').textContent.includes('Offline — saved locally'));
+
+    // 503 Paused on PUT -> enters paused state and short-circuits further PUT requests
+    nextPutStatus = 503;
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    await app.flush();
+    assert.ok(app.elements.get('syncStatusPill').textContent.includes('Paused until 00:00 UTC'));
+    const countWhenPaused = putCount;
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'dig-01' });
+    await app.flush();
+    assert.equal(putCount, countWhenPaused, 'Paused client must not hammer /api/state');
+
+    // Fresh boot for mid-session 401 Unauthorized on PUT
+    const app401Put = await bootApp({
+      catalogObject: sampleCatalog,
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      syncDebounceMs: 10,
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      fetchImpl: async (url, init = {}) => {
+        const method = String(init.method || 'GET').toUpperCase();
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return { ok: true, status: 200, async json() { return { user: { login: 'alice' }, state: null, updatedAt: null }; } };
+        }
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'PUT') {
+          return { ok: false, status: 401, async json() { return { error: 'Unauthorized' }; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+    app401Put.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    await app401Put.flush();
+    assert.equal(app401Put.localStorage.getItem('cd_hunt_sync_token_v1'), null);
+    assert.equal(app401Put.elements.get('githubAuthBtn').classList.contains('hidden'), false);
+    assert.ok(app401Put.elements.get('syncStatusPill').textContent.includes('Session expired'));
+  });
+
+  it('conserves D1 write quota across rapid toggles and background cover lookups while pushing UI mutations and honoring ?syncApi= safely', async () => {
+    const sampleCatalog = JSON.parse(fs.readFileSync(SAMPLE_CATALOG_PATH, 'utf8'));
+    const catalogUrl = 'https://cdn.example/sample-catalog.json';
+    const prefix = deriveStoragePrefix({
+      sourceUrl: catalogUrl,
+      meta: sampleCatalog.meta,
+      items: sampleCatalog.items
+    });
+    const jwt = makeFakeSyncJwt({ login: 'alice' });
+
+    class MockVerifiedImage {
+      set src(val) {
+        this._src = val;
+        setTimeout(() => {
+          this.naturalWidth = 500;
+          this.naturalHeight = 500;
+          if (typeof this.onload === 'function') this.onload();
+        }, 1);
+      }
+    }
+
+    // 1) Coalescing rapid toggles + zero PUTs during background cover resolution
+    const coalescePuts = [];
+    const appCoalesce = await bootApp({
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      syncDebounceMs: 40,
+      savedCatalogUrl: catalogUrl,
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      imageImpl: MockVerifiedImage,
+      fetchImpl: async (url, init = {}) => {
+        const s = String(url);
+        const method = String(init.method || 'GET').toUpperCase();
+        if (s === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                user: { login: 'alice' },
+                updatedAt: 1000,
+                state: { schemaVersion: 1, updatedAt: 1000, activeCatalogUrl: catalogUrl, catalogs: {} }
+              };
+            }
+          };
+        }
+        if (s === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'PUT') {
+          coalescePuts.push(JSON.parse(init.body));
+          return { ok: true, status: 200, async json() { return { ok: true, updatedAt: Date.now() }; } };
+        }
+        if (s === catalogUrl) {
+          return { ok: true, status: 200, async json() { return sampleCatalog; } };
+        }
+        if (s.includes('musicbrainz.org/ws/2/release/')) {
+          return { ok: true, status: 200, async json() { return { releases: [{ id: 'mb-rel-1', status: 'Official' }] }; } };
+        }
+        if (s.includes('coverartarchive.org/release/mb-rel-1')) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { images: [{ front: true, thumbnails: { '500': 'https://img.example/mb-front-500.jpg' } }] };
+            }
+          };
+        }
+        if (s.includes('itunes.apple.com/search')) {
+          return { ok: true, status: 200, async json() { return { results: [] }; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+
+    // Background MusicBrainz cover resolution caches locally but makes 0 cloud PUTs
+    await appCoalesce.triggerIntersection('sample-01');
+    await new Promise((r) => setTimeout(r, 60));
+    const localCache = JSON.parse(appCoalesce.localStorage.getItem(prefix + '_cover_cache_v6'));
+    assert.ok(localCache && localCache['sample-01'] && localCache['sample-01'].variants.length > 0);
+    assert.equal(coalescePuts.length, 0, 'Background cover resolution must not trigger cloud PUTs');
+
+    // 5 rapid synchronous clicks coalesce into 1 PUT
+    for (let i = 0; i < 5; i++) {
+      appCoalesce.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    }
+    await new Promise((r) => setTimeout(r, 75));
+    assert.equal(coalescePuts.length, 1);
+
+    // 2) All explicit user mutation entrypoints trigger a cloud push + ?syncApi= override validation
+    const requestedUrlsLoopback = [];
+    const appMutations = await bootApp({
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      search: '?syncApi=http://127.0.0.1:8787',
+      syncDebounceMs: 10,
+      savedCatalogUrl: catalogUrl,
+      initialStorage: {
+        cd_hunt_sync_token_v1: jwt,
+        [prefix + '_cover_cache_v6']: {
+          'sample-01': {
+            variants: [
+              { url: 'https://custom.example/a.jpg', label: 'A', catNo: '', source: 'custom', isRegular: true },
+              { url: 'https://custom.example/b.jpg', label: 'B', catNo: '', source: 'custom', isRegular: false }
+            ],
+            selectedIndex: 0
+          }
+        }
+      },
+      fetchImpl: async (url, init = {}) => {
+        const s = String(url);
+        requestedUrlsLoopback.push(`${String(init.method || 'GET').toUpperCase()} ${s}`);
+        const method = String(init.method || 'GET').toUpperCase();
+        if (s === 'http://127.0.0.1:8787/api/state' && method === 'GET') {
+          return { ok: true, status: 200, async json() { return { user: { login: 'alice' }, state: null, updatedAt: null }; } };
+        }
+        if (s === 'http://127.0.0.1:8787/api/state' && method === 'PUT') {
+          return { ok: true, status: 200, async json() { return { ok: true, updatedAt: Date.now() }; } };
+        }
+        if (s === catalogUrl) {
+          return { ok: true, status: 200, async json() { return sampleCatalog; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+    const countPuts = () => requestedUrlsLoopback.filter((x) => x === 'PUT http://127.0.0.1:8787/api/state').length;
+    await appMutations.flush();
+    const basePuts = countPuts();
+
+    await appMutations.clickElement('viewModeBtn');
+    assert.equal(countPuts(), basePuts + 1, 'viewModeBtn should push');
+
+    await appMutations.clickElement('dismissNoteBtn');
+    assert.equal(countPuts(), basePuts + 2, 'dismissNoteBtn should push');
+
+    await appMutations.clickElement('restoreNoteBtn');
+    assert.equal(countPuts(), basePuts + 3, 'restoreNoteBtn should push');
+
+    appMutations.triggerDocumentClick('select-var', { 'data-id': 'sample-01', 'data-idx': '1' });
+    await appMutations.flush();
+    assert.equal(countPuts(), basePuts + 4, 'select-var should push');
+
+    appMutations.triggerDocumentClick('del-var', { 'data-id': 'sample-01', 'data-idx': '1' });
+    await appMutations.flush();
+    assert.equal(countPuts(), basePuts + 5, 'del-var should push');
+
+    appMutations.elements.get('backupTextarea').value = JSON.stringify({
+      checklist: { 'sample-01': true },
+      covers: {},
+      viewMode: 'grid'
+    });
+    await appMutations.clickElement('importBackupBtn');
+    assert.equal(countPuts(), basePuts + 6, 'importBackupBtn should push');
+
+    // Non-loopback ?syncApi=https://evil.example must be ignored in favor of config.syncApiUrl
+    const evilUrls = [];
+    await bootApp({
+      catalogObject: sampleCatalog,
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      search: '?syncApi=https://evil.example',
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      fetchImpl: async (url) => {
+        evilUrls.push(String(url));
+        return { ok: true, status: 200, async json() { return { user: { login: 'alice' }, state: null, updatedAt: null }; } };
+      }
+    });
+    assert.equal(evilUrls.some((u) => u.includes('evil.example')), false);
+    assert.ok(evilUrls.includes('https://cd-hunt-sync.tndo.workers.dev/api/state'));
   });
 });

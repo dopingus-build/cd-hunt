@@ -16,7 +16,10 @@ Catalog metadata lives externally (such as the companion flat repository [`dopin
 
 ```text
 cd-hunt/
-├── .github/workflows/test.yml     # CI running unit & integration tests
+├── .github/workflows/
+│   ├── test.yml                   # CI running unit, integration, & system tests
+│   ├── e2e-browser.yml            # CI running headless Chromium browser E2E suite
+│   └── smoke-live.yml             # Post-deploy / scheduled smoke checks against live Pages + Worker
 ├── .gitignore
 ├── .nojekyll                      # Bypass Jekyll on GitHub Pages
 ├── README.md
@@ -38,6 +41,9 @@ cd-hunt/
 │   ├── AGENT_CATALOG_GUIDE.md     # Guide for LLMs/agents creating & editing catalogs
 │   ├── CLOUD_SYNC_PLAN.md         # Concept & plan for Cloudflare Worker + D1 GitHub user sync
 │   └── sample-catalog.json        # Sample schemaVersion: 1 catalog JSON template
+├── scripts/
+│   ├── smoke-live.mjs             # Live GitHub Pages + Cloudflare Worker HTTP/CORS/OAuth smoke tests
+│   └── e2e-browser.mjs            # Headless Chromium E2E suite (desktop + mobile 375px + multi-device)
 ├── worker/
 │   ├── README.md                  # Worker API reference, deployment runbook, & Pages config
 │   ├── wrangler.toml              # Cloudflare Worker config, limits, & public [vars]
@@ -47,6 +53,7 @@ cd-hunt/
 └── test/
     ├── catalog-validation.test.js # Unit tests for validator, storage, cover resolver, & sync
     ├── catalog-integration.test.js # Integration tests for index.html, presets, UI, & cloud sync
+    ├── cloud-sync-system.test.js  # Full-stack system tests (Frontend VM <-> HTTP Worker <-> SQLite)
     ├── worker-sync.test.js        # Worker unit tests (JWT, CORS, OAuth, rate limits, pause guard)
     └── worker-integration.test.js # End-to-end HTTP + node:sqlite Worker integration tests
 ```
@@ -69,5 +76,11 @@ Optional per-user cloud sync is implemented and live (Phases 1–4 complete in [
 Requires Node.js `22.5+` (uses built-in `node:test` and `node:sqlite`, zero npm dependencies):
 
 ```sh
+# Core unit, integration, and full-stack system tests
 node --test test/*.test.js
+
+# Live deployment HTTP/CORS/OAuth smoke checks (Pages + Worker)
+node --test scripts/smoke-live.mjs
 ```
+
+A headless Chromium browser E2E suite ([`scripts/e2e-browser.mjs`](./scripts/e2e-browser.mjs)) also runs in GitHub Actions via [`.github/workflows/e2e-browser.yml`](./.github/workflows/e2e-browser.yml) using an ephemeral Playwright install so the repository remains free of `package.json`/`node_modules`.

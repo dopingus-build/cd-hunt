@@ -465,7 +465,7 @@
 
     return {
       schemaVersion: 1,
-      updatedAt: Number(meta.updatedAt) || ts,
+      updatedAt: Number(meta.updatedAt) || (activePrefix && activeState ? ts : 0),
       activeCatalogUrl: activeCatalogUrl || (storageApi && typeof storageApi.getActiveCatalogUrl === 'function' ? storageApi.getActiveCatalogUrl() : null) || null,
       catalogs: catalogs
     };
@@ -600,20 +600,29 @@
     }
   }
 
-  async function pushCloudState(syncApiUrl, token, payload, fetchFn) {
-    const fn = fetchFn || (root && root.fetch) || (typeof fetch === 'function' ? fetch : null);
+  async function pushCloudState(syncApiUrl, token, payload, fetchFn, options) {
+    const fn = typeof fetchFn === 'function'
+      ? fetchFn
+      : ((root && root.fetch) || (typeof fetch === 'function' ? fetch : null));
+    const opts = options && typeof options === 'object'
+      ? options
+      : (typeof fetchFn !== 'function' && fetchFn && typeof fetchFn === 'object' ? fetchFn : {});
     const base = cleanConfigSyncUrl(syncApiUrl);
     if (!fn || !base || !token) return { ok: false, offline: true };
 
     try {
-      const res = await fn(base + '/api/state', {
+      const fetchInit = {
         method: 'PUT',
         headers: {
           Authorization: 'Bearer ' + token,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(payload)
-      });
+      };
+      if (opts.keepalive) {
+        fetchInit.keepalive = true;
+      }
+      const res = await fn(base + '/api/state', fetchInit);
       if (res.status === 401) return { ok: false, unauthorized: true };
       if (res.status === 413) return { ok: false, payloadTooLarge: true };
       const body = await res.json().catch(function () { return {}; });

@@ -1,0 +1,30 @@
+name: Browser E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Playwright Chromium into temporary directory
+        run: |
+          mkdir -p /tmp/pw
+          npm install --no-save --prefix /tmp/pw playwright
+          /tmp/pw/node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Run headless Chromium E2E suite
+        env:
+          NODE_PATH: /tmp/pw/node_modules
+        run: node scripts/e2e-browser.mjs
