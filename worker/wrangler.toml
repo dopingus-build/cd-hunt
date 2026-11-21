@@ -13,8 +13,7 @@ USER_HOURLY_WRITE_LIMIT = "60"
 MAX_PAYLOAD_BYTES = "131072"
 PAUSE_SYNC = "false"
 
-# Populated during Phase 2 after running `wrangler d1 create cd-hunt-db`:
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "cd-hunt-db"
-# database_id = "<D1_DATABASE_ID>"
+[[d1_databases]]
+binding = "DB"
+database_name = "cd-hunt-db"
+database_id = "d09adf93-b9ba-4198-896a-5faa1bfcda08"
