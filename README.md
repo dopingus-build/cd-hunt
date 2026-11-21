@@ -39,7 +39,7 @@ cd-hunt/
 │   ├── HANDOVER.md                # Project context & architectural rules
 │   ├── METADATA.md                # Catalog & repository index specification
 │   ├── AGENT_CATALOG_GUIDE.md     # Guide for LLMs/agents creating & editing catalogs
-│   ├── CLOUD_SYNC_PLAN.md         # Concept & plan for Cloudflare Worker + D1 GitHub user sync
+│   ├── CLOUD_SYNC_ARCHITECTURE.md # Architecture design for Cloudflare Worker + D1 GitHub sync
 │   └── sample-catalog.json        # Sample schemaVersion: 1 catalog JSON template
 ├── scripts/
 │   ├── smoke-live.mjs             # Live GitHub Pages + Cloudflare Worker HTTP/CORS/OAuth smoke tests
@@ -60,7 +60,7 @@ cd-hunt/
 
 ## Optional Cloud Sync (Cloudflare Worker + D1)
 
-Optional per-user cloud sync is implemented and live (Phases 1–4 complete in [`docs/CLOUD_SYNC_PLAN.md`](./docs/CLOUD_SYNC_PLAN.md)), backed by the deployed Cloudflare Worker + D1 instance at `https://cd-hunt-sync.tndo.workers.dev` and wired via [`js/config.js`](./js/config.js) and [`js/sync.js`](./js/sync.js). Signing in uses zero-scope GitHub OAuth (`Sign in`), auto-discovers `<login>/cd-metadata/main/index.json` when no catalog is loaded, and syncs checklists plus compact custom-cover variants with a debounced background push while keeping offline `localStorage` as the primary source of truth. See [`worker/README.md`](./worker/README.md) for endpoint details, zero-scope GitHub OAuth guarantees, D1 deployment steps, self-pausing free-tier limits, and Worker URL configuration.
+Optional per-user cloud sync is deployed live using the architecture in [`docs/CLOUD_SYNC_ARCHITECTURE.md`](./docs/CLOUD_SYNC_ARCHITECTURE.md), backed by the Cloudflare Worker + D1 instance at `https://cd-hunt-sync.tndo.workers.dev` and wired via [`js/config.js`](./js/config.js) and [`js/sync.js`](./js/sync.js). Signing in uses zero-scope GitHub OAuth (`Sign in`), auto-discovers `<login>/cd-metadata/main/index.json` when no catalog is loaded, and syncs checklists plus compact custom-cover variants with debounced pushes and `visibilitychange`/`pagehide` `keepalive` flushes on mobile while keeping offline `localStorage` as the primary source of truth. See [`worker/README.md`](./worker/README.md) for endpoint details, zero-scope GitHub OAuth guarantees, D1 deployment steps, self-pausing free-tier limits, and Worker URL configuration.
 
 ## Using Your Own Metadata
 

@@ -1,6 +1,6 @@
 # CD Hunt Sync Worker (`cd-hunt/worker/`)
 
-Cloudflare Worker + Cloudflare D1 backend for optional per-user cloud sync in [**CD Hunt**](https://dopingus-build.github.io/cd-hunt/) ([`docs/CLOUD_SYNC_PLAN.md`](../docs/CLOUD_SYNC_PLAN.md)).
+Cloudflare Worker + Cloudflare D1 backend for optional per-user cloud sync in [**CD Hunt**](https://dopingus-build.github.io/cd-hunt/) ([`docs/CLOUD_SYNC_ARCHITECTURE.md`](../docs/CLOUD_SYNC_ARCHITECTURE.md)).
 
 ## 1. Overview & Zero-Scope Security Model
 
@@ -46,7 +46,7 @@ Never commit secrets to Git or place them in `wrangler.toml`:
 
 For local `wrangler dev` testing only, place these in `.dev.vars` (gitignored via `.gitignore`).
 
-## 4. Deployment Runbook (Phase 2)
+## 4. Deployment Runbook
 
 ```sh
 cd worker
@@ -86,9 +86,13 @@ window.CDHunt.config = {
 ## 6. Emergency Pause & Local Verification
 
 - **Emergency Circuit Break:** Set `PAUSE_SYNC = "true"` under `[vars]` in `worker/wrangler.toml` and run `wrangler deploy` (or toggle it in the Cloudflare Dashboard). `/api/state` immediately returns `HTTP 503` (`{ ok: false, paused: true, reason: "manual_pause_enabled", resetsAt }`), leaving local `localStorage` unaffected.
-- **Run Worker Unit & HTTP + SQLite Integration Tests:**
+- **Run Worker Unit, Integration, & Full-Stack System Tests:**
   ```sh
-  node --test test/worker-sync.test.js test/worker-integration.test.js
+  node --test test/worker-sync.test.js test/worker-integration.test.js test/cloud-sync-system.test.js
+  ```
+- **Run Live Production Smoke Checks:**
+  ```sh
+  node --test scripts/smoke-live.mjs
   ```
 - **Verify Cloudflare Bundle Compilation:**
   ```sh

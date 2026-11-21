@@ -17,5 +17,5 @@ jobs:
         with:
           node-version: 22
 
-      - name: Run unit & integration tests
+      - name: Run unit, integration, & system tests
         run: node --test test/*.test.js

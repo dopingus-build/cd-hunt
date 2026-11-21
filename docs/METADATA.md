@@ -13,9 +13,9 @@ This document specifies the versioned schema, loading rules, and cover-resolutio
    - **GitHub `/tree/<branch>` URL:** `https://github.com/<owner>/<repo>/tree/<branch>` → `https://raw.githubusercontent.com/<owner>/<repo>/<branch>/index.json`.
    - **Bare GitHub repository URL:** `https://github.com/<owner>/<repo>` (including trailing `/` or `.git`) → `https://raw.githubusercontent.com/<owner>/<repo>/main/index.json`.
    - When the fetched JSON is a repository `index.json` (has `catalogs[]` and no `items[]`), the Catalog Loader displays that repository's presets resolved relative to its raw base URL.
-2. **Saved Catalog URL (`localStorage` key `cd_hunt_catalog_url_v1`):** If no `?catalog=` parameter is present, reloads the previously loaded catalog JSON file URL automatically.
-3. **Catalog Loader Screen:** On first visit (with no `?catalog=` or saved URL), displays the interactive Catalog Loader where users can:
-   - Pick a dynamic preset fetched from [`dopingus-build/cd-metadata/index.json`](https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/index.json),
+2. **Saved or Cloud-Restored Catalog URL (`localStorage` key `cd_hunt_catalog_url_v1`):** If no `?catalog=` parameter is present, reloads the previously saved (or cloud-synced `activeCatalogUrl`) catalog JSON file URL automatically.
+3. **Catalog Loader Screen & Signed-In `<login>/cd-metadata` Discovery:** On first visit (with no `?catalog=` or saved/cloud URL), displays the interactive Catalog Loader where users can:
+   - Browse personal presets if signed in with GitHub (`https://raw.githubusercontent.com/<login>/cd-metadata/main/index.json`), otherwise pick presets fetched from [`dopingus-build/cd-metadata/index.json`](https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/index.json),
    - Paste any public metadata JSON URL or GitHub metadata repository URL (`https://github.com/<owner>/<repo>`, with **Copy Share Link** enabled once a catalog is loaded to share `?catalog=<url>`), or
    - Load a local `.json` file directly from their device.
 
