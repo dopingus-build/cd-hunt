@@ -75,60 +75,73 @@ function closeServer(server) {
 }
 
 async function attachExternalRoutes(context, appOrigin) {
-  await context.route('https://github.com/login/oauth/authorize**', async (route) => {
-    const reqUrl = new URL(route.request().url());
-    assert.equal(reqUrl.searchParams.get('scope'), null, 'GitHub OAuth authorize URL must omit scope');
-    assert.ok(reqUrl.searchParams.get('client_id'));
-    const state = reqUrl.searchParams.get('state');
-    const redirectUri = reqUrl.searchParams.get('redirect_uri');
-    assert.ok(state && redirectUri);
+  await context.route(
+    (url) => url.hostname !== '127.0.0.1' && url.hostname !== 'localhost',
+    async (route) => {
+      const reqUrl = new URL(route.request().url());
 
-    const callbackTarget = `${redirectUri}?code=code_alice&state=${encodeURIComponent(state)}`;
-    await route.fulfill({
-      status: 200,
-      contentType: 'text/html; charset=utf-8',
-      body: `<!doctype html><script>window.location.replace(${JSON.stringify(callbackTarget)});</script>`
-    });
-  });
+      if (reqUrl.origin + reqUrl.pathname === 'https://github.com/login/oauth/authorize') {
+        assert.equal(reqUrl.searchParams.get('scope'), null, 'GitHub OAuth authorize URL must omit scope');
+        assert.ok(reqUrl.searchParams.get('client_id'));
+        const state = reqUrl.searchParams.get('state');
+        const redirectUri = reqUrl.searchParams.get('redirect_uri');
+        assert.ok(state && redirectUri);
 
-  await context.route('https://raw.githubusercontent.com/alice/cd-metadata/main/index.json', async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      headers: { 'Access-Control-Allow-Origin': '*' },
-      body: JSON.stringify({
-        schemaVersion: 1,
-        catalogs: [{ title: 'Alice E2E List', url: `${appOrigin}/docs/sample-catalog.json` }]
-      })
-    });
-  });
+        const callbackTarget = `${redirectUri}?code=code_alice&state=${encodeURIComponent(state)}`;
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: `<!doctype html><script>window.location.replace(${JSON.stringify(callbackTarget)});</script>`
+        });
+        return;
+      }
 
-  await context.route('https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/index.json', async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      headers: { 'Access-Control-Allow-Origin': '*' },
-      body: JSON.stringify({ schemaVersion: 1, catalogs: [] })
-    });
-  });
+      if (reqUrl.href === 'https://raw.githubusercontent.com/alice/cd-metadata/main/index.json') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: JSON.stringify({
+            schemaVersion: 1,
+            catalogs: [{ title: 'Alice E2E List', url: `${appOrigin}/docs/sample-catalog.json` }]
+          })
+        });
+        return;
+      }
 
-  await context.route(/https:\/\/(?:musicbrainz\.org|coverartarchive\.org|itunes\.apple\.com)\/.*/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      headers: { 'Access-Control-Allow-Origin': '*' },
-      body: JSON.stringify({ releases: [], images: [], results: [] })
-    });
-  });
+      if (reqUrl.href === 'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/index.json') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: JSON.stringify({ schemaVersion: 1, catalogs: [] })
+        });
+        return;
+      }
 
-  await context.route('https://custom.e2e.example/cover.png', async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'image/png',
-      headers: { 'Access-Control-Allow-Origin': '*' },
-      body: ONE_BY_ONE_PNG
-    });
-  });
+      if (/^(?:musicbrainz\.org|coverartarchive\.org|itunes\.apple\.com)$/.test(reqUrl.hostname)) {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: JSON.stringify({ releases: [], images: [], results: [] })
+        });
+        return;
+      }
+
+      if (reqUrl.href === 'https://custom.e2e.example/cover.png') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'image/png',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: ONE_BY_ONE_PNG
+        });
+        return;
+      }
+
+      throw new Error(`Unexpected external browser request in offline E2E: ${reqUrl.href}`);
+    }
+  );
 }
 
 async function assertNoHorizontalOverflow(page, label) {
@@ -251,53 +264,60 @@ async function main() {
     const pageA = await ctxA.newPage();
     const pageAErrors = [];
     pageA.on('pageerror', (err) => pageAErrors.push(err.message));
+    pageA.on('requestfailed', (req) => pageAErrors.push(`requestfailed ${req.url()}: ${req.failure()?.errorText}`));
 
-    await pageA.goto(appUrlWithSync);
-    await pageA.waitForSelector('#githubAuthBtn:not(.hidden)');
-    await assertNoHorizontalOverflow(pageA, 'Signed-out desktop');
-    await pageA.setViewportSize({ width: 375, height: 812 });
-    await assertNoHorizontalOverflow(pageA, 'Signed-out mobile');
-    await pageA.setViewportSize({ width: 1280, height: 800 });
+    try {
+      await pageA.goto(appUrlWithSync);
+      await pageA.waitForSelector('#githubAuthBtn:not(.hidden)');
+      await assertNoHorizontalOverflow(pageA, 'Signed-out desktop');
+      await pageA.setViewportSize({ width: 375, height: 812 });
+      await assertNoHorizontalOverflow(pageA, 'Signed-out mobile');
+      await pageA.setViewportSize({ width: 1280, height: 800 });
 
-    await pageA.click('#githubAuthBtn');
-    await pageA.waitForSelector('#githubSignOutBtn:not(.hidden)');
-    await pageA.waitForFunction(() => {
-      const pill = document.getElementById('syncStatusPill');
-      return pill && pill.textContent.includes('@alice') && !pill.textContent.includes('Syncing');
-    });
-    assert.equal(await pageA.evaluate(() => window.location.hash), '');
+      await pageA.click('#githubAuthBtn');
+      await pageA.waitForSelector('#githubSignOutBtn:not(.hidden)');
+      await pageA.waitForFunction(() => {
+        const pill = document.getElementById('syncStatusPill');
+        return pill && pill.textContent.includes('@alice') && !pill.textContent.includes('Syncing');
+      });
+      assert.equal(await pageA.evaluate(() => window.location.hash), '');
 
-    await pageA.waitForSelector('[data-action="load-preset"]');
-    assert.ok((await pageA.textContent('#catalogPresetsList')).includes('Alice E2E List'));
-    await pageA.click('[data-action="load-preset"]');
-    await pageA.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '0 / 1');
+      await pageA.waitForSelector('[data-action="load-preset"]');
+      assert.ok((await pageA.textContent('#catalogPresetsList')).includes('Alice E2E List'));
+      await pageA.click('[data-action="load-preset"]');
+      await pageA.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '0 / 1');
 
-    // Toggle sample-01 acquired, switch to 1-Col view, add custom cover in Crate Flip, wait for Synced
-    await pageA.click('.check-btn[data-action="toggle-acq"][data-id="sample-01"]');
-    await pageA.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 1');
+      // Toggle sample-01 acquired, switch to 1-Col view, add custom cover in Crate Flip, wait for Synced
+      await pageA.click('.check-btn[data-action="toggle-acq"][data-id="sample-01"]');
+      await pageA.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 1');
 
-    await pageA.click('#viewModeBtn');
-    await pageA.waitForFunction(() => document.getElementById('viewModeLabel')?.textContent === 'Grid View');
+      await pageA.click('#viewModeBtn');
+      await pageA.waitForFunction(() => document.getElementById('viewModeLabel')?.textContent === 'Grid View');
 
-    await pageA.click('#openCrateFlipBtn');
-    await pageA.waitForSelector('#lightboxModal.open');
-    await pageA.click('#lbToggleCustomBtn');
-    await pageA.selectOption('#customCoverLabel', 'Custom Jacket');
-    await pageA.fill('#customCoverInput', 'https://custom.e2e.example/cover.png');
-    await pageA.click('#saveCustomCoverBtn');
-    await pageA.waitForFunction(() => document.getElementById('lbVariantsList')?.textContent.includes('Custom Jacket'));
-    await pageA.click('#closeLightboxBtn');
+      await pageA.click('#openCrateFlipBtn');
+      await pageA.waitForSelector('#lightboxModal.open');
+      await pageA.click('#lbToggleCustomBtn');
+      await pageA.selectOption('#customCoverLabel', 'Custom Jacket');
+      await pageA.fill('#customCoverInput', 'https://custom.e2e.example/cover.png');
+      await pageA.click('#saveCustomCoverBtn');
+      await pageA.waitForFunction(() => document.getElementById('lbVariantsList')?.textContent.includes('Custom Jacket'));
+      await pageA.click('#closeLightboxBtn');
 
-    await pageA.waitForFunction(() => document.getElementById('syncStatusPill')?.textContent.includes('Synced'));
+      await pageA.waitForFunction(() => document.getElementById('syncStatusPill')?.textContent.includes('Synced'));
 
-    // Reload Device A and confirm state survives in real localStorage + sync pull
-    await pageA.reload({ waitUntil: 'domcontentloaded' });
-    await pageA.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 1');
-    await pageA.waitForFunction(() => document.getElementById('viewModeLabel')?.textContent === 'Grid View');
-    await pageA.waitForFunction(() => document.getElementById('syncStatusPill')?.textContent.includes('Synced'));
-    await pageA.waitForSelector('img[src="https://custom.e2e.example/cover.png"]');
-    assert.equal(pageAErrors.length, 0, `Unexpected Device A page errors: ${pageAErrors.join('; ')}`);
-    await ctxA.close();
+      // Reload Device A and confirm state survives in real localStorage + sync pull
+      await pageA.reload({ waitUntil: 'domcontentloaded' });
+      await pageA.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 1');
+      await pageA.waitForFunction(() => document.getElementById('viewModeLabel')?.textContent === 'Grid View');
+      await pageA.waitForFunction(() => document.getElementById('syncStatusPill')?.textContent.includes('Synced'));
+      await pageA.waitForSelector('img[src="https://custom.e2e.example/cover.png"]');
+      assert.equal(pageAErrors.length, 0, `Unexpected Device A errors: ${pageAErrors.join('; ')}`);
+    } catch (err) {
+      console.error('Device A debug:', { url: pageA.url(), errors: pageAErrors });
+      throw err;
+    } finally {
+      await ctxA.close();
+    }
 
     // Device B: Separate clean context at 375x812 mobile viewport -> signs in -> restores SQLite state
     const ctxB = await browser.newContext({ viewport: { width: 375, height: 812 } });
@@ -305,41 +325,48 @@ async function main() {
     const pageB = await ctxB.newPage();
     const pageBErrors = [];
     pageB.on('pageerror', (err) => pageBErrors.push(err.message));
+    pageB.on('requestfailed', (req) => pageBErrors.push(`requestfailed ${req.url()}: ${req.failure()?.errorText}`));
 
-    await pageB.goto(appUrlWithSync);
-    await pageB.waitForSelector('#githubAuthBtn:not(.hidden)');
-    await pageB.click('#githubAuthBtn');
-    await pageB.waitForFunction(() => document.getElementById('syncStatusPill')?.textContent.includes('Synced'));
-    await pageB.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 1');
-    await pageB.waitForFunction(() => document.getElementById('viewModeLabel')?.textContent === 'Grid View');
-    await pageB.waitForSelector('img[src="https://custom.e2e.example/cover.png"]');
-    await assertNoHorizontalOverflow(pageB, 'Signed-in mobile 375px');
+    try {
+      await pageB.goto(appUrlWithSync);
+      await pageB.waitForSelector('#githubAuthBtn:not(.hidden)');
+      await pageB.click('#githubAuthBtn');
+      await pageB.waitForFunction(() => document.getElementById('syncStatusPill')?.textContent.includes('Synced'));
+      await pageB.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 1');
+      await pageB.waitForFunction(() => document.getElementById('viewModeLabel')?.textContent === 'Grid View');
+      await pageB.waitForSelector('img[src="https://custom.e2e.example/cover.png"]');
+      await assertNoHorizontalOverflow(pageB, 'Signed-in mobile 375px');
 
-    // Verify immediate visibilitychange keepalive flush beats the 2500ms debounce
-    await pageB.click('.check-btn[data-action="toggle-acq"][data-id="sample-01"]');
-    await pageB.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '0 / 1');
-    await pageB.evaluate(() => {
-      Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
+      // Verify immediate visibilitychange keepalive flush beats the 2500ms debounce
+      await pageB.click('.check-btn[data-action="toggle-acq"][data-id="sample-01"]');
+      await pageB.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '0 / 1');
+      await pageB.evaluate(() => {
+        Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
 
-    const deadline = Date.now() + 1200;
-    let persistedUncheck = false;
-    while (Date.now() < deadline) {
-      const rows = db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
-      if (rows.length === 1) {
-        const parsed = JSON.parse(rows[0].state_json);
-        const catEntry = Object.values(parsed.catalogs || {})[0];
-        if (catEntry && !catEntry.checklist['sample-01']) {
-          persistedUncheck = true;
-          break;
+      const deadline = Date.now() + 1200;
+      let persistedUncheck = false;
+      while (Date.now() < deadline) {
+        const rows = db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+        if (rows.length === 1) {
+          const parsed = JSON.parse(rows[0].state_json);
+          const catEntry = Object.values(parsed.catalogs || {})[0];
+          if (catEntry && !catEntry.checklist['sample-01']) {
+            persistedUncheck = true;
+            break;
+          }
         }
+        await new Promise((r) => setTimeout(r, 40));
       }
-      await new Promise((r) => setTimeout(r, 40));
+      assert.equal(persistedUncheck, true, 'Expected keepalive flush on visibilitychange to persist within 1200ms');
+      assert.equal(pageBErrors.length, 0, `Unexpected Device B errors: ${pageBErrors.join('; ')}`);
+    } catch (err) {
+      console.error('Device B debug:', { url: pageB.url(), errors: pageBErrors });
+      throw err;
+    } finally {
+      await ctxB.close();
     }
-    assert.equal(persistedUncheck, true, 'Expected keepalive flush on visibilitychange to persist within 1200ms');
-    assert.equal(pageBErrors.length, 0, `Unexpected Device B page errors: ${pageBErrors.join('; ')}`);
-    await ctxB.close();
 
     console.log('✓ Browser E2E checks passed (desktop + 375px mobile, OAuth, multi-device SQLite sync, keepalive flush)');
   } finally {
