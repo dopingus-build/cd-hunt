@@ -74,27 +74,34 @@ function closeServer(server) {
   });
 }
 
-async function attachExternalRoutes(context, appOrigin) {
+async function attachExternalRoutes(context, appOrigin, workerBaseUrl) {
+  await context.route(
+    (url) => url.origin + url.pathname === `${workerBaseUrl}/auth/login`,
+    async (route) => {
+      // Execute real local Worker /auth/login without letting Chromium follow the 302 to live github.com
+      const workerRes = await fetch(route.request().url(), { redirect: 'manual' });
+      assert.equal(workerRes.status, 302, 'Expected Worker /auth/login to return 302');
+      const ghAuthUrl = new URL(workerRes.headers.get('location'));
+      assert.equal(ghAuthUrl.origin + ghAuthUrl.pathname, 'https://github.com/login/oauth/authorize');
+      assert.equal(ghAuthUrl.searchParams.get('scope'), null, 'GitHub OAuth authorize URL must omit scope');
+      assert.equal(ghAuthUrl.searchParams.get('client_id'), 'gh-e2e-client');
+      const state = ghAuthUrl.searchParams.get('state');
+      const redirectUri = ghAuthUrl.searchParams.get('redirect_uri');
+      assert.ok(state && redirectUri);
+
+      const callbackTarget = `${redirectUri}?code=code_alice&state=${encodeURIComponent(state)}`;
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        body: `<!doctype html><script>window.location.replace(${JSON.stringify(callbackTarget)});</script>`
+      });
+    }
+  );
+
   await context.route(
     (url) => url.hostname !== '127.0.0.1' && url.hostname !== 'localhost',
     async (route) => {
       const reqUrl = new URL(route.request().url());
-
-      if (reqUrl.origin + reqUrl.pathname === 'https://github.com/login/oauth/authorize') {
-        assert.equal(reqUrl.searchParams.get('scope'), null, 'GitHub OAuth authorize URL must omit scope');
-        assert.ok(reqUrl.searchParams.get('client_id'));
-        const state = reqUrl.searchParams.get('state');
-        const redirectUri = reqUrl.searchParams.get('redirect_uri');
-        assert.ok(state && redirectUri);
-
-        const callbackTarget = `${redirectUri}?code=code_alice&state=${encodeURIComponent(state)}`;
-        await route.fulfill({
-          status: 200,
-          contentType: 'text/html; charset=utf-8',
-          body: `<!doctype html><script>window.location.replace(${JSON.stringify(callbackTarget)});</script>`
-        });
-        return;
-      }
 
       if (reqUrl.href === 'https://raw.githubusercontent.com/alice/cd-metadata/main/index.json') {
         await route.fulfill({
@@ -161,6 +168,11 @@ async function main() {
 
   const staticServer = http.createServer((req, res) => {
     const reqUrl = new URL(req.url, 'http://127.0.0.1');
+    if (reqUrl.pathname === '/favicon.ico') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     const relPath = decodeURIComponent(reqUrl.pathname === '/' ? '/index.html' : reqUrl.pathname);
     const resolved = path.resolve(ROOT_DIR, '.' + relPath);
     if (!resolved.startsWith(ROOT_DIR) || !fs.existsSync(resolved) || fs.statSync(resolved).isDirectory()) {
@@ -260,11 +272,12 @@ async function main() {
   try {
     // Device A: Desktop + Mobile layout + full OAuth login + edits + reload persistence
     const ctxA = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-    await attachExternalRoutes(ctxA, appOrigin);
+    await attachExternalRoutes(ctxA, appOrigin, workerBaseUrl);
     const pageA = await ctxA.newPage();
     const pageAErrors = [];
+    const requestFailedA = [];
     pageA.on('pageerror', (err) => pageAErrors.push(err.message));
-    pageA.on('requestfailed', (req) => pageAErrors.push(`requestfailed ${req.url()}: ${req.failure()?.errorText}`));
+    pageA.on('requestfailed', (req) => requestFailedA.push(`${req.url()}: ${req.failure()?.errorText}`));
 
     try {
       await pageA.goto(appUrlWithSync);
@@ -313,7 +326,7 @@ async function main() {
       await pageA.waitForSelector('img[src="https://custom.e2e.example/cover.png"]');
       assert.equal(pageAErrors.length, 0, `Unexpected Device A errors: ${pageAErrors.join('; ')}`);
     } catch (err) {
-      console.error('Device A debug:', { url: pageA.url(), errors: pageAErrors });
+      console.error('Device A debug:', { url: pageA.url(), errors: pageAErrors, requestFailed: requestFailedA });
       throw err;
     } finally {
       await ctxA.close();
@@ -321,11 +334,12 @@ async function main() {
 
     // Device B: Separate clean context at 375x812 mobile viewport -> signs in -> restores SQLite state
     const ctxB = await browser.newContext({ viewport: { width: 375, height: 812 } });
-    await attachExternalRoutes(ctxB, appOrigin);
+    await attachExternalRoutes(ctxB, appOrigin, workerBaseUrl);
     const pageB = await ctxB.newPage();
     const pageBErrors = [];
+    const requestFailedB = [];
     pageB.on('pageerror', (err) => pageBErrors.push(err.message));
-    pageB.on('requestfailed', (req) => pageBErrors.push(`requestfailed ${req.url()}: ${req.failure()?.errorText}`));
+    pageB.on('requestfailed', (req) => requestFailedB.push(`${req.url()}: ${req.failure()?.errorText}`));
 
     try {
       await pageB.goto(appUrlWithSync);
@@ -362,7 +376,7 @@ async function main() {
       assert.equal(persistedUncheck, true, 'Expected keepalive flush on visibilitychange to persist within 1200ms');
       assert.equal(pageBErrors.length, 0, `Unexpected Device B errors: ${pageBErrors.join('; ')}`);
     } catch (err) {
-      console.error('Device B debug:', { url: pageB.url(), errors: pageBErrors });
+      console.error('Device B debug:', { url: pageB.url(), errors: pageBErrors, requestFailed: requestFailedB });
       throw err;
     } finally {
       await ctxB.close();
