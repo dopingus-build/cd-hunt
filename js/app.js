@@ -8,6 +8,7 @@
   const CDHunt = window.CDHunt || {};
   const storage = CDHunt.storage;
   const coverResolver = CDHunt.coverResolver;
+  const sync = CDHunt.sync || null;
   const validateCatalog = window.validateCatalog || CDHunt.validateCatalog;
   const normalizeCatalogUrl = window.normalizeCatalogUrl || CDHunt.normalizeCatalogUrl || function (u) {
     return String(u || '').trim();
@@ -39,6 +40,7 @@
   let CATEGORIES = [];
   let CATALOG_META = {};
   let ACTIVE_STORAGE_CONTEXT = {};
+  let activeStoragePrefix = null;
   let hasLoadedCatalog = false;
   let activeCatalogUrl = null;
   let activeCatalogLabel = null;
@@ -46,6 +48,11 @@
   let presetsLoaded = false;
   let activeMetadataBaseUrl = METADATA_RAW_BASE_URL;
   let customRepoLoaded = false;
+  let syncApiUrl = '';
+  let syncSession = null;
+  let syncPausedUntil = null;
+  let syncPushTimer = null;
+  let suppressSyncPush = false;
 
   function deriveCategories(items) {
     const cats = [{ key: 'All', label: 'All Releases', dot: '#a1a1aa' }];
@@ -82,6 +89,7 @@
     };
 
     const keys = storage.getStorageKeys(ACTIVE_STORAGE_CONTEXT);
+    activeStoragePrefix = keys.prefix;
     CHECKLIST_KEY = keys.checklistKey;
     COVER_CACHE_KEY = keys.coverCacheKey;
     VIEW_MODE_KEY = keys.viewModeKey;
@@ -323,6 +331,9 @@
     showCatalogLoader(false);
     renderCategoryPills();
     renderAll();
+    if (!suppressSyncPush && opts.sourceUrl) {
+      scheduleCloudPush();
+    }
   }
 
   function isCatalogIndex(data) {
@@ -333,6 +344,20 @@
       Array.isArray(data.catalogs) &&
       !Array.isArray(data.items)
     );
+  }
+
+  function applyCatalogIndex(data, normalizedUrl, labelPrefix) {
+    const baseUrl = normalizedUrl.replace(/\/[^/]*$/, '/');
+    activeMetadataBaseUrl = baseUrl;
+    customRepoLoaded = true;
+    presetsLoaded = true;
+    activeCatalogLabel = (labelPrefix || 'Loaded repository index: ') + normalizedUrl;
+    clearErrorBanner();
+    showCatalogLoader(true);
+    const urlInput = document.getElementById('catalogUrlInput');
+    if (urlInput) urlInput.value = normalizedUrl;
+    renderCatalogPresets(data.catalogs, baseUrl);
+    return { type: 'index', url: normalizedUrl, catalogs: data.catalogs };
   }
 
   async function loadAndApplyCatalogFromUrl(rawUrl) {
@@ -347,20 +372,124 @@
     }
     const data = await res.json();
     if (isCatalogIndex(data)) {
-      const baseUrl = normalizedUrl.replace(/\/[^/]*$/, '/');
-      activeMetadataBaseUrl = baseUrl;
-      customRepoLoaded = true;
-      presetsLoaded = true;
-      activeCatalogLabel = 'Loaded repository index: ' + normalizedUrl;
-      clearErrorBanner();
-      showCatalogLoader(true);
-      const urlInput = document.getElementById('catalogUrlInput');
-      if (urlInput) urlInput.value = normalizedUrl;
-      renderCatalogPresets(data.catalogs, baseUrl);
-      return { type: 'index', url: normalizedUrl, catalogs: data.catalogs };
+      return applyCatalogIndex(data, normalizedUrl, 'Loaded repository index: ');
     }
     applyValidatedCatalog(data, { sourceUrl: normalizedUrl });
     return { type: 'catalog', url: normalizedUrl };
+  }
+
+  function getSyncDebounceMs() {
+    const cfg = (window.CDHunt && window.CDHunt.config) || {};
+    return typeof cfg.syncDebounceMs === 'number' && cfg.syncDebounceMs >= 0 ? cfg.syncDebounceMs : 2500;
+  }
+
+  function updateSyncUI(statusText, tone) {
+    const authBtn = document.getElementById('githubAuthBtn');
+    const signOutBtn = document.getElementById('githubSignOutBtn');
+    const statusPill = document.getElementById('syncStatusPill');
+
+    if (!sync || !syncApiUrl) {
+      if (authBtn) authBtn.classList.add('hidden');
+      if (signOutBtn) signOutBtn.classList.add('hidden');
+      if (statusPill) statusPill.classList.add('hidden');
+      return;
+    }
+
+    if (syncSession) {
+      if (authBtn) authBtn.classList.add('hidden');
+      if (signOutBtn) signOutBtn.classList.remove('hidden');
+      if (statusPill) {
+        statusPill.classList.remove('hidden', 'sync-pill-ok', 'sync-pill-warn', 'sync-pill-muted');
+        statusPill.classList.add(
+          tone === 'warn' ? 'sync-pill-warn' : tone === 'muted' ? 'sync-pill-muted' : 'sync-pill-ok'
+        );
+        statusPill.textContent = '@' + syncSession.user.login + (statusText ? ' · ' + statusText : '');
+      }
+      return;
+    }
+
+    if (authBtn) authBtn.classList.remove('hidden');
+    if (signOutBtn) signOutBtn.classList.add('hidden');
+    if (statusPill) {
+      if (statusText) {
+        statusPill.classList.remove('hidden', 'sync-pill-ok', 'sync-pill-warn', 'sync-pill-muted');
+        statusPill.classList.add(tone === 'ok' ? 'sync-pill-ok' : tone === 'muted' ? 'sync-pill-muted' : 'sync-pill-warn');
+        statusPill.textContent = statusText;
+      } else {
+        statusPill.classList.add('hidden');
+      }
+    }
+  }
+
+  async function flushCloudPush() {
+    syncPushTimer = null;
+    if (!sync || !syncApiUrl || !syncSession) return;
+    if (syncPausedUntil) {
+      updateSyncUI('Paused until 00:00 UTC', 'warn');
+      return;
+    }
+    updateSyncUI('Syncing...', 'muted');
+    const payload = sync.buildLocalSyncPayload(
+      storage,
+      activeCatalogUrl,
+      activeStoragePrefix,
+      hasLoadedCatalog ? state : null
+    );
+    const res = await sync.pushCloudState(syncApiUrl, syncSession.token, payload);
+    if (res.unauthorized) {
+      sync.clearAuthSession(storage);
+      syncSession = null;
+      updateSyncUI('Session expired', 'warn');
+      showToast('GitHub sync session expired — please sign in again');
+      return;
+    }
+    if (res.paused) {
+      syncPausedUntil = res.resetsAt || '00:00 UTC';
+      updateSyncUI('Paused until 00:00 UTC', 'warn');
+      return;
+    }
+    if (res.rateLimited) {
+      updateSyncUI('Rate limited — saved locally', 'warn');
+      return;
+    }
+    if (res.payloadTooLarge) {
+      updateSyncUI('Too large for cloud — local only', 'warn');
+      return;
+    }
+    if (!res.ok) {
+      updateSyncUI('Offline — saved locally', 'muted');
+      return;
+    }
+    updateSyncUI('Synced', 'ok');
+  }
+
+  function scheduleCloudPush() {
+    if (!sync || !syncApiUrl || !syncSession || suppressSyncPush) return;
+    if (activeStoragePrefix && typeof sync.markPrefixUpdated === 'function') {
+      sync.markPrefixUpdated(storage, activeStoragePrefix);
+    }
+    if (syncPausedUntil) {
+      updateSyncUI('Paused until 00:00 UTC', 'warn');
+      return;
+    }
+    clearTimeout(syncPushTimer);
+    updateSyncUI('Pending...', 'muted');
+    syncPushTimer = setTimeout(flushCloudPush, getSyncDebounceMs());
+  }
+
+  async function tryLoadUserMetadataRepo(login) {
+    if (!login) return false;
+    const repoIndexUrl = 'https://raw.githubusercontent.com/' + encodeURIComponent(login) + '/cd-metadata/main/index.json';
+    try {
+      const res = await fetch(repoIndexUrl);
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (!isCatalogIndex(data)) return false;
+      applyCatalogIndex(data, repoIndexUrl, 'Loaded ' + login + '/cd-metadata: ');
+      return true;
+    } catch (err) {
+      return false;
+    }
   }
 
   const state = {
@@ -614,6 +743,7 @@
     entry.selectedIndex = ((index % len) + len) % len;
     saveCoverCache();
     refreshCardDOM(id, direction);
+    scheduleCloudPush();
   }
 
   async function handlePerEntryRefresh(id, forceRefetch) {
@@ -739,6 +869,7 @@
     if (document.getElementById('lightboxModal').classList.contains('open')) {
       renderLightbox();
     }
+    scheduleCloudPush();
   }
 
   function renderCategoryPills() {
@@ -1081,6 +1212,7 @@
           entry.selectedIndex = Math.max(0, Math.min(entry.selectedIndex || 0, entry.variants.length - 1));
           saveCoverCache();
           refreshCardDOM(id);
+          scheduleCloudPush();
           showToast('Removed cover variant');
         }
       } else if (action === 'copy-cat') {
@@ -1097,6 +1229,7 @@
       safeSetItem(VIEW_MODE_KEY, state.viewMode);
       document.getElementById('viewModeLabel').textContent = state.viewMode === 'single' ? 'Grid View' : '1-Col View';
       renderAll();
+      scheduleCloudPush();
     });
 
     document.getElementById('huntingOnlyBtn').addEventListener('click', function () {
@@ -1152,12 +1285,14 @@
       document.getElementById('digitalNoteBanner').classList.add('hidden');
       document.getElementById('compactCountBar').classList.remove('hidden');
       safeSetItem(NOTE_DISMISSED_KEY, '1');
+      scheduleCloudPush();
     });
 
     document.getElementById('restoreNoteBtn').addEventListener('click', function () {
       document.getElementById('digitalNoteBanner').classList.remove('hidden');
       document.getElementById('compactCountBar').classList.add('hidden');
       safeRemoveItem(NOTE_DISMISSED_KEY);
+      scheduleCloudPush();
     });
 
     document.getElementById('closeLightboxBtn').addEventListener('click', closeLightbox);
@@ -1207,6 +1342,7 @@
       state.coverCache[item.id].selectedIndex = variants.length - 1;
       saveCoverCache();
       refreshCardDOM(item.id);
+      scheduleCloudPush();
       document.getElementById('customCoverInput').value = '';
       showToast('Added cover variant: ' + label);
     });
@@ -1249,6 +1385,7 @@
         }
         renderAll();
         backupModal.classList.remove('open');
+        scheduleCloudPush();
         showToast('Backup restored successfully');
       } catch (err) {
         showToast('Invalid JSON format');
@@ -1345,24 +1482,96 @@
         copyText(buildShareUrl(activeCatalogUrl));
       });
     }
+
+    const githubAuthBtn = document.getElementById('githubAuthBtn');
+    if (githubAuthBtn) {
+      githubAuthBtn.addEventListener('click', function () {
+        if (!sync || !syncApiUrl) return;
+        const loginUrl = sync.buildLoginUrl(syncApiUrl, window.location);
+        if (loginUrl && window.location && typeof window.location.assign === 'function') {
+          window.location.assign(loginUrl);
+        } else if (loginUrl && window.location) {
+          window.location.href = loginUrl;
+        }
+      });
+    }
+
+    const githubSignOutBtn = document.getElementById('githubSignOutBtn');
+    if (githubSignOutBtn) {
+      githubSignOutBtn.addEventListener('click', function () {
+        if (!sync) return;
+        clearTimeout(syncPushTimer);
+        sync.clearAuthSession(storage);
+        syncSession = null;
+        syncPausedUntil = null;
+        updateSyncUI();
+        showToast('Signed out of cloud sync (local progress kept)');
+      });
+    }
   }
 
   async function initApp() {
     setupIntersectionObserver();
     bindEvents();
 
+    const cfg = (window.CDHunt && window.CDHunt.config) || {};
+    syncApiUrl = sync ? sync.resolveSyncApiUrl(window.location, storage, cfg) : '';
+    if (sync && syncApiUrl) {
+      const captured = sync.captureAuthTokenFromHash(window.location, window.history, storage);
+      syncSession = captured || sync.getAuthSession(storage);
+      updateSyncUI(syncSession ? 'Syncing...' : '', 'muted');
+    } else {
+      updateSyncUI();
+    }
+
     try {
+      let needsCloudBackfill = false;
+      if (sync && syncApiUrl && syncSession) {
+        const pullRes = await sync.pullCloudState(syncApiUrl, syncSession.token);
+        if (pullRes.unauthorized) {
+          sync.clearAuthSession(storage);
+          syncSession = null;
+          updateSyncUI('Session expired', 'warn');
+        } else if (pullRes.paused) {
+          syncPausedUntil = pullRes.resetsAt || '00:00 UTC';
+          updateSyncUI('Paused until 00:00 UTC', 'warn');
+        } else if (pullRes.offline || !pullRes.ok) {
+          updateSyncUI('Offline — saved locally', 'muted');
+        } else {
+          const localPayload = sync.buildLocalSyncPayload(storage, null, null, null);
+          if (pullRes.state) {
+            const mergeRes = sync.mergeAndApplyCloudState(storage, localPayload, pullRes.state);
+            needsCloudBackfill = mergeRes.changedRemote;
+          } else if (Object.keys(localPayload.catalogs).length > 0 || localPayload.activeCatalogUrl) {
+            needsCloudBackfill = true;
+          }
+          updateSyncUI('Synced', 'ok');
+        }
+      }
+
       const params = new URLSearchParams(window.location.search || '');
       const queryUrl = params.get('catalog');
       const savedUrl = typeof storage.getActiveCatalogUrl === 'function' ? storage.getActiveCatalogUrl() : null;
       const initialUrl = queryUrl || savedUrl;
 
-      if (initialUrl) {
-        await loadAndApplyCatalogFromUrl(initialUrl);
-      } else if (window.CD_HUNT_CATALOG) {
-        applyValidatedCatalog(window.CD_HUNT_CATALOG, {});
-      } else {
-        showCatalogLoader(true);
+      suppressSyncPush = true;
+      try {
+        if (initialUrl) {
+          await loadAndApplyCatalogFromUrl(initialUrl);
+        } else if (window.CD_HUNT_CATALOG) {
+          applyValidatedCatalog(window.CD_HUNT_CATALOG, {});
+        } else {
+          const loadedUserRepo = syncSession ? await tryLoadUserMetadataRepo(syncSession.user.login) : false;
+          if (!loadedUserRepo) {
+            showCatalogLoader(true);
+          }
+        }
+      } finally {
+        suppressSyncPush = false;
+      }
+
+      if (needsCloudBackfill && syncSession) {
+        scheduleCloudPush();
       }
     } catch (err) {
       showErrorBanner('App Initialization Error: ' + (err && err.message ? err.message : String(err)));

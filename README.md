@@ -27,7 +27,9 @@ cd-hunt/
 │   ├── validate.js                # Versioned schema validator & GitHub URL normalizer
 │   ├── storage.js                 # Sandbox-safe localStorage wrapper & derived key prefixing
 │   ├── cover-resolver.js          # Offline SVG obi generator + MusicBrainz/iTunes lookup
-│   └── app.js                     # App state, catalog loader, rendering, modals
+│   ├── config.js                  # Static frontend sync endpoint config (window.CDHunt.config)
+│   ├── sync.js                    # GitHub session JWT handling, state merge, & cloud sync client
+│   └── app.js                     # App state, catalog loader, rendering, modals, & sync wiring
 ├── schemas/
 │   └── catalog.v1.schema.json     # JSON Schema (Draft 2020-12) for schemaVersion: 1 catalogs
 ├── docs/
@@ -43,15 +45,15 @@ cd-hunt/
 │   ├── index.mjs                  # ESM entrypoint re-exporting worker/index.js
 │   └── index.js                   # Zero-scope GitHub OAuth, JWT auth, D1 API & circuit breaker
 └── test/
-    ├── catalog-validation.test.js # Unit tests for validator, storage, & cover resolver
-    ├── catalog-integration.test.js # Integration tests for index.html, presets, loader, & UI
+    ├── catalog-validation.test.js # Unit tests for validator, storage, cover resolver, & sync
+    ├── catalog-integration.test.js # Integration tests for index.html, presets, UI, & cloud sync
     ├── worker-sync.test.js        # Worker unit tests (JWT, CORS, OAuth, rate limits, pause guard)
     └── worker-integration.test.js # End-to-end HTTP + node:sqlite Worker integration tests
 ```
 
 ## Optional Cloud Sync (Cloudflare Worker + D1)
 
-A Cloudflare Worker backend lives in [`worker/`](./worker/) (Phase 1 implemented; provisioning and frontend integration planned in [`docs/CLOUD_SYNC_PLAN.md`](./docs/CLOUD_SYNC_PLAN.md)). See [`worker/README.md`](./worker/README.md) for endpoint details, zero-scope GitHub OAuth security guarantees, D1 deployment steps, self-pausing free-tier limits, and configuring the Worker URL on GitHub Pages.
+Optional per-user cloud sync is implemented and live (Phases 1–4 complete in [`docs/CLOUD_SYNC_PLAN.md`](./docs/CLOUD_SYNC_PLAN.md)), backed by the deployed Cloudflare Worker + D1 instance at `https://cd-hunt-sync.tndo.workers.dev` and wired via [`js/config.js`](./js/config.js) and [`js/sync.js`](./js/sync.js). Signing in uses zero-scope GitHub OAuth (`Sign in`), auto-discovers `<login>/cd-metadata/main/index.json` when no catalog is loaded, and syncs checklists plus compact custom-cover variants with a debounced background push while keeping offline `localStorage` as the primary source of truth. See [`worker/README.md`](./worker/README.md) for endpoint details, zero-scope GitHub OAuth guarantees, D1 deployment steps, self-pausing free-tier limits, and Worker URL configuration.
 
 ## Using Your Own Metadata
 

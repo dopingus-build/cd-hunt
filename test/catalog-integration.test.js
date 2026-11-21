@@ -47,6 +47,8 @@ function getPresetTestFixtures() {
 const VALIDATE_PATH = path.join(ROOT_DIR, 'js', 'validate.js');
 const STORAGE_PATH = path.join(ROOT_DIR, 'js', 'storage.js');
 const COVER_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'cover-resolver.js');
+const CONFIG_PATH = path.join(ROOT_DIR, 'js', 'config.js');
+const SYNC_PATH = path.join(ROOT_DIR, 'js', 'sync.js');
 const APP_PATH = path.join(ROOT_DIR, 'js', 'app.js');
 
 const { deriveStoragePrefix } = require('../js/storage.js');
@@ -156,6 +158,13 @@ function buildDomElements(html, onImgQuery) {
 function createStorage() {
   const store = new Map();
   return {
+    get length() {
+      return store.size;
+    },
+    key(index) {
+      if (index < 0 || index >= store.size) return null;
+      return Array.from(store.keys())[index];
+    },
     getItem(key) {
       return store.has(key) ? store.get(key) : null;
     },
@@ -174,8 +183,11 @@ async function bootApp({
   savedCatalogUrl,
   initialStorage,
   search = '',
+  hash = '',
   origin = 'https://dopingus-build.github.io',
   pathname = '/cd-hunt/',
+  syncApiUrl = '',
+  syncDebounceMs = 10,
   fetchImpl,
   imageImpl,
   disableIntersectionObserver = false,
@@ -186,6 +198,8 @@ async function bootApp({
   const validatorSource = readValidatorSource();
   const storageSource = fs.readFileSync(STORAGE_PATH, 'utf8');
   const coverResolverSource = fs.readFileSync(COVER_RESOLVER_PATH, 'utf8');
+  const configSource = fs.readFileSync(CONFIG_PATH, 'utf8');
+  const syncSource = fs.readFileSync(SYNC_PATH, 'utf8');
   const appScript = fs.readFileSync(APP_PATH, 'utf8');
 
   const fallbackImgsById = new Map();
@@ -220,7 +234,16 @@ async function bootApp({
 
   const copiedTexts = [];
   const historyUpdates = [];
-  const locationObj = { search, origin, pathname };
+  const locationNavigations = [];
+  const locationObj = {
+    search,
+    hash,
+    origin,
+    pathname,
+    assign(nextUrl) {
+      locationNavigations.push(nextUrl);
+    }
+  };
   let lastCreatedElement = null;
 
   const documentStub = {
@@ -338,7 +361,12 @@ async function bootApp({
 
   const sandbox = {
     console: { log() {}, warn() {}, error() {} },
+    URL,
     URLSearchParams,
+    atob,
+    btoa,
+    TextDecoder,
+    TextEncoder,
     Image: imageImpl || MockImage,
     FileReader: MockFileReader,
     setTimeout,
@@ -352,8 +380,12 @@ async function bootApp({
     history: {
       replaceState(_state, _title, nextUrl) {
         historyUpdates.push(nextUrl);
-        const qIdx = String(nextUrl).indexOf('?');
-        locationObj.search = qIdx !== -1 ? String(nextUrl).slice(qIdx) : '';
+        const s = String(nextUrl);
+        const hashIdx = s.indexOf('#');
+        locationObj.hash = hashIdx !== -1 ? s.slice(hashIdx) : '';
+        const beforeHash = hashIdx !== -1 ? s.slice(0, hashIdx) : s;
+        const qIdx = beforeHash.indexOf('?');
+        locationObj.search = qIdx !== -1 ? beforeHash.slice(qIdx) : '';
       }
     },
     fetch:
@@ -387,6 +419,10 @@ async function bootApp({
   vm.runInContext(validatorSource, context, { filename: VALIDATE_PATH });
   vm.runInContext(storageSource, context, { filename: STORAGE_PATH });
   vm.runInContext(coverResolverSource, context, { filename: COVER_RESOLVER_PATH });
+  vm.runInContext(configSource, context, { filename: CONFIG_PATH });
+  context.CDHunt.config.syncApiUrl = syncApiUrl;
+  context.CDHunt.config.syncDebounceMs = syncDebounceMs;
+  vm.runInContext(syncSource, context, { filename: SYNC_PATH });
   vm.runInContext(appScript, context, { filename: APP_PATH });
 
   async function flush() {
@@ -399,6 +435,7 @@ async function bootApp({
     elements,
     localStorage,
     historyUpdates,
+    locationNavigations,
     copiedTexts,
     observedTargets,
     document: documentStub,
@@ -534,11 +571,16 @@ describe('HTML entrypoint generalization & script wiring', () => {
     assert.ok(html.includes('id="loadCatalogFileBtn"'), 'Local JSON file button should exist');
     assert.ok(html.includes('id="copyShareLinkBtn"'), 'Copy Share Link button should exist');
     assert.ok(html.includes('id="catalogPresetsList"'), 'Dynamic presets container should exist');
+    assert.ok(html.includes('id="githubAuthBtn"'), 'GitHub sign-in button should exist');
+    assert.ok(html.includes('id="githubSignOutBtn"'), 'GitHub sign-out button should exist');
+    assert.ok(html.includes('id="syncStatusPill"'), 'Cloud sync status pill should exist');
 
     const expectedScripts = [
       '<script src="./js/validate.js"></script>',
       '<script src="./js/storage.js"></script>',
       '<script src="./js/cover-resolver.js"></script>',
+      '<script src="./js/config.js"></script>',
+      '<script src="./js/sync.js"></script>',
       '<script src="./js/app.js"></script>'
     ];
 
@@ -1484,5 +1526,335 @@ describe('Catalog Loader UI interactions and error edge cases', () => {
       }
     });
     assert.ok(appOffline.elements.get('catalogPresetsList').innerHTML.includes('Presets unavailable offline'));
+  });
+});
+
+function makeFakeSyncJwt(payload = {}) {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const body = Buffer.from(
+    JSON.stringify({
+      purpose: 'session',
+      sub: '4242',
+      login: 'alice',
+      avatarUrl: 'https://avatars.githubusercontent.com/u/4242',
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      ...payload
+    })
+  ).toString('base64url');
+  return `${header}.${body}.dummy-sig`;
+}
+
+describe('GitHub Cloud Sync integration', () => {
+  it('hides auth and sync controls when syncApiUrl is empty and redirects via location.assign when enabled', async () => {
+    const appDisabled = await bootApp({
+      catalogObject: JSON.parse(fs.readFileSync(SAMPLE_CATALOG_PATH, 'utf8')),
+      syncApiUrl: ''
+    });
+    assert.equal(appDisabled.elements.get('githubAuthBtn').classList.contains('hidden'), true);
+    assert.equal(appDisabled.elements.get('githubSignOutBtn').classList.contains('hidden'), true);
+    assert.equal(appDisabled.elements.get('syncStatusPill').classList.contains('hidden'), true);
+
+    const appEnabled = await bootApp({
+      catalogObject: JSON.parse(fs.readFileSync(SAMPLE_CATALOG_PATH, 'utf8')),
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev'
+    });
+    assert.equal(appEnabled.elements.get('githubAuthBtn').classList.contains('hidden'), false);
+    assert.equal(appEnabled.elements.get('githubSignOutBtn').classList.contains('hidden'), true);
+
+    await appEnabled.clickElement('githubAuthBtn');
+    assert.equal(appEnabled.locationNavigations.length, 1);
+    assert.ok(
+      appEnabled.locationNavigations[0].startsWith(
+        'https://cd-hunt-sync.tndo.workers.dev/auth/login?redirect='
+      )
+    );
+  });
+
+  it('captures #auth_token hash, pulls cloud state to restore catalog/progress, and preserves local progress on sign-out', async () => {
+    const sampleCatalog = JSON.parse(fs.readFileSync(SAMPLE_CATALOG_PATH, 'utf8'));
+    const catalogUrl = 'https://cdn.example/sample-catalog.json';
+    const prefix = deriveStoragePrefix({
+      sourceUrl: catalogUrl,
+      meta: sampleCatalog.meta,
+      items: sampleCatalog.items
+    });
+    const jwt = makeFakeSyncJwt({ login: 'alice' });
+    const putCalls = [];
+
+    const app = await bootApp({
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      hash: '#auth_token=' + encodeURIComponent(jwt),
+      fetchImpl: async (url, init = {}) => {
+        const method = String(init.method || 'GET').toUpperCase();
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                user: { login: 'alice' },
+                updatedAt: 1700000005000,
+                state: {
+                  schemaVersion: 1,
+                  updatedAt: 1700000005000,
+                  activeCatalogUrl: catalogUrl,
+                  catalogs: {
+                    [prefix]: {
+                      updatedAt: 1700000005000,
+                      checklist: { 'sample-01': true },
+                      viewMode: 'grid',
+                      noteDismissed: true,
+                      customCovers: {
+                        'sample-01': {
+                          variants: [{ url: 'https://img.example/custom.jpg', label: 'Cloud Custom', catNo: '', source: 'custom', isRegular: true }],
+                          selectedIndex: 0
+                        }
+                      },
+                      selectedVariants: {
+                        'sample-01': { url: 'https://img.example/custom.jpg', selectedIndex: 0 }
+                      }
+                    }
+                  }
+                }
+              };
+            }
+          };
+        }
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'PUT') {
+          putCalls.push(JSON.parse(init.body));
+          return { ok: true, status: 200, async json() { return { ok: true, updatedAt: Date.now() }; } };
+        }
+        if (url === catalogUrl) {
+          return { ok: true, status: 200, async json() { return sampleCatalog; } };
+        }
+        if (String(url).endsWith('/index.json')) {
+          return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+        }
+        throw new Error('Unexpected fetch: ' + url);
+      }
+    });
+
+    assert.equal(app.localStorage.getItem('cd_hunt_sync_token_v1'), jwt);
+    assert.ok(app.historyUpdates.length >= 1);
+    assert.equal(app.localStorage.getItem('cd_hunt_catalog_url_v1'), catalogUrl);
+    assert.equal(app.elements.get('githubAuthBtn').classList.contains('hidden'), true);
+    assert.equal(app.elements.get('githubSignOutBtn').classList.contains('hidden'), false);
+    assert.ok(app.elements.get('syncStatusPill').textContent.includes('alice'));
+
+    const checklistMap = JSON.parse(app.localStorage.getItem(prefix + '_checklist_v2'));
+    assert.equal(checklistMap['sample-01'], true);
+    const cache = JSON.parse(app.localStorage.getItem(prefix + '_cover_cache_v6'));
+    assert.equal(cache['sample-01'].variants[0].label, 'Cloud Custom');
+    assert.equal(cache['sample-01'].variants[0].source, 'custom');
+
+    // Sign out preserves local catalog & acquired progress while clearing session token
+    await app.clickElement('githubSignOutBtn');
+    assert.equal(app.localStorage.getItem('cd_hunt_sync_token_v1'), null);
+    assert.equal(app.elements.get('githubAuthBtn').classList.contains('hidden'), false);
+    assert.equal(app.elements.get('githubSignOutBtn').classList.contains('hidden'), true);
+    assert.equal(JSON.parse(app.localStorage.getItem(prefix + '_checklist_v2'))['sample-01'], true);
+  });
+
+  it('pushes debounced compact custom-cover-only payloads without public MusicBrainz bloat', async () => {
+    const sampleCatalog = JSON.parse(fs.readFileSync(SAMPLE_CATALOG_PATH, 'utf8'));
+    const catalogUrl = 'https://cdn.example/sample-catalog.json';
+    const prefix = deriveStoragePrefix({
+      sourceUrl: catalogUrl,
+      meta: sampleCatalog.meta,
+      items: sampleCatalog.items
+    });
+    const jwt = makeFakeSyncJwt({ login: 'alice' });
+    const putRequests = [];
+
+    const app = await bootApp({
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      savedCatalogUrl: catalogUrl,
+      initialStorage: {
+        cd_hunt_sync_token_v1: jwt,
+        [prefix + '_cover_cache_v6']: {
+          'dig-01': {
+            variants: [{ url: 'https://coverartarchive.org/release/mb-1/front-500.jpg', label: 'Regular', catNo: 'SRCL-1', source: 'musicbrainz', isRegular: true }],
+            selectedIndex: 0
+          }
+        }
+      },
+      fetchImpl: async (url, init = {}) => {
+        const method = String(init.method || 'GET').toUpperCase();
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { user: { login: 'alice' }, state: null, updatedAt: null };
+            }
+          };
+        }
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'PUT') {
+          putRequests.push({
+            auth: init.headers && (init.headers.Authorization || init.headers.authorization),
+            body: JSON.parse(init.body)
+          });
+          return { ok: true, status: 200, async json() { return { ok: true, updatedAt: Date.now() }; } };
+        }
+        if (url === catalogUrl) {
+          return { ok: true, status: 200, async json() { return sampleCatalog; } };
+        }
+        if (String(url).endsWith('/index.json')) {
+          return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+        }
+        throw new Error('Unexpected fetch: ' + url);
+      }
+    });
+
+    const initialPuts = putRequests.length;
+
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    app.triggerDocumentClick('open-lb', { 'data-lb-idx': '0' });
+    await app.clickElement('lbToggleCustomBtn');
+    app.elements.get('customCoverInput').value = 'https://img.example/only-custom.jpg';
+    app.elements.get('customCoverLabel').value = 'Custom Edition';
+    await app.clickElement('saveCustomCoverBtn');
+    await app.flush();
+
+    assert.ok(putRequests.length > initialPuts, 'Expected debounced PUT /api/state request');
+    const latest = putRequests[putRequests.length - 1];
+    assert.equal(latest.auth, 'Bearer ' + jwt);
+    const catState = latest.body.catalogs[prefix];
+    assert.equal(catState.checklist['sample-01'], true);
+    assert.ok(catState.customCovers['sample-01']);
+    assert.equal(catState.customCovers['sample-01'].variants[0].url, 'https://img.example/only-custom.jpg');
+    assert.equal(catState.customCovers['dig-01'], undefined, 'Public MusicBrainz covers must not be synced');
+  });
+
+  it('auto-discovers <login>/cd-metadata/main/index.json when signed in without an active catalog and falls back cleanly on 404', async () => {
+    const userCatalogUrl = 'https://raw.githubusercontent.com/alice/cd-metadata/main/main.json';
+    const jwt = makeFakeSyncJwt({ login: 'alice' });
+    const requestedUrls = [];
+
+    const appFound = await bootApp({
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      fetchImpl: async (url, init = {}) => {
+        requestedUrls.push(String(url));
+        const method = String(init.method || 'GET').toUpperCase();
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return { ok: true, status: 200, async json() { return { user: { login: 'alice' }, state: null, updatedAt: null }; } };
+        }
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'PUT') {
+          return { ok: true, status: 200, async json() { return { ok: true, updatedAt: Date.now() }; } };
+        }
+        if (url === 'https://raw.githubusercontent.com/alice/cd-metadata/main/index.json') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                schemaVersion: 1,
+                catalogs: [{ title: 'Alice Custom', url: userCatalogUrl }]
+              };
+            }
+          };
+        }
+        if (String(url).endsWith('/index.json')) {
+          return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+        }
+        throw new Error('Unexpected fetch: ' + url);
+      }
+    });
+
+    assert.ok(requestedUrls.includes('https://raw.githubusercontent.com/alice/cd-metadata/main/index.json'));
+    assert.equal(appFound.elements.get('catalogLoaderScreen').classList.contains('hidden'), false);
+    assert.equal(
+      appFound.elements.get('catalogUrlInput').value,
+      'https://raw.githubusercontent.com/alice/cd-metadata/main/index.json'
+    );
+    assert.ok(appFound.elements.get('activeCatalogInfo').textContent.includes('Loaded alice/cd-metadata'));
+    assert.ok(appFound.elements.get('catalogPresetsList').innerHTML.includes('Alice Custom'));
+
+    const app404 = await bootApp({
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      fetchImpl: async (url, init = {}) => {
+        const method = String(init.method || 'GET').toUpperCase();
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return { ok: true, status: 200, async json() { return { user: { login: 'alice' }, state: null, updatedAt: null }; } };
+        }
+        if (url === 'https://raw.githubusercontent.com/alice/cd-metadata/main/index.json') {
+          return { ok: false, status: 404, async json() { return {}; } };
+        }
+        if (String(url).endsWith('/index.json')) {
+          return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+        }
+        throw new Error('Unexpected fetch: ' + url);
+      }
+    });
+
+    assert.equal(app404.localStorage.getItem('cd_hunt_catalog_url_v1'), null);
+    assert.equal(app404.elements.get('catalogLoaderScreen').classList.contains('hidden'), false);
+  });
+
+  it('degrades gracefully on 503 paused, 429 rate-limited, 401 expired session, and offline pull errors', async () => {
+    const sampleCatalog = JSON.parse(fs.readFileSync(SAMPLE_CATALOG_PATH, 'utf8'));
+    const jwt = makeFakeSyncJwt({ login: 'alice' });
+
+    const app503 = await bootApp({
+      catalogObject: sampleCatalog,
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      fetchImpl: async (url) => {
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state') {
+          return { ok: false, status: 503, async json() { return { paused: true, resetsAt: '00:00 UTC' }; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+    assert.ok(app503.elements.get('syncStatusPill').textContent.includes('Paused until 00:00 UTC'));
+
+    const app429 = await bootApp({
+      catalogObject: sampleCatalog,
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      fetchImpl: async (url, init = {}) => {
+        const method = String(init.method || 'GET').toUpperCase();
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return { ok: true, status: 200, async json() { return { user: { login: 'alice' }, state: null, updatedAt: null }; } };
+        }
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'PUT') {
+          return { ok: false, status: 429, headers: new Map([['Retry-After', '30']]), async json() { return { retryAfterSeconds: 30 }; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+    app429.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    await app429.flush();
+    assert.ok(app429.elements.get('syncStatusPill').textContent.includes('Rate limited'));
+
+    const app401 = await bootApp({
+      catalogObject: sampleCatalog,
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      fetchImpl: async (url) => {
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state') {
+          return { ok: false, status: 401, async json() { return { error: 'Unauthorized' }; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+    assert.ok(app401.elements.get('syncStatusPill').textContent.includes('Session expired'));
+    assert.equal(app401.localStorage.getItem('cd_hunt_sync_token_v1'), null);
+    assert.equal(app401.elements.get('githubAuthBtn').classList.contains('hidden'), false);
+
+    const appOffline = await bootApp({
+      catalogObject: sampleCatalog,
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      fetchImpl: async (url) => {
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state') {
+          throw new Error('network down');
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+    assert.ok(appOffline.elements.get('syncStatusPill').textContent.includes('Offline'));
   });
 });

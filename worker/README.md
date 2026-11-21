@@ -27,7 +27,7 @@ Cloudflare Worker + Cloudflare D1 backend for optional per-user cloud sync in [*
 | --- | --- | --- |
 | `ALLOWED_ORIGINS` | `"https://dopingus-build.github.io"` | Comma-separated list of allowed CORS & OAuth redirect origins (legacy single `ALLOWED_ORIGIN` also supported; override with `wrangler deploy --var ALLOWED_ORIGINS:...`) |
 | `APP_REDIRECT_URL` | `"https://dopingus-build.github.io/cd-hunt/"` | Default frontend redirect target receiving `#auth_token=<jwt>` when `?redirect=` is omitted |
-| `GITHUB_CLIENT_ID` | `""` | Public GitHub OAuth App Client ID (safe to commit) |
+| `GITHUB_CLIENT_ID` | `"Ov23liJMYOGioIFPGvzK"` (in `wrangler.toml`) | Public GitHub OAuth App Client ID (safe to commit) |
 | `DAILY_REQ_LIMIT` | `"80000"` | Daily global UTC request circuit-breaker threshold (80% of 100k free tier) |
 | `DAILY_WRITE_LIMIT` | `"80000"` | Daily global UTC write circuit-breaker threshold (80% of 100k D1 free tier) |
 | `USER_HOURLY_WRITE_LIMIT` | `"60"` | Max writes per UTC hour per `github_id` (`HTTP 429` with `Retry-After`) |
@@ -70,12 +70,12 @@ wrangler secret put JWT_SECRET
 
 ## 5. Configuring the Worker URL in GitHub Pages
 
-Because CD Hunt is a zero-build static site hosted on GitHub Pages, configure the frontend's sync endpoint via a small committed static module (`js/config.js`, loaded before `js/sync.js` / `js/app.js`):
+Because CD Hunt is a zero-build static site hosted on GitHub Pages, the frontend's sync endpoint is configured via a small committed static module ([`js/config.js`](../js/config.js), loaded before `js/sync.js` / `js/app.js` and wired to `https://cd-hunt-sync.tndo.workers.dev` in production):
 
 ```js
 window.CDHunt = window.CDHunt || {};
 window.CDHunt.config = {
-  syncApiUrl: 'https://cd-hunt-sync.<subdomain>.workers.dev'
+  syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev'
 };
 ```
 

@@ -1064,6 +1064,7 @@ describe('Cover resolver unit tests (js/cover-resolver.js)', () => {
         requiredGroups: [['digsong'], ['digartist']]
       })
     );
+
     assert.deepEqual(digitalResults, [
       {
         url: 'https://ex.com/dig/600x600bb.jpg',
@@ -1073,5 +1074,257 @@ describe('Cover resolver unit tests (js/cover-resolver.js)', () => {
         isRegular: true
       }
     ]);
+  });
+});
+
+const configModule = require('../js/config.js');
+const syncModule = require('../js/sync.js');
+
+function encodeTestJwt(claims) {
+  const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const p = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  return `${h}.${p}.fakesig`;
+}
+
+describe('Cloud sync config and frontend sync module (js/config.js & js/sync.js)', () => {
+  it('exposes the deployed Cloudflare Worker URL in js/config.js', () => {
+    assert.equal(configModule.syncApiUrl, 'https://cd-hunt-sync.tndo.workers.dev');
+  });
+
+  it('resolves syncApiUrl safely with loopback-only dev overrides', () => {
+    const store = new Map();
+    const mockStorage = {
+      safeGetItem: (k) => (store.has(k) ? store.get(k) : null),
+      safeSetItem: (k, v) => store.set(k, String(v)),
+      safeRemoveItem: (k) => store.delete(k)
+    };
+
+    assert.equal(
+      syncModule.resolveSyncApiUrl({ search: '' }, mockStorage, { syncApiUrl: 'https://worker.example/' }),
+      'https://worker.example'
+    );
+    assert.equal(
+      syncModule.resolveSyncApiUrl({ search: '' }, mockStorage, { syncApiUrl: 'javascript:alert(1)' }),
+      ''
+    );
+
+    // Rejects non-loopback ?syncApi= overrides to protect JWTs
+    assert.equal(
+      syncModule.resolveSyncApiUrl(
+        { search: '?syncApi=https://evil.example' },
+        mockStorage,
+        { syncApiUrl: 'https://worker.example' }
+      ),
+      'https://worker.example'
+    );
+    assert.equal(store.has(syncModule.SYNC_API_OVERRIDE_KEY), false);
+
+    // Allows loopback override and remembers it until reset
+    assert.equal(
+      syncModule.resolveSyncApiUrl(
+        { search: '?syncApi=' + encodeURIComponent('http://127.0.0.1:8787/') },
+        mockStorage,
+        { syncApiUrl: 'https://worker.example' }
+      ),
+      'http://127.0.0.1:8787'
+    );
+    assert.equal(
+      syncModule.resolveSyncApiUrl({ search: '' }, mockStorage, { syncApiUrl: 'https://worker.example' }),
+      'http://127.0.0.1:8787'
+    );
+    assert.equal(
+      syncModule.resolveSyncApiUrl({ search: '?syncApi=off' }, mockStorage, { syncApiUrl: 'https://worker.example' }),
+      'https://worker.example'
+    );
+  });
+
+  it('parses session JWT payloads, captures #auth_token from hash, and manages session lifecycle', () => {
+    const nowMs = Date.UTC(2026, 10, 21, 12, 0, 0);
+    const futureExp = Math.floor(nowMs / 1000) + 3600;
+    const validJwt = encodeTestJwt({ purpose: 'session', sub: '123', login: 'alice', avatarUrl: 'https://a/1.png', exp: futureExp });
+    const expiredJwt = encodeTestJwt({ purpose: 'session', sub: '123', login: 'alice', exp: Math.floor(nowMs / 1000) - 10 });
+    const wrongPurposeJwt = encodeTestJwt({ purpose: 'oauth_state', sub: '123', login: 'alice', exp: futureExp });
+
+    assert.deepEqual(syncModule.parseJwtPayload(validJwt, nowMs), {
+      sub: '123',
+      login: 'alice',
+      avatarUrl: 'https://a/1.png',
+      exp: futureExp
+    });
+    assert.equal(syncModule.parseJwtPayload(expiredJwt, nowMs), null);
+    assert.equal(syncModule.parseJwtPayload(wrongPurposeJwt, nowMs), null);
+    assert.equal(syncModule.parseJwtPayload('not.a.valid!base64', nowMs), null);
+    assert.equal(syncModule.parseJwtPayload(null, nowMs), null);
+
+    const store = new Map();
+    const mockStorage = {
+      safeGetItem: (k) => (store.has(k) ? store.get(k) : null),
+      safeSetItem: (k, v) => store.set(k, String(v)),
+      safeRemoveItem: (k) => store.delete(k)
+    };
+    const historyCalls = [];
+    const loc = { hash: `#auth_token=${validJwt}`, pathname: '/cd-hunt/', search: '?catalog=x', origin: 'https://dopingus-build.github.io' };
+    const hist = {
+      replaceState: (_s, _t, u) => historyCalls.push(u)
+    };
+
+    const captured = syncModule.captureAuthTokenFromHash(loc, hist, mockStorage, nowMs);
+    assert.equal(captured.user.login, 'alice');
+    assert.equal(historyCalls[0], '/cd-hunt/?catalog=x');
+    assert.equal(loc.hash, '');
+    assert.equal(syncModule.getAuthSession(mockStorage, nowMs).token, validJwt);
+
+    syncModule.clearAuthSession(mockStorage);
+    assert.equal(syncModule.getAuthSession(mockStorage, nowMs), null);
+
+    // Expired stored token auto-clears
+    store.set(syncModule.SYNC_TOKEN_KEY, expiredJwt);
+    assert.equal(syncModule.getAuthSession(mockStorage, nowMs), null);
+    assert.equal(store.has(syncModule.SYNC_TOKEN_KEY), false);
+
+    assert.equal(
+      syncModule.buildLoginUrl('https://cd-hunt-sync.tndo.workers.dev/', loc),
+      'https://cd-hunt-sync.tndo.workers.dev/auth/login?redirect=' + encodeURIComponent('https://dopingus-build.github.io/cd-hunt/?catalog=x')
+    );
+    assert.equal(syncModule.buildLoginUrl('', loc), '');
+  });
+
+  it('extracts custom covers only, merges checklists/covers/viewMode, and builds/applies synced state', () => {
+    const cache = {
+      'cd-01': {
+        selectedIndex: 1,
+        variants: [
+          { url: 'https://coverartarchive.org/release/r1/front-500', label: '通常盤', source: 'musicbrainz', isRegular: true },
+          { url: 'https://custom.example/c1.jpg', label: 'Custom Regular', source: 'custom', isRegular: true }
+        ]
+      },
+      'cd-02': {
+        selectedIndex: 0,
+        variants: [{ url: 'https://itunes.example/i1.jpg', label: '通常盤', source: 'itunes-jp', isRegular: true }]
+      }
+    };
+
+    const extracted = syncModule.extractCustomCovers(cache);
+    assert.deepEqual(extracted.customCovers, {
+      'cd-01': {
+        selectedIndex: 0,
+        variants: [{ url: 'https://custom.example/c1.jpg', label: 'Custom Regular', catNo: '', source: 'custom', isRegular: true }]
+      }
+    });
+    assert.equal(extracted.selectedVariants['cd-02'].url, 'https://itunes.example/i1.jpg');
+
+    // Merge without local updatedAt baseline unions local & cloud checkmarks so pre-login checkmarks survive
+    const mergedFirstSync = syncModule.mergeCatalogState(
+      { updatedAt: 0, checklist: { 'cd-01': true }, customCovers: {}, viewMode: 'grid', noteDismissed: false },
+      { updatedAt: 500, checklist: { 'cd-02': true }, customCovers: extracted.customCovers, viewMode: 'single', noteDismissed: true }
+    );
+    assert.deepEqual(mergedFirstSync.checklist, { 'cd-01': true, 'cd-02': true });
+    assert.equal(mergedFirstSync.viewMode, 'single');
+    assert.equal(mergedFirstSync.noteDismissed, true);
+
+    // Newer local timestamp preserves explicit local uncheck
+    const mergedNewerLocal = syncModule.mergeCatalogState(
+      { updatedAt: 900, checklist: { 'cd-01': true }, customCovers: {}, viewMode: 'grid', noteDismissed: false },
+      { updatedAt: 500, checklist: { 'cd-01': true, 'cd-02': true }, customCovers: {}, viewMode: 'single', noteDismissed: true }
+    );
+    assert.deepEqual(mergedNewerLocal.checklist, { 'cd-01': true });
+    assert.equal(mergedNewerLocal.viewMode, 'grid');
+
+    // Full buildLocalSyncPayload + mergeAndApplyCloudState round-trip
+    const store = new Map();
+    let activeCatalogUrl = null;
+    const mockStorage = {
+      safeGetItem: (k) => (store.has(k) ? store.get(k) : null),
+      safeSetItem: (k, v) => store.set(k, String(v)),
+      safeRemoveItem: (k) => store.delete(k),
+      getActiveCatalogUrl: () => activeCatalogUrl,
+      setActiveCatalogUrl: (u) => { activeCatalogUrl = u; }
+    };
+
+    const prefix = 'cd_hunt_sample_0123abcd';
+    syncModule.markPrefixUpdated(mockStorage, prefix, 100);
+    const localPayload = syncModule.buildLocalSyncPayload(
+      mockStorage,
+      null,
+      prefix,
+      { acquiredMap: { 'cd-01': true }, coverCache: cache, viewMode: 'grid' },
+      200
+    );
+    assert.equal(localPayload.schemaVersion, 1);
+    assert.deepEqual(localPayload.catalogs[prefix].checklist, { 'cd-01': true });
+    assert.equal(localPayload.catalogs[prefix].customCovers['cd-02'], undefined);
+
+    const cloudPayload = {
+      schemaVersion: 1,
+      updatedAt: 500,
+      activeCatalogUrl: 'https://raw.githubusercontent.com/alice/cd-metadata/main/list.json',
+      catalogs: {
+        [prefix]: {
+          updatedAt: 500,
+          checklist: { 'cd-01': true, 'cd-02': true },
+          customCovers: {},
+          selectedVariants: {},
+          viewMode: 'single',
+          noteDismissed: true
+        }
+      }
+    };
+    const applied = syncModule.mergeAndApplyCloudState(mockStorage, localPayload, cloudPayload);
+    assert.equal(activeCatalogUrl, 'https://raw.githubusercontent.com/alice/cd-metadata/main/list.json');
+    assert.deepEqual(JSON.parse(store.get(prefix + '_checklist_v2')), { 'cd-01': true, 'cd-02': true });
+    assert.equal(store.get(prefix + '_view_mode_v1'), 'single');
+    assert.equal(store.get(prefix + '_note_dismissed_v1'), '1');
+    assert.equal(applied.changedRemote, true);
+  });
+
+  it('handles pullCloudState and pushCloudState responses across 200, 401, 413, 429, 503, and offline errors', async () => {
+    const okPull = await syncModule.pullCloudState('https://sync.example', 'tok', async () => ({
+      ok: true,
+      status: 200,
+      async json() { return { ok: true, user: { login: 'alice' }, state: { schemaVersion: 1, catalogs: {} }, updatedAt: 10 }; }
+    }));
+    assert.equal(okPull.ok, true);
+    assert.equal(okPull.user.login, 'alice');
+
+    assert.equal((await syncModule.pullCloudState('https://sync.example', 'tok', async () => ({ status: 401 }))).unauthorized, true);
+    assert.equal(
+      (
+        await syncModule.pullCloudState('https://sync.example', 'tok', async () => ({
+          ok: false,
+          status: 503,
+          async json() { return { paused: true, reason: 'daily_free_tier_limit_reached', resetsAt: '2026-11-22T00:00:00Z' }; }
+        }))
+      ).paused,
+      true
+    );
+    assert.equal((await syncModule.pullCloudState('https://sync.example', 'tok', async () => { throw new Error('offline'); })).offline, true);
+
+    assert.equal(
+      (await syncModule.pushCloudState('https://sync.example', 'tok', {}, async () => ({ status: 200, ok: true, async json() { return { ok: true, updatedAt: 1 }; } }))).ok,
+      true
+    );
+    assert.equal((await syncModule.pushCloudState('https://sync.example', 'tok', {}, async () => ({ status: 401 }))).unauthorized, true);
+    assert.equal((await syncModule.pushCloudState('https://sync.example', 'tok', {}, async () => ({ status: 413 }))).payloadTooLarge, true);
+    assert.equal(
+      (
+        await syncModule.pushCloudState('https://sync.example', 'tok', {}, async () => ({
+          status: 429,
+          ok: false,
+          async json() { return { retryAfterSeconds: 42 }; }
+        }))
+      ).retryAfterSeconds,
+      42
+    );
+    assert.equal(
+      (
+        await syncModule.pushCloudState('https://sync.example', 'tok', {}, async () => ({
+          status: 503,
+          ok: false,
+          async json() { return { paused: true, resetsAt: '00:00 UTC' }; }
+        }))
+      ).paused,
+      true
+    );
+    assert.equal((await syncModule.pushCloudState('https://sync.example', 'tok', {}, async () => { throw new Error('offline'); })).offline, true);
   });
 });

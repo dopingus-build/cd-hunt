@@ -199,18 +199,18 @@ Keeping the Worker code public inside `cd-hunt/worker/` allows full transparency
 
 ## 7. Phased Implementation & Testing Roadmap
 
-### Phase 1: Worker Implementation & Worker Unit Tests
+### Phase 1: Worker Implementation & Worker Unit Tests (Implemented)
 - Scaffold `cd-hunt/worker/` (`wrangler.toml`, `schema.sql`, `index.js`) and update `.gitignore` for `.dev.vars` and `.wrangler/`.
 - Add `cd-hunt/test/worker-sync.test.js` testing all Worker routes with a D1 SQLite/in-memory mock:
   - `/auth/login` (zero-scope GitHub URL + signed `state`) and `/auth/callback` (valid vs. tampered `state`, GitHub user lookup, JWT issuance, discarding GitHub token).
   - `/api/state` `GET`/`PUT` authentication (`401` on invalid/expired JWT), `128 KB` payload enforcement (`413`), per-user hourly limit (`429`), global daily request & write circuit breaker (`503` with `paused: true` and `resetsAt`), `PAUSE_SYNC="true"` switch, and `/api/status`.
 
-### Phase 2: Cloudflare Provisioning & `dopingus-build` OAuth App Setup
+### Phase 2: Cloudflare Provisioning & `dopingus-build` OAuth App Setup (Implemented)
 - Provision D1 database (`wrangler d1 create cd-hunt-db`), apply `worker/schema.sql` remotely (`wrangler d1 execute`), deploy Worker (`wrangler deploy`), and capture the deployed `https://cd-hunt-sync.<subdomain>.workers.dev` URL.
 - Register the `CD Hunt Sync` OAuth App under `dopingus-build` (signed in as org owner `Dopingus`) pointing Homepage URL to `https://dopingus-build.github.io/cd-hunt/` and Authorization Callback URL to `https://cd-hunt-sync.<subdomain>.workers.dev/auth/callback`.
 - Store `GITHUB_CLIENT_ID` in `worker/wrangler.toml` and upload `GITHUB_CLIENT_SECRET` + generated `JWT_SECRET` via `wrangler secret put`.
 
-### Phase 3: Frontend Integration (`js/config.js`, `js/sync.js`, `js/app.js`, `index.html`)
+### Phase 3: Frontend Integration (`js/config.js`, `js/sync.js`, `js/app.js`, `index.html`) (Implemented)
 - **Configuring the Worker URL on GitHub Pages (`js/config.js`):**
   - Keep CD Hunt zero-build by adding a lightweight `js/config.js` exposing `window.CDHunt.config = { syncApiUrl: '<worker-url>' }` (loaded before `js/sync.js` / `js/app.js`).
   - Leave `syncApiUrl: ''` when cloud sync is unconfigured so forks and standalone local copies hide sign-in / sync UI cleanly with zero network calls.
@@ -223,6 +223,6 @@ Keeping the Worker code public inside `cd-hunt/worker/` allows full transparency
   - Extracting syncable state (`checklist`, custom cover variants, active variants, `viewMode`, `noteDismissed`), merging local & cloud snapshots, debouncing `PUT /api/state` updates, and gracefully handling `paused: true` / offline states.
 - Add minimal header/loader UI controls (**Sign in with GitHub** / `@login` pill + **Sync status** indicator + **Sign out**) in `index.html` and `css/styles.css`.
 
-### Phase 4: Full Frontend Tests & CI Deployment
+### Phase 4: Full Frontend Tests & CI Deployment (Implemented)
 - Extend `test/catalog-validation.test.js` and `test/catalog-integration.test.js` with full unit and end-to-end integration tests for `js/sync.js`, hash-token login restoration, `<login>/cd-metadata` preset discovery, checklist/custom-cover cloud sync & merge, and paused-quota UI degradation.
 - Verify CI (`node --test test/*.test.js`) and GitHub Pages deployment pass cleanly with zero regressions.
