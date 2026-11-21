@@ -55,8 +55,8 @@ sequenceDiagram
 
 | Endpoint | Auth | Behavior |
 | --- | --- | --- |
-| `GET /auth/login` | Public | Generates an HMAC-signed CSRF `state` token (with nonce + expiry) and redirects to `https://github.com/login/oauth/authorize` with `client_id` and **no `scope` parameter**. |
-| `GET /auth/callback` | Public (`state` verified) | Verifies `state`, exchanges `code` via `GITHUB_CLIENT_ID` + `GITHUB_CLIENT_SECRET`, fetches `{ id, login, avatar_url }` from `https://api.github.com/user`, discards the GitHub token, signs an HMAC-SHA256 CD Hunt session JWT (`30d` expiry), and redirects to `https://dopingus-build.github.io/cd-hunt/#auth_token=<jwt>`. |
+| `GET /auth/login` | Public | Generates an HMAC-signed CSRF `state` token (with nonce, expiry, and optional allowlisted `redirect` URL) and redirects to `https://github.com/login/oauth/authorize` with `client_id` and **no `scope` parameter**. |
+| `GET /auth/callback` | Public (`state` verified) | Verifies `state`, exchanges `code` via `GITHUB_CLIENT_ID` + `GITHUB_CLIENT_SECRET`, fetches `{ id, login, avatar_url }` from `https://api.github.com/user`, discards the GitHub token, signs an HMAC-SHA256 CD Hunt session JWT (`30d` expiry), and redirects to the validated redirect target (defaulting to `APP_REDIRECT_URL`) `#auth_token=<jwt>`. |
 | `GET /api/state` | Bearer JWT | Verifies JWT signature & expiry, checks `PAUSE_SYNC` override and daily request circuit breaker, increments `daily_usage.req_count`, reads `user_state` from D1, and returns `{ ok: true, paused: false, user, state, updatedAt, quota }`. |
 | `PUT /api/state` | Bearer JWT | Verifies JWT, checks `PAUSE_SYNC` override, enforces `<= 128 KB` body limit (`413`), checks per-user hourly write quota (`429`), checks global daily circuit breaker (`503` paused), increments counters, upserts `user_state`, and returns `{ ok: true, updatedAt, quota }`. |
 | `GET /api/status` | Public | Returns non-sensitive operational status (`{ ok: true, paused, utcDate, resetsAt, limits }`) so clients can inspect sync health without consuming write quota. |
@@ -184,14 +184,14 @@ Keeping the Worker code public inside `cd-hunt/worker/` allows full transparency
 - **Committed Publicly in Git:**
   - `worker/index.js` — Stateless Worker router, CORS handling, JWT verify/sign, D1 queries, and circuit-breaker logic
   - `worker/schema.sql` — D1 table definitions
-  - `worker/wrangler.toml` — Worker name, compatibility date, D1 `database_name` + `database_id` (UUID usable only with Cloudflare API auth), public `GITHUB_CLIENT_ID`, `ALLOWED_ORIGIN = "https://dopingus-build.github.io"`, and daily limit vars (`DAILY_REQ_LIMIT = 80000`, `DAILY_WRITE_LIMIT = 80000`, `USER_HOURLY_WRITE_LIMIT = 60`, `MAX_PAYLOAD_BYTES = 131072`)
+  - `worker/wrangler.toml` — Worker name, compatibility date, D1 `database_name` + `database_id` (UUID usable only with Cloudflare API auth), public `GITHUB_CLIENT_ID`, comma-separated `ALLOWED_ORIGINS = "https://dopingus-build.github.io"` (overrideable via `wrangler deploy --var ALLOWED_ORIGINS:...`, backward-compatible with `ALLOWED_ORIGIN`), and daily limit vars (`DAILY_REQ_LIMIT = 80000`, `DAILY_WRITE_LIMIT = 80000`, `USER_HOURLY_WRITE_LIMIT = 60`, `MAX_PAYLOAD_BYTES = 131072`)
 - **Stored Only in Cloudflare Encrypted Secrets (`wrangler secret put`, never committed):**
   - `GITHUB_CLIENT_SECRET` — GitHub OAuth App client secret
   - `JWT_SECRET` — Cryptographically random 32+ byte HMAC key used to sign/verify Worker JWTs and OAuth CSRF `state` tokens
 - **Gitignored Local Dev Files:**
   - `.dev.vars` and `.wrangler/` added to `cd-hunt/.gitignore`.
 - **Origin & Abuse Protections:**
-  - Strict CORS (`Access-Control-Allow-Origin: https://dopingus-build.github.io`, plus explicit allowlist check for `http://localhost:*` only in local dev config).
+  - Strict comma-separated CORS & OAuth `?redirect=` origin allowlist (`ALLOWED_ORIGINS`, plus explicit check for `http://localhost:*` only when `ALLOW_LOCALHOST = "true"`).
   - Unauthenticated calls cannot access `/api/state`.
   - HMAC signatures verified with Web Crypto `crypto.subtle` (`timing-safe` verify via `crypto.subtle.verify`).
 

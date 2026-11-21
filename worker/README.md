@@ -12,8 +12,8 @@ Cloudflare Worker + Cloudflare D1 backend for optional per-user cloud sync in [*
 
 | Endpoint | Method | Auth | Purpose & Key Responses |
 | --- | --- | --- | --- |
-| `/auth/login` | `GET` | Public | Generates HMAC-signed `oauth_state` (`10m` TTL) and returns `302` redirect to GitHub OAuth (`scope` omitted). `500` if OAuth config missing. |
-| `/auth/callback` | `GET` | `state` JWT | Exchanges `code`, reads GitHub `/user`, discards GitHub token, signs `session` JWT, and returns `302` to `APP_REDIRECT_URL#auth_token=<jwt>`. `400` invalid params/state, `502` GitHub error, `500` missing config. |
+| `/auth/login` | `GET` | Public | Generates HMAC-signed `oauth_state` (`10m` TTL) and returns `302` redirect to GitHub OAuth (`scope` omitted). Optional `?redirect=<url>` must match `ALLOWED_ORIGINS` (`ALLOW_LOCALHOST`). `400` bad redirect, `500` if OAuth config missing. |
+| `/auth/callback` | `GET` | `state` JWT | Exchanges `code`, reads GitHub `/user`, discards GitHub token, signs `session` JWT, and returns `302` to verified redirect target (or `APP_REDIRECT_URL`) `#auth_token=<jwt>`. `400` invalid params/state, `502` GitHub error, `500` missing config. |
 | `/api/state` | `GET` | Bearer JWT | Checks origin & circuit breaker, increments daily `req_count`, and returns `{ ok, paused, user, state, updatedAt, resetsAt }`. `401` invalid token, `403` bad origin, `503` paused. |
 | `/api/state` | `PUT` | Bearer JWT | Validates payload (`schemaVersion: 1`, `cd_hunt_*` keys, `<= MAX_PAYLOAD_BYTES`), enforces per-user hourly write cap (`429`) and daily circuit breaker (`503`), increments counters, upserts `user_state`, returns `{ ok, paused, updatedAt, resetsAt }`. `400` invalid JSON/schema, `401` unauthorized, `403` bad origin, `413` oversized. |
 | `/api/status` | `GET` | Public | Returns operational health and quota usage (`{ ok, paused, reason, utcDate, resetsAt, usage, limits }`). `403` bad origin. |
@@ -25,8 +25,8 @@ Cloudflare Worker + Cloudflare D1 backend for optional per-user cloud sync in [*
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ALLOWED_ORIGIN` | `"https://dopingus-build.github.io"` | Allowed CORS origin for `/api/*` and `OPTIONS` preflight requests |
-| `APP_REDIRECT_URL` | `"https://dopingus-build.github.io/cd-hunt/"` | Frontend redirect target receiving `#auth_token=<jwt>` |
+| `ALLOWED_ORIGINS` | `"https://dopingus-build.github.io"` | Comma-separated list of allowed CORS & OAuth redirect origins (legacy single `ALLOWED_ORIGIN` also supported; override with `wrangler deploy --var ALLOWED_ORIGINS:...`) |
+| `APP_REDIRECT_URL` | `"https://dopingus-build.github.io/cd-hunt/"` | Default frontend redirect target receiving `#auth_token=<jwt>` when `?redirect=` is omitted |
 | `GITHUB_CLIENT_ID` | `""` | Public GitHub OAuth App Client ID (safe to commit) |
 | `DAILY_REQ_LIMIT` | `"80000"` | Daily global UTC request circuit-breaker threshold (80% of 100k free tier) |
 | `DAILY_WRITE_LIMIT` | `"80000"` | Daily global UTC write circuit-breaker threshold (80% of 100k D1 free tier) |

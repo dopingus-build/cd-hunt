@@ -176,20 +176,51 @@ function normalizeOrigin(origin) {
   return String(origin || '').trim().replace(/\/+$/, '');
 }
 
+/**
+ * Parse allowed CORS & OAuth redirect origins from comma-separated ALLOWED_ORIGINS
+ * (with fallback to legacy single ALLOWED_ORIGIN or DEFAULT_ALLOWED_ORIGIN).
+ * @param {object} [env]
+ * @returns {string[]}
+ */
+function getAllowedOrigins(env) {
+  const raw = (env && (env.ALLOWED_ORIGINS || env.ALLOWED_ORIGIN)) || DEFAULT_ALLOWED_ORIGIN;
+  const list = String(raw)
+    .split(',')
+    .map(normalizeOrigin)
+    .filter(Boolean);
+  return list.length > 0 ? list : [DEFAULT_ALLOWED_ORIGIN];
+}
+
 function isOriginAllowed(origin, env) {
   if (!origin) return true;
   const normalized = normalizeOrigin(origin);
-  const allowedOrigin = normalizeOrigin((env && env.ALLOWED_ORIGIN) || DEFAULT_ALLOWED_ORIGIN);
-  if (normalized === allowedOrigin) return true;
+  if (getAllowedOrigins(env).includes(normalized)) return true;
   if (env && String(env.ALLOW_LOCALHOST).toLowerCase() === 'true') {
     return /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(normalized);
   }
   return false;
 }
 
+function validateRedirectUrl(rawRedirect, env) {
+  if (!rawRedirect || typeof rawRedirect !== 'string') return null;
+  try {
+    const parsed = new URL(rawRedirect.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    if (!isOriginAllowed(parsed.origin, env)) {
+      return null;
+    }
+    parsed.hash = '';
+    return parsed.toString();
+  } catch (err) {
+    return null;
+  }
+}
+
 function buildCorsHeaders(request, env) {
   const reqOrigin = request && request.headers ? request.headers.get('Origin') : null;
-  const allowedDefault = normalizeOrigin((env && env.ALLOWED_ORIGIN) || DEFAULT_ALLOWED_ORIGIN);
+  const allowedDefault = getAllowedOrigins(env)[0];
   const headers = {
     'Access-Control-Allow-Methods': 'GET, PUT, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
@@ -375,9 +406,21 @@ async function handleAuthLogin(url, env, nowMs) {
   if (!env || !env.GITHUB_CLIENT_ID || !env.JWT_SECRET) {
     return jsonResponse({ ok: false, error: 'OAuth configuration is incomplete' }, 500);
   }
+  const redirectParam = url.searchParams.get('redirect');
+  let redirectUrl = null;
+  if (redirectParam !== null && redirectParam !== '') {
+    redirectUrl = validateRedirectUrl(redirectParam, env);
+    if (!redirectUrl) {
+      return jsonResponse({ ok: false, error: 'Redirect origin not allowed' }, 400);
+    }
+  }
   const nonceBytes = getCrypto().getRandomValues(new Uint8Array(16));
+  const stateClaims = { purpose: 'oauth_state', nonce: base64UrlEncodeBytes(nonceBytes) };
+  if (redirectUrl) {
+    stateClaims.redirectUrl = redirectUrl;
+  }
   const stateToken = await signToken(
-    { purpose: 'oauth_state', nonce: base64UrlEncodeBytes(nonceBytes) },
+    stateClaims,
     env.JWT_SECRET,
     OAUTH_STATE_TTL_SECONDS,
     nowMs
@@ -466,7 +509,13 @@ async function handleAuthCallback(url, env, nowMs) {
     nowMs
   );
 
-  const redirectBase = (env && env.APP_REDIRECT_URL) || DEFAULT_APP_REDIRECT_URL;
+  let redirectBase = (env && env.APP_REDIRECT_URL) || DEFAULT_APP_REDIRECT_URL;
+  if (stateClaims.redirectUrl) {
+    const verifiedRedirect = validateRedirectUrl(stateClaims.redirectUrl, env);
+    if (verifiedRedirect) {
+      redirectBase = verifiedRedirect;
+    }
+  }
   return new Response(null, {
     status: 302,
     headers: { Location: redirectBase + '#auth_token=' + encodeURIComponent(sessionToken) }
@@ -669,6 +718,7 @@ module.exports = {
   signToken: signToken,
   verifyToken: verifyToken,
   validateSyncPayload: validateSyncPayload,
+  getAllowedOrigins: getAllowedOrigins,
   getUtcDateString: getUtcDateString,
   getNextUtcMidnightIso: getNextUtcMidnightIso,
   getHourWindow: getHourWindow

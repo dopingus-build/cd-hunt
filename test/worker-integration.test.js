@@ -119,7 +119,7 @@ async function startIntegrationServers(envOverrides = {}) {
   const workerEnv = Object.assign(
     {
       DB: db,
-      ALLOWED_ORIGIN,
+      ALLOWED_ORIGINS: ALLOWED_ORIGIN,
       APP_REDIRECT_URL,
       GITHUB_CLIENT_ID: 'gh-test-client',
       GITHUB_CLIENT_SECRET: 'gh-test-secret',
@@ -178,8 +178,11 @@ async function startIntegrationServers(envOverrides = {}) {
     githubBaseUrl,
     db,
     tokenExchangeLog,
-    async loginViaHttp(oauthCode) {
-      const loginRes = await fetch(`${workerBaseUrl}/auth/login`, { redirect: 'manual' });
+    async loginViaHttp(oauthCode, redirectParam) {
+      const loginPath = redirectParam
+        ? `${workerBaseUrl}/auth/login?redirect=${encodeURIComponent(redirectParam)}`
+        : `${workerBaseUrl}/auth/login`;
+      const loginRes = await fetch(loginPath, { redirect: 'manual' });
       assert.equal(loginRes.status, 302);
       const ghAuthorizeUrl = new URL(loginRes.headers.get('location'));
       assert.equal(ghAuthorizeUrl.searchParams.get('scope'), null);
@@ -191,8 +194,12 @@ async function startIntegrationServers(envOverrides = {}) {
       );
       assert.equal(callbackRes.status, 302);
       const appRedirect = callbackRes.headers.get('location');
-      assert.ok(appRedirect.startsWith(`${APP_REDIRECT_URL}#auth_token=`));
-      return decodeURIComponent(appRedirect.split('#auth_token=')[1]);
+      const expectedPrefix = redirectParam ? redirectParam.split('#')[0] : APP_REDIRECT_URL;
+      assert.ok(appRedirect.startsWith(`${expectedPrefix}#auth_token=`));
+      return {
+        token: decodeURIComponent(appRedirect.split('#auth_token=')[1]),
+        redirectLocation: appRedirect
+      };
     },
     async close() {
       await Promise.all([closeServer(workerServer), closeServer(mockGithubServer)]);
@@ -233,7 +240,7 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
     t.after(() => env.close());
 
     // Device A logs in via /auth/login -> /auth/callback
-    const tokenDeviceA = await env.loginViaHttp('code_alice');
+    const tokenDeviceA = (await env.loginViaHttp('code_alice')).token;
     assert.equal(env.tokenExchangeLog.length, 1);
     assert.equal(env.tokenExchangeLog[0].redirect_uri, `${env.workerBaseUrl}/auth/callback`);
 
@@ -268,7 +275,7 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
     assert.equal(userRows[0].state_json.includes('gho_ephemeral_alice'), false);
 
     // Device B logs in independently as Alice and reads Device A's saved state
-    const tokenDeviceB = await env.loginViaHttp('code_alice');
+    const tokenDeviceB = (await env.loginViaHttp('code_alice')).token;
     const getBRes = await fetch(`${env.workerBaseUrl}/api/state`, {
       headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${tokenDeviceB}` }
     });
@@ -304,8 +311,8 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
     const env = await startIntegrationServers();
     t.after(() => env.close());
 
-    const aliceToken = await env.loginViaHttp('code_alice');
-    const bobToken = await env.loginViaHttp('code_bob');
+    const aliceToken = (await env.loginViaHttp('code_alice')).token;
+    const bobToken = (await env.loginViaHttp('code_bob')).token;
 
     const alicePayload = makeSampleSyncPayload({ activeCatalogUrl: 'https://example.com/alice.json' });
     const bobPayload = makeSampleSyncPayload({
@@ -383,8 +390,8 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
     });
     assert.equal(evilRes.status, 403);
 
-    const aliceToken = await env.loginViaHttp('code_alice');
-    const bobToken = await env.loginViaHttp('code_bob');
+    const aliceToken = (await env.loginViaHttp('code_alice')).token;
+    const bobToken = (await env.loginViaHttp('code_bob')).token;
     const body = JSON.stringify(makeSampleSyncPayload());
 
     // Alice hits per-user hourly write cap (2 ok -> 3rd 429) using real SQLite ON CONFLICT hour_writes increment
@@ -440,5 +447,53 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
     assert.equal(statusBody.paused, true);
     assert.equal(statusBody.usage.reqCount, 5);
     assert.equal(statusBody.usage.writeCount, 4);
+  });
+
+  it('supports comma-separated ALLOWED_ORIGINS for CORS preflight, API calls, and custom OAuth redirect targets', async (t) => {
+    const customOrigin = 'https://custom.example';
+    const customAppUrl = `${customOrigin}/cd-hunt/`;
+    const env = await startIntegrationServers({
+      ALLOWED_ORIGINS: `${ALLOWED_ORIGIN}, ${customOrigin}`
+    });
+    t.after(() => env.close());
+
+    // Preflight from secondary allowed origin reflects that origin
+    const preflight = await fetch(`${env.workerBaseUrl}/api/state`, {
+      method: 'OPTIONS',
+      headers: { Origin: customOrigin }
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), customOrigin);
+    assert.equal(preflight.headers.get('vary'), 'Origin');
+
+    // Disallowed ?redirect= origin returns 400 on /auth/login
+    const badLogin = await fetch(
+      `${env.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://rogue.example/cd-hunt/')}`,
+      { redirect: 'manual' }
+    );
+    assert.equal(badLogin.status, 400);
+
+    // OAuth flow launched from secondary allowed origin redirects back to that custom URL with session JWT
+    const loginResult = await env.loginViaHttp('code_alice', customAppUrl);
+    assert.ok(loginResult.redirectLocation.startsWith(`${customAppUrl}#auth_token=`));
+
+    const putRes = await fetch(`${env.workerBaseUrl}/api/state`, {
+      method: 'PUT',
+      headers: {
+        Origin: customOrigin,
+        Authorization: `Bearer ${loginResult.token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(makeSampleSyncPayload())
+    });
+    assert.equal(putRes.status, 200);
+    assert.equal(putRes.headers.get('access-control-allow-origin'), customOrigin);
+
+    const getRes = await fetch(`${env.workerBaseUrl}/api/state`, {
+      headers: { Origin: customOrigin, Authorization: `Bearer ${loginResult.token}` }
+    });
+    assert.equal(getRes.status, 200);
+    assert.equal(getRes.headers.get('access-control-allow-origin'), customOrigin);
+    assert.equal((await getRes.json()).user.login, 'alice');
   });
 });

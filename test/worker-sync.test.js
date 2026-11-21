@@ -10,6 +10,7 @@ const {
   signToken,
   verifyToken,
   validateSyncPayload,
+  getAllowedOrigins,
   getUtcDateString,
   getNextUtcMidnightIso,
   getHourWindow
@@ -101,7 +102,7 @@ function makeEnv(overrides = {}) {
   return Object.assign(
     {
       DB: createMockD1(),
-      ALLOWED_ORIGIN: DEFAULT_ORIGIN,
+      ALLOWED_ORIGINS: DEFAULT_ORIGIN,
       APP_REDIRECT_URL: DEFAULT_REDIRECT,
       GITHUB_CLIENT_ID: 'gh-client-id-123',
       GITHUB_CLIENT_SECRET: 'gh-client-secret-456',
@@ -253,8 +254,21 @@ describe('Sync payload validation (validateSyncPayload)', () => {
 });
 
 describe('CORS origin checks and preflight handling', () => {
-  it('handles OPTIONS preflight, allows configured origins/localhost flag, and blocks foreign origins with 403', async () => {
-    const env = makeEnv({ ALLOW_LOCALHOST: 'false' });
+  it('parses comma-separated ALLOWED_ORIGINS with legacy ALLOWED_ORIGIN and default fallbacks', () => {
+    assert.deepEqual(getAllowedOrigins({}), [DEFAULT_ORIGIN]);
+    assert.deepEqual(getAllowedOrigins({ ALLOWED_ORIGINS: '  ,  ' }), [DEFAULT_ORIGIN]);
+    assert.deepEqual(getAllowedOrigins({ ALLOWED_ORIGIN: 'https://legacy.example/' }), ['https://legacy.example']);
+    assert.deepEqual(
+      getAllowedOrigins({ ALLOWED_ORIGINS: ' https://dopingus-build.github.io/ , https://cd.example:8443 ' }),
+      ['https://dopingus-build.github.io', 'https://cd.example:8443']
+    );
+  });
+
+  it('handles OPTIONS preflight, comma-separated origins/localhost flag, and blocks foreign origins with 403', async () => {
+    const env = makeEnv({
+      ALLOWED_ORIGINS: `${DEFAULT_ORIGIN}, https://mirror.example/`,
+      ALLOW_LOCALHOST: 'false'
+    });
 
     const preflightOk = await workerFetch(
       new Request('https://sync.example/api/state', {
@@ -265,6 +279,17 @@ describe('CORS origin checks and preflight handling', () => {
     );
     assert.equal(preflightOk.status, 204);
     assert.equal(preflightOk.headers.get('Access-Control-Allow-Origin'), DEFAULT_ORIGIN);
+    assert.equal(preflightOk.headers.get('Vary'), 'Origin');
+
+    const secondOriginStatus = await workerFetch(
+      new Request('https://sync.example/api/status', {
+        headers: { Origin: 'https://mirror.example' }
+      }),
+      env
+    );
+    assert.equal(secondOriginStatus.status, 200);
+    assert.equal(secondOriginStatus.headers.get('Access-Control-Allow-Origin'), 'https://mirror.example');
+    assert.equal(secondOriginStatus.headers.get('Vary'), 'Origin');
 
     const preflightEvil = await workerFetch(
       new Request('https://sync.example/api/state', {
@@ -303,8 +328,8 @@ describe('CORS origin checks and preflight handling', () => {
 });
 
 describe('Zero-Scope GitHub OAuth flow (/auth/login & /auth/callback)', () => {
-  it('redirects /auth/login to GitHub without any scope parameter and validates missing config', async () => {
-    const env = makeEnv();
+  it('redirects /auth/login to GitHub without any scope parameter and validates redirect & config', async () => {
+    const env = makeEnv({ ALLOWED_ORIGINS: `${DEFAULT_ORIGIN}, https://mirror.example` });
     const res = await workerFetch(new Request('https://sync.example/auth/login'), env);
     assert.equal(res.status, 302);
     const location = new URL(res.headers.get('Location'));
@@ -315,6 +340,31 @@ describe('Zero-Scope GitHub OAuth flow (/auth/login & /auth/callback)', () => {
 
     const stateClaims = await verifyToken(location.searchParams.get('state'), TEST_JWT_SECRET);
     assert.equal(stateClaims.purpose, 'oauth_state');
+    assert.equal(stateClaims.redirectUrl, undefined);
+
+    // Valid custom redirect from ALLOWED_ORIGINS embeds sanitized URL (without hash) in state
+    const customLogin = await workerFetch(
+      new Request('https://sync.example/auth/login?redirect=' + encodeURIComponent('https://mirror.example/cd-hunt/?catalog=foo#old')),
+      env
+    );
+    assert.equal(customLogin.status, 302);
+    const customState = new URL(customLogin.headers.get('Location')).searchParams.get('state');
+    const customClaims = await verifyToken(customState, TEST_JWT_SECRET);
+    assert.equal(customClaims.redirectUrl, 'https://mirror.example/cd-hunt/?catalog=foo');
+
+    // Disallowed, non-http(s), or invalid ?redirect= values return 400
+    assert.equal(
+      (await workerFetch(new Request('https://sync.example/auth/login?redirect=https://evil.example/'), env)).status,
+      400
+    );
+    assert.equal(
+      (await workerFetch(new Request('https://sync.example/auth/login?redirect=javascript:alert(1)'), env)).status,
+      400
+    );
+    assert.equal(
+      (await workerFetch(new Request('https://sync.example/auth/login?redirect=not-a-valid-url'), env)).status,
+      400
+    );
 
     const badConfig = await workerFetch(new Request('https://sync.example/auth/login'), makeEnv({ GITHUB_CLIENT_ID: '' }));
     assert.equal(badConfig.status, 500);
