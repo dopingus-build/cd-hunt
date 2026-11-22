@@ -21,6 +21,7 @@ const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
+  '.csv': 'text/csv; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png'
@@ -74,7 +75,11 @@ function closeServer(server) {
   });
 }
 
-async function attachExternalRoutes(context, appOrigin, workerBaseUrl) {
+async function attachExternalRoutes(context, appOrigin, workerBaseUrl, opts = {}) {
+  const authCode = opts.authCode || 'code_alice';
+  const stateFlags = opts.stateFlags || {};
+  const sampleSheetCsv = fs.readFileSync(path.join(ROOT_DIR, 'docs', 'sample-catalog-sheet.csv'), 'utf8');
+
   await context.route(
     (url) => url.origin + url.pathname === `${workerBaseUrl}/auth/login`,
     async (route) => {
@@ -89,7 +94,7 @@ async function attachExternalRoutes(context, appOrigin, workerBaseUrl) {
       const redirectUri = ghAuthUrl.searchParams.get('redirect_uri');
       assert.ok(state && redirectUri);
 
-      const callbackTarget = `${redirectUri}?code=code_alice&state=${encodeURIComponent(state)}`;
+      const callbackTarget = `${redirectUri}?code=${encodeURIComponent(authCode)}&state=${encodeURIComponent(state)}`;
       await route.fulfill({
         status: 200,
         contentType: 'text/html; charset=utf-8',
@@ -112,6 +117,30 @@ async function attachExternalRoutes(context, appOrigin, workerBaseUrl) {
             schemaVersion: 1,
             catalogs: [{ title: 'Alice E2E List', url: `${appOrigin}/docs/sample-catalog.json` }]
           })
+        });
+        return;
+      }
+
+      if (reqUrl.href === 'https://raw.githubusercontent.com/bob/cd-metadata/main/index.json') {
+        await route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: JSON.stringify({ error: 'Not found' })
+        });
+        return;
+      }
+
+      if (reqUrl.href === 'https://docs.google.com/spreadsheets/d/e2eSheet01/export?format=csv') {
+        if (stateFlags.sheetOffline) {
+          await route.abort('failed');
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/csv; charset=utf-8',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: sampleSheetCsv
         });
         return;
       }
@@ -185,6 +214,11 @@ async function main() {
     fs.createReadStream(resolved).pipe(res);
   });
 
+  const e2eUsers = {
+    code_alice: { id: 1001, login: 'alice', avatar_url: 'https://avatars.example/alice.png', token: 'gho_e2e_alice' },
+    code_bob: { id: 2002, login: 'bob', avatar_url: 'https://avatars.example/bob.png', token: 'gho_e2e_bob' }
+  };
+
   const mockGithubServer = http.createServer(async (req, res) => {
     const reqUrl = new URL(req.url, 'http://127.0.0.1');
     const chunks = [];
@@ -193,25 +227,27 @@ async function main() {
 
     if (req.method === 'POST' && reqUrl.pathname === '/login/oauth/access_token') {
       const payload = JSON.parse(bodyText);
-      if (payload.code !== 'code_alice') {
+      const u = e2eUsers[payload.code];
+      if (!u) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'bad_verification_code' }));
         return;
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ access_token: 'gho_e2e_alice', token_type: 'bearer', scope: '' }));
+      res.end(JSON.stringify({ access_token: u.token, token_type: 'bearer', scope: '' }));
       return;
     }
 
     if (req.method === 'GET' && reqUrl.pathname === '/user') {
       const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-      if (token !== 'gho_e2e_alice') {
+      const matched = Object.values(e2eUsers).find((u) => u.token === token);
+      if (!matched) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ message: 'Bad credentials' }));
         return;
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ id: 1001, login: 'alice', avatar_url: 'https://avatars.example/alice.png' }));
+      res.end(JSON.stringify({ id: matched.id, login: matched.login, avatar_url: matched.avatar_url }));
       return;
     }
 
@@ -219,9 +255,60 @@ async function main() {
     res.end();
   });
 
-  const [appOrigin, githubBaseUrl] = await Promise.all([
+  const keyPair = await crypto.subtle.generateKey(
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256'
+    },
+    true,
+    ['sign', 'verify']
+  );
+  const pkcs8B64 = Buffer.from(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey)).toString('base64');
+  const saPem = `-----BEGIN PRIVATE KEY-----\n${pkcs8B64.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
+  const saBotEmail = 'cd-hunt-e2e@e2e-project.iam.gserviceaccount.com';
+  const sheetBatchUpdates = [];
+
+  const mockGoogleServer = http.createServer(async (req, res) => {
+    const reqUrl = new URL(req.url, 'http://127.0.0.1');
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const bodyText = Buffer.concat(chunks).toString('utf8');
+
+    if (req.method === 'POST' && reqUrl.pathname === '/oauth/token') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ access_token: 'ya29.e2e-sheet-token', expires_in: 3600 }));
+      return;
+    }
+    if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/e2eSheet01/values/A1:I500') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          values: [
+            ['CD Hunt Title'],
+            ['Got it?', 'Aisle / Category', 'Artist / Franchise', 'Title / Release Details', 'Catalog Number'],
+            ['FALSE', 'Video Game Soundtracks', 'Capcom (カプコン)', 'Breath of Fire III OST', 'CPCA-1004']
+          ]
+        })
+      );
+      return;
+    }
+    if (req.method === 'POST' && reqUrl.pathname === '/v4/spreadsheets/e2eSheet01/values:batchUpdate') {
+      const body = JSON.parse(bodyText);
+      sheetBatchUpdates.push(body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ totalUpdatedCells: body.data.length }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const [appOrigin, githubBaseUrl, googleBaseUrl] = await Promise.all([
     listenServer(staticServer),
-    listenServer(mockGithubServer)
+    listenServer(mockGithubServer),
+    listenServer(mockGoogleServer)
   ]);
 
   let workerBaseUrl = '';
@@ -235,6 +322,13 @@ async function main() {
     JWT_SECRET: 'e2e-browser-jwt-secret-0123456789abcdef',
     GITHUB_OAUTH_TOKEN_URL: `${githubBaseUrl}/login/oauth/access_token`,
     GITHUB_USER_API_URL: `${githubBaseUrl}/user`,
+    GOOGLE_OAUTH_TOKEN_URL: `${googleBaseUrl}/oauth/token`,
+    GOOGLE_SHEETS_API_BASE_URL: googleBaseUrl,
+    GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+      client_email: saBotEmail,
+      private_key: saPem,
+      token_uri: `${googleBaseUrl}/oauth/token`
+    }),
     DAILY_REQ_LIMIT: '80000',
     DAILY_WRITE_LIMIT: '80000',
     USER_HOURLY_WRITE_LIMIT: '60',
@@ -383,10 +477,94 @@ async function main() {
       await ctxB.close();
     }
 
-    console.log('✓ Browser E2E checks passed (desktop + 375px mobile, OAuth, multi-device SQLite sync, keepalive flush)');
+    // Device C: Standalone Google Sheet mode + Bot Email Banner + Write-Back + /api/share + Offline CSV Cache
+    const stateFlags = { sheetOffline: false };
+    const ctxC = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    await attachExternalRoutes(ctxC, appOrigin, workerBaseUrl, { authCode: 'code_bob', stateFlags });
+    const pageC = await ctxC.newPage();
+    const pageCErrors = [];
+    let latestShareUrl = null;
+    pageC.on('pageerror', (err) => pageCErrors.push(err.message));
+    pageC.on('response', async (res) => {
+      if (res.url().startsWith(`${workerBaseUrl}/api/state`) && res.status() === 200) {
+        try {
+          const data = await res.json();
+          if (data && data.shareUrl) latestShareUrl = data.shareUrl;
+        } catch (err) {}
+      }
+    });
+
+    try {
+      await pageC.goto(appUrlWithSync);
+      await pageC.waitForSelector('#sheetSyncBotBanner:not(.hidden)');
+      const botBannerText = await pageC.textContent('#sheetSyncBotText');
+      assert.ok(botBannerText.includes(saBotEmail), `Expected #sheetSyncBotBanner to show ${saBotEmail}`);
+      await assertNoHorizontalOverflow(pageC, 'Device C signed-out desktop with Bot Banner');
+      await pageC.setViewportSize({ width: 375, height: 812 });
+      await assertNoHorizontalOverflow(pageC, 'Device C signed-out mobile 375px with Bot Banner');
+      await pageC.setViewportSize({ width: 1280, height: 800 });
+
+      await pageC.click('#githubAuthBtn');
+      await pageC.waitForSelector('#copyAgentLinkBtn:not(.hidden)');
+      await pageC.waitForFunction(() => {
+        const pill = document.getElementById('syncStatusPill');
+        return pill && pill.textContent.includes('@bob') && !pill.textContent.includes('Syncing');
+      });
+
+      // Paste standalone Google Sheet /edit URL directly (zero JSON) and load it
+      await pageC.fill('#catalogUrlInput', 'https://docs.google.com/spreadsheets/d/e2eSheet01/edit?usp=drivesdk');
+      await pageC.click('#loadCatalogUrlBtn');
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '0 / 3');
+
+      // Switch to 1-Col view to verify Priority + Recommended Shops parsed from CSV render cleanly
+      await pageC.click('#viewModeBtn');
+      await pageC.waitForFunction(() => document.getElementById('albumGrid')?.textContent.includes('Mandarake Grandchaos'));
+
+      // Check off CPCA-1004 -> waits for Synced -> verifies Service Account Sheet write-back + SQLite stripped sheetSync
+      await pageC.click('.check-btn[data-action="toggle-acq"][data-id="sheet-cpca-1004"]');
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 3');
+      await pageC.waitForFunction(() => document.getElementById('syncStatusPill')?.textContent.includes('Synced'));
+
+      assert.ok(sheetBatchUpdates.length >= 1, 'Expected Worker to batchUpdate Google Sheet Column A');
+      assert.deepEqual(sheetBatchUpdates[sheetBatchUpdates.length - 1].data, [{ range: 'A3', values: [['TRUE']] }]);
+      const bobRow = db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '2002'");
+      assert.equal(bobRow.length, 1);
+      assert.equal(JSON.parse(bobRow[0].state_json).sheetSync, undefined);
+
+      // Click Agent Link & fetch /api/share/<token>?format=markdown from external origin without GitHub credentials
+      await pageC.click('#copyAgentLinkBtn');
+      await pageC.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Copied semi-private Agent status link'));
+      assert.ok(latestShareUrl, 'Expected shareUrl from /api/state response');
+
+      const shareMdRes = await fetch(`${latestShareUrl}?format=markdown`, { headers: { Origin: 'https://agent.example' } });
+      assert.equal(shareMdRes.status, 200);
+      assert.equal(shareMdRes.headers.get('access-control-allow-origin'), '*');
+      const shareMd = await shareMdRes.text();
+      assert.ok(shareMd.includes('# CD Hunt Live Status (@bob)'));
+      assert.ok(shareMd.includes('`sheet-cpca-1004`'));
+
+      // Flip Google Sheet offline and reload Chromium -> restores offline CSV cache cleanly with 1/3 preserved
+      stateFlags.sheetOffline = true;
+      await pageC.reload({ waitUntil: 'domcontentloaded' });
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 3');
+      await pageC.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Loaded cached Google Sheet (offline)'));
+      assert.equal(pageCErrors.length, 0, `Unexpected Device C errors: ${pageCErrors.join('; ')}`);
+    } catch (err) {
+      console.error('Device C debug:', { url: pageC.url(), errors: pageCErrors });
+      throw err;
+    } finally {
+      await ctxC.close();
+    }
+
+    console.log('✓ Browser E2E checks passed (desktop + 375px mobile, OAuth, multi-device SQLite sync, Google Sheet mode, Service Account write-back, /api/share, offline CSV cache, keepalive flush)');
   } finally {
     await browser.close();
-    await Promise.all([closeServer(staticServer), closeServer(mockGithubServer), closeServer(workerServer)]);
+    await Promise.all([
+      closeServer(staticServer),
+      closeServer(mockGithubServer),
+      closeServer(mockGoogleServer),
+      closeServer(workerServer)
+    ]);
     db.close();
   }
 }

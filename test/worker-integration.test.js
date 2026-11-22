@@ -496,4 +496,301 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
     assert.equal(getRes.headers.get('access-control-allow-origin'), customOrigin);
     assert.equal((await getRes.json()).user.login, 'alice');
   });
+
+  it('serves user-isolated /api/share JSON & Markdown over HTTP + SQLite, strips customCovers, and enforces daily req limits', async (t) => {
+    const env = await startIntegrationServers({
+      DAILY_REQ_LIMIT: '12',
+      DAILY_WRITE_LIMIT: '12'
+    });
+    t.after(() => env.close());
+
+    const aliceToken = (await env.loginViaHttp('code_alice')).token;
+    const bobToken = (await env.loginViaHttp('code_bob')).token;
+
+    const putAliceRes = await fetch(`${env.workerBaseUrl}/api/state`, {
+      method: 'PUT',
+      headers: {
+        Origin: ALLOWED_ORIGIN,
+        Authorization: `Bearer ${aliceToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(
+        makeSampleSyncPayload({
+          catalogs: {
+            cd_hunt_osaka_cd_cover_a1b2c3d4: {
+              updatedAt: 1795138200000,
+              checklist: { 'cd-01': true, 'cd-02': false },
+              customCovers: {
+                'cd-01': {
+                  variants: [{ url: 'https://private.example/custom.jpg', label: 'Custom', source: 'custom', isRegular: true }],
+                  selectedIndex: 0
+                }
+              },
+              viewMode: 'single'
+            }
+          }
+        })
+      )
+    });
+    assert.equal(putAliceRes.status, 200);
+    const putAlice = await putAliceRes.json();
+    assert.ok(putAlice.shareToken && putAlice.shareUrl.startsWith(`${env.workerBaseUrl}/api/share/`));
+
+    const putBobRes = await fetch(`${env.workerBaseUrl}/api/state`, {
+      method: 'PUT',
+      headers: {
+        Origin: ALLOWED_ORIGIN,
+        Authorization: `Bearer ${bobToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(
+        makeSampleSyncPayload({
+          activeCatalogUrl: 'https://example.com/bob.json',
+          catalogs: {
+            cd_hunt_bob_list_deadbeef: {
+              updatedAt: 1795138300000,
+              checklist: { 'bob-99': true },
+              viewMode: 'grid'
+            }
+          }
+        })
+      )
+    });
+    assert.equal(putBobRes.status, 200);
+    const putBob = await putBobRes.json();
+    assert.notEqual(putAlice.shareToken, putBob.shareToken);
+
+    // Public CORS preflight & GET from external AI/LLM origin
+    const preflight = await fetch(putAlice.shareUrl, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://agent.example' }
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), '*');
+
+    const aliceShareJsonRes = await fetch(putAlice.shareUrl, {
+      headers: { Origin: 'https://agent.example' }
+    });
+    assert.equal(aliceShareJsonRes.status, 200);
+    assert.equal(aliceShareJsonRes.headers.get('access-control-allow-origin'), '*');
+    assert.equal(aliceShareJsonRes.headers.get('cache-control'), 'no-store');
+    const aliceShareJson = await aliceShareJsonRes.json();
+    assert.deepEqual(aliceShareJson.user, { login: 'alice' });
+    assert.deepEqual(aliceShareJson.catalogs.cd_hunt_osaka_cd_cover_a1b2c3d4.checklist, { 'cd-01': true, 'cd-02': false });
+    assert.equal(aliceShareJson.catalogs.cd_hunt_osaka_cd_cover_a1b2c3d4.customCovers, undefined);
+
+    const bobShareJson = await (await fetch(`${env.workerBaseUrl}/api/share?token=${encodeURIComponent(putBob.shareToken)}`)).json();
+    assert.deepEqual(bobShareJson.user, { login: 'bob' });
+    assert.deepEqual(bobShareJson.catalogs.cd_hunt_bob_list_deadbeef.checklist, { 'bob-99': true });
+
+    // Both ?format=markdown and Accept: text/markdown return readable Markdown checklist
+    const mdRes = await fetch(`${putAlice.shareUrl}?format=markdown`);
+    assert.equal(mdRes.status, 200);
+    assert.ok(mdRes.headers.get('content-type').includes('text/markdown'));
+    const mdText = await mdRes.text();
+    assert.ok(mdText.includes('# CD Hunt Live Status (@alice)'));
+    assert.ok(mdText.includes('`cd-01`'));
+    assert.equal(mdText.includes('cd-02'), false);
+
+    const acceptMdRes = await fetch(putAlice.shareUrl, { headers: { Accept: 'text/markdown' } });
+    assert.equal(acceptMdRes.status, 200);
+    assert.ok((await acceptMdRes.text()).includes('# CD Hunt Live Status (@alice)'));
+
+    // Guards: POST -> 405, invalid/session tokens -> 401
+    assert.equal((await fetch(putAlice.shareUrl, { method: 'POST' })).status, 405);
+    assert.equal((await fetch(`${env.workerBaseUrl}/api/share/invalid-token`)).status, 401);
+    assert.equal((await fetch(`${env.workerBaseUrl}/api/share/${aliceToken}`)).status, 401);
+
+    // Exhaust remaining DAILY_REQ_LIMIT (currently 6: 2 PUT + 4 valid GET share) -> /api/share returns 503
+    for (let i = 0; i < 6; i++) {
+      const r = await fetch(putAlice.shareUrl);
+      assert.equal(r.status, 200);
+    }
+    const pausedShareRes = await fetch(putAlice.shareUrl);
+    assert.equal(pausedShareRes.status, 503);
+    assert.equal((await pausedShareRes.json()).paused, true);
+  });
+
+  it('authenticates RS256 Service Account assertions and executes single-tab, multi-tab gid, and fault-tolerant Sheets write-back over HTTP + SQLite', async (t) => {
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256'
+      },
+      true,
+      ['sign', 'verify']
+    );
+    const pkcs8B64 = Buffer.from(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey)).toString('base64');
+    const pem = `-----BEGIN PRIVATE KEY-----\n${pkcs8B64.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
+
+    let forceSheetsForbidden = false;
+    const batchWrites = [];
+    const assertions = [];
+
+    const mockGoogleServer = http.createServer(async (req, res) => {
+      const reqUrl = new URL(req.url, 'http://127.0.0.1');
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const bodyText = Buffer.concat(chunks).toString('utf8');
+
+      if (req.method === 'POST' && reqUrl.pathname === '/oauth/token') {
+        const params = new URLSearchParams(bodyText);
+        const assertion = params.get('assertion');
+        const [h, p, s] = String(assertion || '').split('.');
+        const validSig = await crypto.subtle.verify(
+          'RSASSA-PKCS1-v1_5',
+          keyPair.publicKey,
+          Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64'),
+          new TextEncoder().encode(`${h}.${p}`)
+        );
+        if (!validSig) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid_grant' }));
+          return;
+        }
+        assertions.push(JSON.parse(Buffer.from(p, 'base64url').toString('utf8')));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ access_token: 'ya29.int-token', expires_in: 3600 }));
+        return;
+      }
+
+      if (forceSheetsForbidden) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 403, message: 'Caller does not have permission' } }));
+        return;
+      }
+
+      if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/sheetInt01/values/A1:I500') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            values: [
+              ['Got it?', 'Category', 'Artist', 'Title', 'Catalog Number'],
+              ['FALSE', 'Game', 'Capcom', 'Breath of Fire III OST', 'CPCA-1004']
+            ]
+          })
+        );
+        return;
+      }
+
+      if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/sheetInt02' && reqUrl.searchParams.get('fields') === 'sheets.properties(sheetId,title)') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            sheets: [
+              { properties: { sheetId: 0, title: 'Sheet1' } },
+              { properties: { sheetId: 42, title: 'Osaka 2026' } }
+            ]
+          })
+        );
+        return;
+      }
+
+      if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/sheetInt02/values/' + encodeURIComponent("'Osaka 2026'!A1:I500")) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            values: [
+              ['Title Row'],
+              ['Got it?', 'Category', 'Artist', 'Title', 'Catalog Number'],
+              ['FALSE', 'J-Rock', 'AKFG', 'Sol-fa', 'KSCL-737']
+            ]
+          })
+        );
+        return;
+      }
+
+      if (req.method === 'POST' && /^\/v4\/spreadsheets\/sheetInt0[12]\/values:batchUpdate$/.test(reqUrl.pathname)) {
+        const writeBody = JSON.parse(bodyText);
+        batchWrites.push({ path: reqUrl.pathname, body: writeBody });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ totalUpdatedCells: writeBody.data.length }));
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+    const googleUrl = await listenServer(mockGoogleServer);
+    t.after(() => closeServer(mockGoogleServer));
+
+    const botEmail = 'cd-hunt-int@demo-project.iam.gserviceaccount.com';
+    const env = await startIntegrationServers({
+      GOOGLE_OAUTH_TOKEN_URL: `${googleUrl}/oauth/token`,
+      GOOGLE_SHEETS_API_BASE_URL: googleUrl,
+      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+        client_email: botEmail,
+        private_key: pem,
+        token_uri: `${googleUrl}/oauth/token`
+      })
+    });
+    t.after(() => env.close());
+
+    const statusJson = await (await fetch(`${env.workerBaseUrl}/api/status`, { headers: { Origin: ALLOWED_ORIGIN } })).json();
+    assert.deepEqual(statusJson.sheetSync, { configured: true, serviceAccountEmail: botEmail });
+
+    const aliceToken = (await env.loginViaHttp('code_alice')).token;
+
+    // 1) Default tab write-back
+    const put1 = await (
+      await fetch(`${env.workerBaseUrl}/api/state`, {
+        method: 'PUT',
+        headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          makeSampleSyncPayload({
+            sheetSync: {
+              googleSheetUrl: 'https://docs.google.com/spreadsheets/d/sheetInt01/edit',
+              checklistByCatNo: { 'CPCA-1004': true }
+            }
+          })
+        )
+      })
+    ).json();
+    assert.deepEqual(put1.sheetSync, { ok: true, updatedRows: 1 });
+    assert.equal(assertions[0].iss, botEmail);
+    assert.deepEqual(batchWrites[0].body.data, [{ range: 'A2', values: [['TRUE']] }]);
+
+    // 2) Multi-tab #gid=42 write-back + verify SQLite state_json stripped transient sheetSync
+    const put2 = await (
+      await fetch(`${env.workerBaseUrl}/api/state`, {
+        method: 'PUT',
+        headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          makeSampleSyncPayload({
+            sheetSync: {
+              googleSheetUrl: 'https://docs.google.com/spreadsheets/d/sheetInt02/edit#gid=42',
+              checklistByCatNo: { 'KSCL-737': true }
+            }
+          })
+        )
+      })
+    ).json();
+    assert.deepEqual(put2.sheetSync, { ok: true, updatedRows: 1 });
+    assert.deepEqual(batchWrites[1].body.data, [{ range: "'Osaka 2026'!A3", values: [['TRUE']] }]);
+    const savedRow = env.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+    assert.equal(JSON.parse(savedRow[0].state_json).sheetSync, undefined);
+
+    // 3) Sheet API 403 error does NOT block D1 state save (PUT returns 200 with sheetSync.ok === false)
+    forceSheetsForbidden = true;
+    const put3Res = await fetch(`${env.workerBaseUrl}/api/state`, {
+      method: 'PUT',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(
+        makeSampleSyncPayload({
+          updatedAt: 1795138209999,
+          sheetSync: {
+            googleSheetUrl: 'https://docs.google.com/spreadsheets/d/sheetInt01/edit',
+            checklistByCatNo: { 'CPCA-1004': false }
+          }
+        })
+      )
+    });
+    assert.equal(put3Res.status, 200);
+    const put3 = await put3Res.json();
+    assert.equal(put3.ok, true);
+    assert.equal(put3.sheetSync.ok, false);
+    assert.ok(put3.sheetSync.error.includes('403'));
+  });
 });

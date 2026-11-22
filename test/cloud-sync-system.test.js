@@ -136,6 +136,37 @@ async function startFullSystem(envOverrides = {}) {
       res.end(JSON.stringify(sampleCatalog));
       return;
     }
+    if (reqUrl.pathname === '/alice/cd-metadata/main/hybrid.json') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          schemaVersion: 1,
+          meta: {
+            title: 'Hybrid Live System List',
+            subtitle: 'Base JSON + Google Sheet #gid=42 overlay',
+            googleSheetUrl: 'https://docs.google.com/spreadsheets/d/hybridSys42/edit#gid=42'
+          },
+          categories: [
+            { key: 'All', label: 'All Releases', dot: '#a1a1aa' },
+            { key: 'J-Rock', label: 'J-Rock', dot: '#f43f5e' }
+          ],
+          items: [
+            {
+              id: 'sys-cur-akfg',
+              category: 'J-Rock',
+              artist: 'Asian Kung-Fu Generation',
+              title: 'Sol-fa',
+              regCatNo: 'KSCL-737',
+              catalog: 'KSCL-737 (通常盤)',
+              kana: 'ア',
+              filing: 'Look under ア',
+              price: '¥400–¥800'
+            }
+          ]
+        })
+      );
+      return;
+    }
     if (reqUrl.pathname === '/dopingus-build/cd-metadata/main/index.json') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ schemaVersion: 1, catalogs: [] }));
@@ -496,6 +527,20 @@ async function bootSystemClient(sys, {
       const el = elements.get(id);
       assert.ok(el, `#${id} must exist`);
       el.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} });
+      await settle();
+    },
+    setInput(id, val) {
+      const el = elements.get(id);
+      assert.ok(el, `#${id} must exist`);
+      el.value = String(val);
+      el.dispatchEvent({ type: 'input', target: el });
+    },
+    async selectLocalFile(name, content) {
+      const fileInput = elements.get('catalogFileInput');
+      assert.ok(fileInput, '#catalogFileInput must exist');
+      const raw = typeof content === 'string' ? content : JSON.stringify(content);
+      fileInput.files = [{ name, async text() { return raw; } }];
+      fileInput.dispatchEvent({ type: 'change', target: fileInput });
       await settle();
     },
     triggerDocumentClick(action, attrs = {}) {
@@ -920,5 +965,209 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     const catalogKeys = Object.keys(agentJson.catalogs);
     assert.equal(catalogKeys.length, 1);
     assert.deepEqual(agentJson.catalogs[catalogKeys[0]].checklist, { 'sheet-cpca-1004': true });
+  });
+
+  it('syncs hybrid JSON + meta.googleSheetUrl (#gid=42) across two devices and stays resilient when Sheets API returns 403', async (t) => {
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256'
+      },
+      true,
+      ['sign', 'verify']
+    );
+    const pkcs8B64 = Buffer.from(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey)).toString('base64');
+    const pem = `-----BEGIN PRIVATE KEY-----\n${pkcs8B64.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
+
+    let forceSheetsForbidden = false;
+    const batchUpdates = [];
+    const sheetRows = [
+      ['Got it?', 'Category', 'Artist', 'Title', 'Catalog Number', 'Filing', 'Price', 'Priority', 'Recommended Shops'],
+      ['TRUE', 'J-Rock', 'Asian Kung-Fu Generation', 'Sol-fa', 'KSCL-737', 'Look under ア', '¥500', 'Medium', 'Book Off'],
+      ['FALSE', 'Game OST', 'Keiichi Okabe', 'NieR:Automata OST', 'SQEX-10589~91', 'Look under ナ', '¥2,500', 'High', 'Mandarake']
+    ];
+
+    const googleMockServer = http.createServer(async (req, res) => {
+      const reqUrl = new URL(req.url, 'http://127.0.0.1');
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const bodyStr = Buffer.concat(chunks).toString('utf8');
+
+      if (req.method === 'POST' && reqUrl.pathname === '/oauth/token') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ access_token: 'ya29.hybrid-token', expires_in: 3600 }));
+        return;
+      }
+      if (forceSheetsForbidden) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 403, message: 'The caller does not have permission' } }));
+        return;
+      }
+      if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/hybridSys42') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            sheets: [
+              { properties: { sheetId: 0, title: 'Default' } },
+              { properties: { sheetId: 42, title: 'Osaka 2026' } }
+            ]
+          })
+        );
+        return;
+      }
+      if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/hybridSys42/values/' + encodeURIComponent("'Osaka 2026'!A1:I500")) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ values: sheetRows }));
+        return;
+      }
+      if (req.method === 'POST' && reqUrl.pathname === '/v4/spreadsheets/hybridSys42/values:batchUpdate') {
+        const updatePayload = JSON.parse(bodyStr);
+        batchUpdates.push(updatePayload);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ totalUpdatedCells: updatePayload.data.length }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const googleMockUrl = await listenServer(googleMockServer);
+    t.after(() => closeServer(googleMockServer));
+
+    const sys = await startFullSystem({
+      GOOGLE_OAUTH_TOKEN_URL: `${googleMockUrl}/oauth/token`,
+      GOOGLE_SHEETS_API_BASE_URL: googleMockUrl,
+      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+        client_email: 'cd-hunt-hybrid@sys.iam.gserviceaccount.com',
+        private_key: pem,
+        token_uri: `${googleMockUrl}/oauth/token`
+      })
+    });
+    t.after(() => sys.close());
+
+    const hybridJsonUrl = `${sys.metadataBaseUrl}/alice/cd-metadata/main/hybrid.json`;
+    const sheetOverlayUrl = 'https://docs.google.com/spreadsheets/d/hybridSys42/export?format=csv&gid=42';
+    const sheetCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'TRUE,J-Rock,Asian Kung-Fu Generation,Sol-fa,KSCL-737,Look under ア,¥500,Medium,Book Off',
+      'FALSE,Game OST,Keiichi Okabe,NieR:Automata OST,SQEX-10589~91,Look under ナ,"¥2,500",High,Mandarake'
+    ].join('\n');
+
+    const hash = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      'code_alice'
+    );
+
+    const deviceA = await bootSystemClient(sys, {
+      hash,
+      search: '?catalog=' + encodeURIComponent(hybridJsonUrl),
+      syncDebounceMs: 10,
+      coverMocks: async (url) => {
+        if (url === sheetOverlayUrl) {
+          return new Response(sheetCsv, { status: 200, headers: { 'Content-Type': 'text/csv' } });
+        }
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+    });
+
+    // Device A merged 1 curated item + 1 new Sheet row (2/2), seeded KSCL-737 (TRUE in Sheet)
+    assert.equal(deviceA.elements.get('progressBadge').textContent, '1 / 2');
+    assert.ok(deviceA.elements.get('albumGrid').innerHTML.includes('NieR:Automata OST'));
+    await deviceA.clickElement('viewModeBtn');
+    assert.ok(deviceA.elements.get('albumGrid').innerHTML.includes('Priority: High'));
+    assert.ok(deviceA.elements.get('albumGrid').innerHTML.includes('Mandarake'));
+
+    // Toggle newly merged Sheet row SQEX-10589~91 -> pushes to SQLite AND batch-updates 'Osaka 2026'!A3 -> TRUE
+    deviceA.triggerDocumentClick('toggle-acq', { 'data-id': 'sheet-sqex-10589-91' });
+    await deviceA.settle(120);
+    assert.equal(deviceA.elements.get('progressBadge').textContent, '2 / 2');
+    assert.equal(batchUpdates.length, 1);
+    assert.deepEqual(batchUpdates[0].data, [{ range: "'Osaka 2026'!A3", values: [['TRUE']] }]);
+
+    // Device B (fresh sign-in, Sheet CSV unreachable offline) restores hybrid checklist from SQLite over base JSON,
+    // unchecks sys-cur-akfg -> persists uncheck even if Sheets API returns 403
+    const deviceB = await bootSystemClient(sys, {
+      hash: await sys.completeOAuthRedirect(
+        `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+        'code_alice'
+      ),
+      syncDebounceMs: 10,
+      coverMocks: async (url) => {
+        if (url === sheetOverlayUrl) throw new Error('Sheet CSV offline');
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+    });
+    assert.equal(deviceB.elements.get('progressBadge').textContent, '1 / 1');
+
+    forceSheetsForbidden = true;
+    deviceB.triggerDocumentClick('toggle-acq', { 'data-id': 'sys-cur-akfg' });
+    await deviceB.settle(120);
+    assert.equal(deviceB.elements.get('progressBadge').textContent, '0 / 1');
+    assert.ok(deviceB.elements.get('syncStatusPill').textContent.includes('Synced'));
+    const dbRow = sys.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+    const storedChecklist = Object.values(JSON.parse(dbRow[0].state_json).catalogs)[0].checklist;
+    assert.equal(storedChecklist['sys-cur-akfg'], undefined);
+  });
+
+  it('discovers Service Account bot email signed-out, loads standalone Google Sheet via UI, caches offline, and imports local .csv', async (t) => {
+    const botEmail = 'cd-hunt-bot-ui@sys.iam.gserviceaccount.com';
+    const sys = await startFullSystem({
+      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+        client_email: botEmail,
+        private_key: '-----BEGIN PRIVATE KEY-----\nMII=\n-----END PRIVATE KEY-----'
+      })
+    });
+    t.after(() => sys.close());
+
+    const sheetEditUrl = 'https://docs.google.com/spreadsheets/d/standaloneSys1/edit';
+    const sheetCsvUrl = 'https://docs.google.com/spreadsheets/d/standaloneSys1/export?format=csv';
+    const sheetCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'TRUE,Games,Capcom,Breath of Fire III OST,CPCA-1004,Look under ブ,¥3000,High,Mandarake',
+      'FALSE,J-Rock,Asian Kung-Fu Generation,Sol-fa,KSCL-737,Look under ア,¥500,Medium,Book Off'
+    ].join('\n');
+
+    // 1) Signed-out client fetches real Worker /api/status -> renders #sheetSyncBotBanner & copies bot email
+    const signedOutClient = await bootSystemClient(sys, {
+      syncDebounceMs: 10,
+      coverMocks: async (url) => {
+        if (url === sheetCsvUrl) {
+          return new Response(sheetCsv, { status: 200, headers: { 'Content-Type': 'text/csv' } });
+        }
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+    });
+    await signedOutClient.settle(60);
+    assert.equal(signedOutClient.elements.get('sheetSyncBotBanner').classList.contains('hidden'), false);
+    assert.ok(signedOutClient.elements.get('sheetSyncBotText').textContent.includes(botEmail));
+    await signedOutClient.clickElement('copySheetBotEmailBtn');
+    assert.ok(signedOutClient.copiedTexts.includes(botEmail));
+
+    // 2) Submit standalone Google Sheet URL via Catalog Loader UI -> uncheck CPCA-1004 -> persist localStorage
+    signedOutClient.setInput('catalogUrlInput', sheetEditUrl);
+    await signedOutClient.clickElement('loadCatalogUrlBtn');
+    assert.equal(signedOutClient.elements.get('progressBadge').textContent, '1 / 2');
+    signedOutClient.triggerDocumentClick('toggle-acq', { 'data-id': 'sheet-cpca-1004' });
+    assert.equal(signedOutClient.elements.get('progressBadge').textContent, '0 / 2');
+
+    // 3) Reload offline with Sheet fetch throwing -> restores offline CSV cache & preserves explicit uncheck
+    const offlineSnapshot = signedOutClient.localStorage.snapshot();
+    const offlineClient = await bootSystemClient(sys, {
+      initialStorage: offlineSnapshot,
+      syncDebounceMs: 10,
+      coverMocks: async (url) => {
+        if (url === sheetCsvUrl) throw new Error('Network offline');
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+    });
+    assert.equal(offlineClient.elements.get('toast').textContent, 'Loaded cached Google Sheet (offline)');
+    assert.equal(offlineClient.elements.get('progressBadge').textContent, '0 / 2');
+    assert.ok(offlineClient.elements.get('albumGrid').innerHTML.includes('Sol-fa'));
+
+    // 4) Upload local .csv file directly without network
+    await offlineClient.selectLocalFile('my-list.csv', sheetCsv);
+    assert.equal(offlineClient.elements.get('toast').textContent, 'Loaded local CSV: my-list.csv');
+    assert.equal(offlineClient.elements.get('progressBadge').textContent, '1 / 2');
   });
 });
