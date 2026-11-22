@@ -16,6 +16,7 @@ const ONE_BY_ONE_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
   'base64'
 );
+const SAMPLE_COVER_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#38bdf8"/></svg>';
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -170,12 +171,45 @@ async function attachExternalRoutes(context, appOrigin, workerBaseUrl, opts = {}
         return;
       }
 
+      if (reqUrl.hostname === 'itunes.apple.com') {
+        const term = reqUrl.searchParams.get('term') || '';
+        const country = reqUrl.searchParams.get('country') || '';
+        const results =
+          country === 'jp' && term.includes('yama slash')
+            ? [
+                {
+                  trackName: 'slash',
+                  collectionName: 'slash (通常盤)',
+                  artistName: 'yama',
+                  artworkUrl100: 'https://custom.e2e.example/itunes-100x100bb.svg'
+                }
+              ]
+            : [];
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: JSON.stringify({ results })
+        });
+        return;
+      }
+
       if (/^(?:musicbrainz\.org|coverartarchive\.org|itunes\.apple\.com)$/.test(reqUrl.hostname)) {
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
           headers: { 'Access-Control-Allow-Origin': '*' },
           body: JSON.stringify({ releases: [], images: [], results: [] })
+        });
+        return;
+      }
+
+      if (reqUrl.href === 'https://custom.e2e.example/itunes-600x600bb.svg') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'image/svg+xml',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: SAMPLE_COVER_SVG
         });
         return;
       }
@@ -526,9 +560,9 @@ async function main() {
       await ctxB.close();
     }
 
-    // Device C: Standalone Google Sheet mode + Bot Email Banner + Write-Back + /api/share + Offline CSV Cache + Search/Filters + Backup + Duplicate Sheets + Local CSV + Sign-out
+    // Device C: Standalone Google Sheet mode + Bot Email Banner + Write-Back + /api/share + Offline CSV Cache + Search/Filters + Crate Flip Swipe + Backup + Duplicate Sheets + Local CSV + Sign-out
     const stateFlags = { sheetOffline: false, dupSheetOffline: false };
-    const ctxC = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const ctxC = await browser.newContext({ viewport: { width: 1280, height: 800 }, hasTouch: true });
     await attachExternalRoutes(ctxC, appOrigin, workerBaseUrl, {
       authCode: 'code_bob',
       stateFlags,
@@ -612,6 +646,99 @@ async function main() {
       await pageC.click('#resetFiltersBtn');
       await pageC.waitForSelector('#emptyState', { state: 'hidden' });
       await pageC.waitForFunction(() => document.getElementById('visibleCountText')?.textContent.includes('Showing 3 physical'));
+
+      // Mobile Crate Flip touch swipe scoping (cover area only, touch-action: pan-y), cleaned Jacket Search URL, & iTunes cover verification
+      await pageC.setViewportSize({ width: 375, height: 812 });
+      await pageC.click('#openCrateFlipBtn');
+      await pageC.waitForSelector('#lightboxModal.open');
+      await pageC.waitForFunction(() => document.getElementById('lbCounter')?.textContent === '1 / 4');
+
+      const coverTouchAction = await pageC.evaluate(() => getComputedStyle(document.getElementById('lbCoverFrame')).touchAction);
+      assert.equal(coverTouchAction, 'pan-y');
+
+      const item1Href = await pageC.evaluate(() => decodeURIComponent(document.getElementById('lbGoogleSearchLink')?.href || ''));
+      assert.ok(item1Href.includes('CPCA-1004 Capcom Breath of Fire III Original Soundtrack 通常盤 CD'));
+      assert.equal(item1Href.includes('2-CD Set'), false);
+
+      async function dispatchRealTouchSwipe(selector, dx, dy) {
+        await pageC.evaluate(({ sel, deltaX, deltaY }) => {
+          const el = document.querySelector(sel);
+          if (!el) throw new Error('Missing element for touch swipe: ' + sel);
+          el.scrollIntoView({ block: 'center', inline: 'center' });
+          const rect = el.getBoundingClientRect();
+          const startX = rect.left + rect.width / 2;
+          const startY = rect.top + rect.height / 2;
+          const endX = startX + deltaX;
+          const endY = startY + deltaY;
+          const tStart = new Touch({
+            identifier: 1,
+            target: el,
+            clientX: startX,
+            clientY: startY,
+            screenX: startX,
+            screenY: startY,
+            pageX: startX,
+            pageY: startY
+          });
+          el.dispatchEvent(new TouchEvent('touchstart', {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            touches: [tStart],
+            targetTouches: [tStart],
+            changedTouches: [tStart]
+          }));
+          const tEnd = new Touch({
+            identifier: 1,
+            target: el,
+            clientX: endX,
+            clientY: endY,
+            screenX: endX,
+            screenY: endY,
+            pageX: endX,
+            pageY: endY
+          });
+          el.dispatchEvent(new TouchEvent('touchend', {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            touches: [],
+            targetTouches: [],
+            changedTouches: [tEnd]
+          }));
+        }, { sel: selector, deltaX: dx, deltaY: dy });
+      }
+
+      // Swiping horizontally outside cover (#lbFiling in .lb-details) must NOT flip Crate Flip
+      await dispatchRealTouchSwipe('#lbFiling', -100, 0);
+      assert.equal(await pageC.textContent('#lbCounter'), '1 / 4');
+
+      // Vertical scroll gesture inside cover area (#lbArtBox) must NOT flip Crate Flip
+      await dispatchRealTouchSwipe('#lbArtBox', -60, 140);
+      assert.equal(await pageC.textContent('#lbCounter'), '1 / 4');
+
+      // Horizontal swipe on #lbArtBox bubbles cleanly to #lbCoverFrame -> advances to yama (2 / 4) & resolves mocked iTunes SVG cover
+      await dispatchRealTouchSwipe('#lbArtBox', -100, 4);
+      await pageC.waitForFunction(() => document.getElementById('lbCounter')?.textContent === '2 / 4');
+      await pageC.waitForSelector('#lbArtBox img[src="https://custom.e2e.example/itunes-600x600bb.svg"]');
+      const item2Href = await pageC.evaluate(() => decodeURIComponent(document.getElementById('lbGoogleSearchLink')?.href || ''));
+      assert.ok(item2Href.includes('SRCL-12539 yama slash 通常盤 CD'));
+      assert.equal(item2Href.includes('Gundam'), false);
+
+      // Horizontal swipe right on #lbArtBox returns to 1 / 4
+      await dispatchRealTouchSwipe('#lbArtBox', 100, -4);
+      await pageC.waitForFunction(() => document.getElementById('lbCounter')?.textContent === '1 / 4');
+
+      // Wrap backwards to digital-only Hanatan (4 / 4) and verify digital Jacket Search string
+      await pageC.click('#lbPrevBtn');
+      await pageC.waitForFunction(() => document.getElementById('lbCounter')?.textContent === '4 / 4');
+      const digHref = await pageC.evaluate(() => decodeURIComponent(document.getElementById('lbGoogleSearchLink')?.href || ''));
+      assert.ok(digHref.includes('Hanatan gradation ジャケット'));
+      assert.equal(digHref.includes('通常盤 CD'), false);
+
+      await pageC.click('#closeLightboxBtn');
+      await pageC.waitForSelector('#lightboxModal', { state: 'hidden' });
+      await pageC.setViewportSize({ width: 1280, height: 800 });
 
       // Backup & Restore modal export + import + SQLite sync
       await pageC.click('#backupBtn');
@@ -724,7 +851,7 @@ async function main() {
       await ctxC.close();
     }
 
-    console.log('✓ Browser E2E checks passed (desktop + 375px mobile, OAuth, multi-device SQLite sync, search/filters, backup modal, Google Sheet + dedup + write-back, /api/share, offline CSV cache, local CSV upload, sign-out, keepalive flush)');
+    console.log('✓ Browser E2E checks passed (desktop + 375px mobile, OAuth, multi-device SQLite sync, search/filters, Crate Flip cover-only swipe & jacket search, backup modal, Google Sheet + dedup + write-back, /api/share, offline CSV cache, local CSV upload, sign-out, keepalive flush)');
   } finally {
     await browser.close();
     await Promise.all([

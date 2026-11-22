@@ -1581,4 +1581,152 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     const dbRowsAfterLocal = sys.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
     assert.equal(Object.keys(JSON.parse(dbRowsAfterLocal[0].state_json).catalogs).length, 2);
   });
+
+  it('resolves real-world Google Sheet covers (MusicBrainz range fallback & normalized iTunes fallback) with zero SQLite writes and syncs fullwidth-tilde write-back', async (t) => {
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256'
+      },
+      true,
+      ['sign', 'verify']
+    );
+    const pkcs8B64 = Buffer.from(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey)).toString('base64');
+    const pem = `-----BEGIN PRIVATE KEY-----\n${pkcs8B64.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
+
+    const sheetRows = [
+      ['Got it?', 'Aisle / Category', 'Artist / Franchise', 'Title / Release Details', 'Catalog Number', 'Filing Location & Shelf Search Advice', 'Target Used Price', 'Priority', 'Recommended Shops'],
+      ['FALSE', 'Anime', 'Shiyui (シユイ)', '"ホロウ" (Hollow) (Demon Lord 2099 OP)', 'AICL-4670～4671', 'Look under シ', '¥2,400', 'Medium', 'Animate'],
+      ['FALSE', 'Seiyuu', 'Rico Sasaki (佐々木李子)', 'スタート! (Start!) (Artist Editions ONLY for Track 4 "フレンドパスワード" — Skip AKCY-58073)', 'AKCY-58075 (Artist CD+Photobook)', 'Look under サ', '¥1,200', 'High', 'Animate']
+    ];
+    const batchUpdates = [];
+
+    const googleMockServer = http.createServer(async (req, res) => {
+      const reqUrl = new URL(req.url, 'http://127.0.0.1');
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const bodyStr = Buffer.concat(chunks).toString('utf8');
+
+      if (req.method === 'POST' && reqUrl.pathname === '/oauth/token') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ access_token: 'ya29.real-cover-sys', expires_in: 3600 }));
+        return;
+      }
+      if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/realCoverSys1/values/A1:I500') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ values: sheetRows }));
+        return;
+      }
+      if (req.method === 'POST' && reqUrl.pathname === '/v4/spreadsheets/realCoverSys1/values:batchUpdate') {
+        const updatePayload = JSON.parse(bodyStr);
+        batchUpdates.push(updatePayload);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ totalUpdatedCells: (updatePayload.data || []).length }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const googleMockUrl = await listenServer(googleMockServer);
+    t.after(() => closeServer(googleMockServer));
+
+    const sys = await startFullSystem({
+      GOOGLE_OAUTH_TOKEN_URL: `${googleMockUrl}/oauth/token`,
+      GOOGLE_SHEETS_API_BASE_URL: googleMockUrl,
+      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+        client_email: 'cd-hunt-covers@sys.iam.gserviceaccount.com',
+        private_key: pem,
+        token_uri: `${googleMockUrl}/oauth/token`
+      })
+    });
+    t.after(() => sys.close());
+
+    class MockVerifiedImage {
+      set src(val) {
+        this._src = val;
+        setTimeout(() => {
+          this.naturalWidth = 600;
+          this.naturalHeight = 600;
+          if (typeof this.onload === 'function') this.onload();
+        }, 1);
+      }
+    }
+
+    const sheetCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'FALSE,Anime,Shiyui (シユイ),"""ホロウ"" (Hollow) (Demon Lord 2099 OP)",AICL-4670～4671,Look under シ,"¥2,400",Medium,Animate',
+      'FALSE,Seiyuu,Rico Sasaki (佐々木李子),"スタート! (Start!) (Artist Editions ONLY for Track 4 ""フレンドパスワード"" — Skip AKCY-58073)",AKCY-58075 (Artist CD+Photobook),Look under サ,"¥1,200",High,Animate'
+    ].join('\n');
+    const sheetEditUrl = 'https://docs.google.com/spreadsheets/d/realCoverSys1/edit';
+    const sheetCsvUrl = 'https://docs.google.com/spreadsheets/d/realCoverSys1/export?format=csv';
+
+    const hash = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      'code_alice'
+    );
+    const client = await bootSystemClient(sys, {
+      hash,
+      syncDebounceMs: 10,
+      imageImpl: MockVerifiedImage,
+      coverMocks: async (url) => {
+        if (url === sheetCsvUrl) {
+          return new Response(sheetCsv, { status: 200, headers: { 'Content-Type': 'text/csv' } });
+        }
+        if (url.includes('musicbrainz.org')) {
+          if (url.includes('catno:AICL-4670~4671')) {
+            return new Response(JSON.stringify({ releases: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+          }
+          if (url.includes('catno:AICL-4670')) {
+            return new Response(JSON.stringify({ releases: [{ id: 'mb-hollow-sys' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+          }
+          return new Response(JSON.stringify({ releases: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (url.includes('itunes.apple.com')) {
+          if (url.includes(encodeURIComponent('佐々木李子 スタート!'))) {
+            return new Response(
+              JSON.stringify({
+                results: [
+                  {
+                    trackName: 'スタート!',
+                    collectionName: 'スタート! - Single',
+                    artistName: '佐々木 李子',
+                    artworkUrl100: 'https://img.example/rico/100x100bb.jpg'
+                  }
+                ]
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            );
+          }
+          return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+    });
+
+    client.setInput('catalogUrlInput', sheetEditUrl);
+    await client.clickElement('loadCatalogUrlBtn');
+    await client.settle(120);
+    const baselineWrites = sys.db.queryRaw('SELECT write_count FROM daily_usage')[0].write_count;
+
+    await client.triggerIntersection('sheet-aicl-4670-4671');
+    await client.triggerIntersection('sheet-akcy-58075');
+    await client.settle(120);
+
+    assert.ok(client.elements.get('art-slot-sheet-aicl-4670-4671').innerHTML.includes('https://coverartarchive.org/release/mb-hollow-sys/front-500'));
+    assert.ok(client.elements.get('art-slot-sheet-akcy-58075').innerHTML.includes('https://img.example/rico/600x600bb.jpg'));
+    assert.equal(sys.db.queryRaw('SELECT write_count FROM daily_usage')[0].write_count, baselineWrites);
+
+    client.triggerDocumentClick('open-lb', { 'data-lb-idx': '1' });
+    const ricoHref = decodeURIComponent(client.elements.get('lbGoogleSearchLink').href);
+    assert.ok(ricoHref.includes('AKCY-58075 Rico Sasaki スタート! 通常盤 CD'));
+    assert.equal(ricoHref.includes('AKCY-58073'), false);
+
+    const beforeToggle = batchUpdates.length;
+    client.triggerDocumentClick('toggle-acq', { 'data-id': 'sheet-aicl-4670-4671' });
+    await client.settle(120);
+    assert.equal(batchUpdates.length, beforeToggle + 1);
+    assert.deepEqual(batchUpdates[batchUpdates.length - 1].data, [{ range: 'A2', values: [['TRUE']] }]);
+  });
 });
