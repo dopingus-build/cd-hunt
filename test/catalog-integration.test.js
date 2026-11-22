@@ -2504,4 +2504,73 @@ describe('Google Sheet direct loading, JSON hybrid overlay, and Agent Link butto
     });
     assert.equal(appUnconfigured.elements.get('sheetSyncBotBanner').classList.contains('hidden'), true);
   });
+
+  it('auto-deduplicates duplicate rows across Google Sheet URL, local CSV, hybrid overlay, and warns on duplicate JSON', async () => {
+    const dupSheetCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'FALSE,Game OST,Capcom,Breath of Fire III OST,CPCA-1004,Look under ブ,¥3000,,',
+      'TRUE,Game OST,Capcom,Breath of Fire III OST (Dup),CPCA-1004,Look under ブ,¥3500,High,Mandarake',
+      'FALSE,J-Rock,Asian Kung-Fu Generation,Sol-fa,KSCL-737,Look under ア,¥500,Medium,Book Off'
+    ].join('\n');
+
+    // 1) Direct Google Sheet load via submit UI -> deduplicates 3 rows to 2 cards & shows warning toast
+    const appSheet = await bootApp({
+      fetchImpl: async (url) => {
+        if (String(url).includes('export?format=csv')) {
+          return { ok: true, status: 200, async text() { return dupSheetCsv; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+    await appSheet.inputText('catalogUrlInput', 'https://docs.google.com/spreadsheets/d/dupSheet99/edit');
+    await appSheet.clickElement('loadCatalogUrlBtn');
+    assert.equal(appSheet.elements.get('progressBadge').textContent, '1 / 2');
+    assert.ok(appSheet.elements.get('toast').textContent.includes('Merged 1 duplicate row (CPCA-1004)'));
+
+    // 2) Local .csv upload -> deduplicates & includes merge notice in toast
+    await appSheet.selectLocalFile('dups.csv', dupSheetCsv);
+    assert.equal(appSheet.elements.get('progressBadge').textContent, '1 / 2');
+    assert.ok(appSheet.elements.get('toast').textContent.includes('Loaded local CSV: dups.csv'));
+    assert.ok(appSheet.elements.get('toast').textContent.includes('Merged 1 duplicate row'));
+
+    // 3) Standalone JSON catalog containing duplicate regCatNo -> shows non-blocking warning toast
+    const dupJsonCatalog = {
+      schemaVersion: 1,
+      meta: { title: 'Dup JSON Check' },
+      items: [
+        {
+          id: 'j1',
+          category: 'Rock',
+          artist: 'AKFG',
+          title: 'Sol-fa',
+          regCatNo: 'KSCL-737',
+          catalog: 'KSCL-737',
+          kana: 'ア',
+          filing: 'Look under ア',
+          price: '¥500'
+        },
+        {
+          id: 'j2',
+          category: 'Rock',
+          artist: 'AKFG',
+          title: 'Sol-fa Duplicate',
+          regCatNo: 'KSCL-737',
+          catalog: 'KSCL-737',
+          kana: 'ア',
+          filing: 'Look under ア',
+          price: '¥500'
+        }
+      ]
+    };
+    const appJson = await bootApp({
+      search: '?catalog=' + encodeURIComponent('https://cdn.example/dup.json'),
+      fetchImpl: async (url) => {
+        if (String(url) === 'https://cdn.example/dup.json') {
+          return { ok: true, status: 200, async json() { return dupJsonCatalog; } };
+        }
+        throw new Error('Unexpected fetch: ' + url);
+      }
+    });
+    assert.ok(appJson.elements.get('toast').textContent.includes('Warning: 1 duplicate catalog entry (KSCL-737)'));
+  });
 });

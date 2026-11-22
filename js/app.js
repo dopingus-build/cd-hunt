@@ -416,6 +416,24 @@
     return storage.deriveStoragePrefix({ sourceUrl: normalizedUrl }) + '_sheet_csv_v1';
   }
 
+  function formatDuplicateWarningToast(duplicates, warningOnly) {
+    const list = Array.isArray(duplicates) ? duplicates : [];
+    const labels = [];
+    const seen = new Set();
+    list.forEach(function (d) {
+      const label = (d && (d.key || d.title)) ? String(d.key || d.title) : '';
+      if (label && !seen.has(label) && labels.length < 3) {
+        seen.add(label);
+        labels.push(label);
+      }
+    });
+    const suffix = labels.length > 0 ? ' (' + labels.join(', ') + ')' : '';
+    if (warningOnly) {
+      return 'Warning: ' + list.length + ' duplicate catalog entr' + (list.length === 1 ? 'y' : 'ies') + suffix;
+    }
+    return 'Merged ' + list.length + ' duplicate row' + (list.length === 1 ? '' : 's') + suffix;
+  }
+
   async function loadAndApplyCatalogFromUrl(rawUrl) {
     const normalizedUrl = normalizeCatalogUrl(rawUrl);
     if (!normalizedUrl) {
@@ -448,10 +466,22 @@
         sourceUrl: normalizedUrl,
         sheetChecklist: sheetParsed.sheetChecklist
       });
-      if (loadedFromOfflineCache) {
+
+      const hasDups = Array.isArray(sheetParsed.duplicates) && sheetParsed.duplicates.length > 0;
+      const dupMsg = hasDups ? formatDuplicateWarningToast(sheetParsed.duplicates, false) : '';
+      if (loadedFromOfflineCache && hasDups) {
+        showToast('Loaded cached Google Sheet (offline) · ' + dupMsg);
+      } else if (loadedFromOfflineCache) {
         showToast('Loaded cached Google Sheet (offline)');
+      } else if (hasDups) {
+        showToast(dupMsg);
       }
-      return { type: 'catalog', url: normalizedUrl, cached: loadedFromOfflineCache };
+      return {
+        type: 'catalog',
+        url: normalizedUrl,
+        cached: loadedFromOfflineCache,
+        toastShown: Boolean(loadedFromOfflineCache || hasDups)
+      };
     }
 
     const res = await fetch(normalizedUrl);
@@ -479,7 +509,11 @@
               sourceUrl: normalizedUrl,
               sheetChecklist: merged.sheetChecklist
             });
-            return { type: 'catalog', url: normalizedUrl };
+            const hasMergeDups = Array.isArray(merged.duplicates) && merged.duplicates.length > 0;
+            if (hasMergeDups) {
+              showToast(formatDuplicateWarningToast(merged.duplicates, false));
+            }
+            return { type: 'catalog', url: normalizedUrl, toastShown: hasMergeDups };
           }
         }
       } catch (err) {
@@ -487,8 +521,16 @@
       }
     }
 
+    const jsonDups =
+      sheetAdapter && typeof sheetAdapter.detectCatalogDuplicates === 'function'
+        ? sheetAdapter.detectCatalogDuplicates(data && data.items)
+        : [];
     applyValidatedCatalog(data, { sourceUrl: normalizedUrl });
-    return { type: 'catalog', url: normalizedUrl };
+    const hasJsonDups = jsonDups.length > 0;
+    if (hasJsonDups) {
+      showToast(formatDuplicateWarningToast(jsonDups, true));
+    }
+    return { type: 'catalog', url: normalizedUrl, toastShown: hasJsonDups };
   }
 
   function getSyncDebounceMs() {
@@ -1339,7 +1381,7 @@
         const res = await loadAndApplyCatalogFromUrl(rawUrl);
         if (res && res.type === 'index') {
           showToast('Repository presets loaded (' + res.catalogs.length + ')');
-        } else {
+        } else if (!res || !res.toastShown) {
           showToast('Catalog loaded successfully');
         }
       } catch (err) {
@@ -1652,31 +1694,39 @@
             /\.csv$/i.test(fileName) ||
             (file.type && String(file.type).toLowerCase().indexOf('csv') !== -1);
 
-          if (isCsvFile && sheetAdapter) {
-            const sheetParsed = sheetAdapter.parseGoogleSheetCsv(text, {});
+          function applyLocalCsv(csvText) {
+            const sheetParsed = sheetAdapter.parseGoogleSheetCsv(csvText, {});
             applyValidatedCatalog(sheetParsed.catalog, {
               fileName: fileName,
               sheetChecklist: sheetParsed.sheetChecklist
             });
-            showToast('Loaded local CSV: ' + fileName);
+            const dupSuffix =
+              Array.isArray(sheetParsed.duplicates) && sheetParsed.duplicates.length > 0
+                ? ' · ' + formatDuplicateWarningToast(sheetParsed.duplicates, false)
+                : '';
+            showToast('Loaded local CSV: ' + fileName + dupSuffix);
+          }
+
+          if (isCsvFile && sheetAdapter) {
+            applyLocalCsv(text);
           } else {
             let parsed = null;
             try {
               parsed = JSON.parse(text);
             } catch (jsonErr) {
               if (sheetAdapter && /^\s*(?:Got it\?|Aisle|Category|CD Hunt)/i.test(text.replace(/^\uFEFF/, ''))) {
-                const csvParsed = sheetAdapter.parseGoogleSheetCsv(text, {});
-                applyValidatedCatalog(csvParsed.catalog, {
-                  fileName: fileName,
-                  sheetChecklist: csvParsed.sheetChecklist
-                });
-                showToast('Loaded local CSV: ' + fileName);
+                applyLocalCsv(text);
                 return;
               }
               throw jsonErr;
             }
+            const jsonDups =
+              sheetAdapter && typeof sheetAdapter.detectCatalogDuplicates === 'function'
+                ? sheetAdapter.detectCatalogDuplicates(parsed && parsed.items)
+                : [];
             applyValidatedCatalog(parsed, { fileName: fileName });
-            showToast('Loaded local file: ' + fileName);
+            const dupSuffix = jsonDups.length > 0 ? ' · ' + formatDuplicateWarningToast(jsonDups, true) : '';
+            showToast('Loaded local file: ' + fileName + dupSuffix);
           }
         } catch (err) {
           showErrorBanner('App Initialization Error: ' + (err && err.message ? err.message : String(err)));

@@ -1505,7 +1505,7 @@ describe('Google Sheet URL normalization & sheet-adapter CSV parsing/merging (js
     const flatCsv = [
       'Got it?,Category,Artist,Title,Catalog Number,Filing Location,Target Used Price,Priority,Recommended Shops,ID,Kana,iTunes Query',
       'TRUE,J-Rock,bump of chicken,Jupiter,TFCC-86101 (通常盤),Look under バ (Ba),¥500,High,Book Off,bump-jupiter,バ,Jupiter BUMP OF CHICKEN',
-      'YES,J-Rock,bump of chicken,Jupiter Reissue,TFCC-86101,Look under バ,¥500,Low,,bump-jupiter,,',
+      'YES,J-Rock,bump of chicken,Jupiter Reissue,TFCC-86102,Look under バ,¥500,Low,,bump-jupiter,,',
       '✓,Digital-Only,Digital Artist,Digital Song,N/A (Digital Only),Skip physical,,Medium,Mora,,,',
       ',EmptySkip,,,,,,,,,'
     ].join('\n');
@@ -1516,12 +1516,14 @@ describe('Google Sheet URL normalization & sheet-adapter CSV parsing/merging (js
     assert.equal(parsed.catalog.items[0].id, 'bump-jupiter');
     assert.equal(parsed.catalog.items[1].id, 'bump-jupiter-2');
     assert.equal(parsed.catalog.items[2].digitalOnly, true);
+    assert.deepEqual(parsed.duplicates, []);
     assert.deepEqual(parsed.sheetChecklist, {
       'bump-jupiter': true,
       'bump-jupiter-2': true,
       [parsed.catalog.items[2].id]: true
     });
     assert.equal(parsed.rowChecklistByCatNo['TFCC-86101'], true);
+    assert.equal(parsed.rowChecklistByCatNo['TFCC-86102'], true);
 
     assert.throws(() => sheetAdapterModule.parseGoogleSheetCsv('foo,bar\n1,2'), /header row/i);
     assert.throws(() => sheetAdapterModule.parseGoogleSheetCsv('Got it?,Title,Catalog Number\n,,'), /no release rows/i);
@@ -1606,5 +1608,64 @@ describe('Google Sheet URL normalization & sheet-adapter CSV parsing/merging (js
     assert.deepEqual(yama.requiredGroups, [['slash'], ['yama']]);
     assert.equal(rokudenashi.itunesQuery, 'Rokudenashi ホウキボシ');
     assert.deepEqual(rokudenashi.requiredGroups, [['ホウキボシ'], ['Rokudenashi']]);
+  });
+
+  it('auto-deduplicates within Google Sheets, detects duplicates without digital placeholder false positives, and deduplicates merged new rows', () => {
+    const dupCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'FALSE,Game OST,Capcom (カプコン),Breath of Fire III OST,CPCA-1004,Look under ブ,"¥3,000–¥6,000",,,',
+      'TRUE,Game OST,Capcom,Breath of Fire III Original Soundtrack,CPCA-1004 (通常盤) / CPCA-1004-ALT,Look under ブ,¥4000,High,"Mandarake Grandchaos"',
+      'FALSE,Digital-Only,Hanatan,"""gradation""",N/A (Digital Only),Digital only,,,iTunes JP',
+      'TRUE,Digital-Only,Hanatan (花たん),gradation (Digital Single),N/A (Digital Only),Digital only,,Low,Mora'
+    ].join('\n');
+
+    const parsed = sheetAdapterModule.parseGoogleSheetCsv(dupCsv);
+    assert.equal(parsed.catalog.items.length, 2);
+    assert.equal(parsed.duplicates.length, 2);
+    assert.equal(parsed.duplicates[0].reason, 'catalogNumber');
+    assert.equal(parsed.duplicates[0].key, 'CPCA-1004');
+    assert.equal(parsed.duplicates[0].matchedId, 'sheet-cpca-1004');
+    assert.equal(parsed.duplicates[1].reason, 'artistTitle');
+    assert.equal(parsed.catalog.items[0].priority, 'High');
+    assert.equal(parsed.catalog.items[0].recommendedShops, 'Mandarake Grandchaos');
+    assert.equal(parsed.catalog.items[1].priority, 'Low');
+    assert.equal(parsed.catalog.items[1].artistJa, '花たん');
+    assert.deepEqual(parsed.sheetChecklist, {
+      'sheet-cpca-1004': true,
+      [parsed.catalog.items[1].id]: true
+    });
+    assert.equal(parsed.rowChecklistByCatNo['CPCA-1004'], true);
+
+    // detectCatalogDuplicates: flags matching catalog codes or digital titles, ignores distinct codes & DIGITAL placeholders
+    const sampleItems = [
+      makeValidItem({ id: 'a1', regCatNo: 'ABCD-1001', catalog: 'ABCD-1001', title: 'Track One', mbEditions: [{ catno: 'ABCD-1001' }] }),
+      makeValidItem({ id: 'a2', regCatNo: 'ABCD-1002', catalog: 'ABCD-1002', title: 'Track One', mbEditions: [{ catno: 'ABCD-1002' }] }), // Distinct pressing -> OK
+      makeValidItem({ id: 'a3', regCatNo: 'ABCD-1001', catalog: 'ABCD-1001 (Ltd)', title: 'Different Title', mbEditions: [{ catno: 'ABCD-1001' }] }), // Code dup!
+      makeValidItem({ id: 'd1', digitalOnly: true, regCatNo: 'DIGITAL', catalog: 'Digital Only', mbEditions: [], artist: 'Hanatan', title: 'gradation' }),
+      makeValidItem({ id: 'd2', digitalOnly: true, regCatNo: 'DIGITAL-ONLY', catalog: 'Digital Only', mbEditions: [], artist: 'Rokudenashi', title: 'Houkiboshi' })
+    ];
+    const detected = sheetAdapterModule.detectCatalogDuplicates(sampleItems);
+    assert.equal(detected.length, 1);
+    assert.equal(detected[0].itemId, 'a3');
+    assert.equal(detected[0].duplicateOfId, 'a1');
+    assert.equal(detected[0].reason, 'catalogNumber');
+
+    // mergeCatalogWithSheet: deduplicates two new duplicate rows coming from a Sheet object
+    const base = makeValidCatalog({
+      items: [makeValidItem({ id: 'base-1', regCatNo: 'ZZZ-9999', catalog: 'ZZZ-9999', mbEditions: [{ catno: 'ZZZ-9999' }] })]
+    });
+    const unmergedSheetObj = {
+      schemaVersion: 1,
+      items: [
+        makeValidItem({ id: 'new-1', regCatNo: 'NEW-1111', catalog: 'NEW-1111', mbEditions: [{ catno: 'NEW-1111' }] }),
+        makeValidItem({ id: 'new-2', regCatNo: 'NEW-1111', catalog: 'NEW-1111', mbEditions: [{ catno: 'NEW-1111' }], priority: 'High' })
+      ]
+    };
+    const mergedRes = sheetAdapterModule.mergeCatalogWithSheet(base, unmergedSheetObj);
+    assert.equal(mergedRes.addedCount, 1);
+    assert.equal(mergedRes.catalog.items.length, 2);
+    assert.equal(mergedRes.catalog.items[1].priority, 'High');
+    assert.equal(mergedRes.duplicates.length, 1);
+    assert.equal(mergedRes.duplicates[0].key, 'NEW-1111');
   });
 });

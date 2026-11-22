@@ -29,6 +29,7 @@
 
   const CATEGORY_PALETTE = ['#f59e0b', '#f43f5e', '#10b981', '#38bdf8', '#a855f7', '#22d3ee'];
   const CAT_CODE_REGEX = /\b([A-Z]{2,6}-\d{3,6}(?:~\d+)?)\b/g;
+  const SINGLE_CAT_CODE_REGEX = /^[A-Z]{2,6}-\d{3,6}(?:~\d+)?$/;
 
   /**
    * Parse RFC-4180 CSV text (supporting quoted commas, newlines, and escaped "" quotes).
@@ -345,7 +346,10 @@
     const items = [];
     const sheetChecklist = {};
     const rowChecklistByCatNo = {};
+    const duplicates = [];
     const usedIds = new Set();
+    const seenByCode = new Map();
+    const seenByArtistTitle = new Map();
     let inDigitalSection = false;
 
     for (let r = headerIdx + 1; r < rows.length; r++) {
@@ -452,14 +456,36 @@
       }
 
       const acquired = isCheckedValue(rawGotIt);
+      const dupHit = findMatchingItem(item, null, seenByCode, seenByArtistTitle);
+      if (dupHit) {
+        const existing = dupHit.existing;
+        mergeItemMetadata(existing, item);
+        if (acquired) {
+          sheetChecklist[existing.id] = true;
+        }
+        codeInfo.allCodes.forEach(function (code) {
+          rowChecklistByCatNo[code] = Boolean(rowChecklistByCatNo[code] || acquired);
+        });
+        duplicates.push({
+          rowNumber: r + 1,
+          matchedId: existing.id,
+          reason: dupHit.reason,
+          key: dupHit.key,
+          artist: item.artist,
+          title: item.title
+        });
+        continue;
+      }
+
       if (acquired) {
         sheetChecklist[finalId] = true;
       }
       codeInfo.allCodes.forEach(function (code) {
-        rowChecklistByCatNo[code] = acquired;
+        rowChecklistByCatNo[code] = Boolean(rowChecklistByCatNo[code] || acquired);
       });
 
       items.push(item);
+      indexItemIntoLookup(item, null, seenByCode, seenByArtistTitle);
     }
 
     if (items.length === 0) {
@@ -474,23 +500,26 @@
         items: items
       },
       sheetChecklist: sheetChecklist,
-      rowChecklistByCatNo: rowChecklistByCatNo
+      rowChecklistByCatNo: rowChecklistByCatNo,
+      duplicates: duplicates
     };
   }
 
   function extractItemCodes(item) {
+    if (!item || typeof item !== 'object' || item.digitalOnly) return [];
     const codes = new Set();
-    if (!item || typeof item !== 'object') return [];
     if (item.regCatNo) {
       String(item.regCatNo).split(/[,/\s]+/).forEach(function (c) {
         const norm = c.trim().toUpperCase();
-        if (norm) codes.add(norm);
+        if (SINGLE_CAT_CODE_REGEX.test(norm)) codes.add(norm);
       });
     }
     if (Array.isArray(item.mbEditions)) {
       item.mbEditions.forEach(function (ed) {
-        const c = ed && (ed.catno || ed.catNo);
-        if (c) codes.add(String(c).trim().toUpperCase());
+        const rawCode = ed && (ed.catno || ed.catNo);
+        if (!rawCode) return;
+        const norm = String(rawCode).trim().toUpperCase();
+        if (SINGLE_CAT_CODE_REGEX.test(norm)) codes.add(norm);
       });
     }
     if (item.catalog) {
@@ -514,6 +543,110 @@
     return artist + '|' + title;
   }
 
+  function indexItemIntoLookup(item, byId, byCode, byArtistTitle) {
+    if (!item || typeof item !== 'object') return;
+    if (byId && item.id && !byId.has(item.id)) {
+      byId.set(item.id, item);
+    }
+    if (byCode) {
+      extractItemCodes(item).forEach(function (code) {
+        if (!byCode.has(code)) byCode.set(code, item);
+      });
+    }
+    if (byArtistTitle) {
+      const atKey = buildNormalizedArtistTitleKey(item);
+      if (atKey && !byArtistTitle.has(atKey)) {
+        byArtistTitle.set(atKey, item);
+      }
+    }
+  }
+
+  function findMatchingItem(item, byId, byCode, byArtistTitle) {
+    if (!item || typeof item !== 'object') return null;
+    if (byId && item.id && byId.has(item.id)) {
+      return { existing: byId.get(item.id), reason: 'id', key: item.id };
+    }
+    const itemCodes = extractItemCodes(item);
+    if (byCode) {
+      for (let i = 0; i < itemCodes.length; i++) {
+        if (byCode.has(itemCodes[i])) {
+          return { existing: byCode.get(itemCodes[i]), reason: 'catalogNumber', key: itemCodes[i] };
+        }
+      }
+    }
+    if (byArtistTitle) {
+      const atKey = buildNormalizedArtistTitleKey(item);
+      if (atKey && byArtistTitle.has(atKey)) {
+        const existing = byArtistTitle.get(atKey);
+        if (Boolean(item.digitalOnly) === Boolean(existing.digitalOnly)) {
+          const existingCodes = extractItemCodes(existing);
+          const existingSet = new Set(existingCodes);
+          const nonConflictingCodes =
+            itemCodes.length === 0 ||
+            existingCodes.length === 0 ||
+            itemCodes.some(function (c) { return existingSet.has(c); });
+          if (nonConflictingCodes) {
+            return { existing: existing, reason: 'artistTitle', key: atKey };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function mergeItemMetadata(target, source) {
+    if (!target || !source) return;
+    if (source.priority && !target.priority) target.priority = source.priority;
+    if (source.recommendedShops && !target.recommendedShops) target.recommendedShops = source.recommendedShops;
+    if (source.artistJa && !target.artistJa) target.artistJa = source.artistJa;
+    if (source.titleJa && !target.titleJa) target.titleJa = source.titleJa;
+    if (Array.isArray(source.mbEditions) && source.mbEditions.length > 0) {
+      const existingEditions = Array.isArray(target.mbEditions) ? target.mbEditions : [];
+      const seenEd = new Set(
+        existingEditions.map(function (ed) { return String((ed && (ed.catno || ed.catNo)) || '').toUpperCase(); })
+      );
+      source.mbEditions.forEach(function (ed) {
+        const norm = String((ed && (ed.catno || ed.catNo)) || '').toUpperCase();
+        if (norm && !seenEd.has(norm)) {
+          seenEd.add(norm);
+          existingEditions.push({ catno: ed.catno || ed.catNo, label: ed.label || '通常盤 Regular' });
+        }
+      });
+      if (existingEditions.length > 0) target.mbEditions = existingEditions;
+    }
+  }
+
+  /**
+   * Detect duplicate items within a catalog array by catalog number or normalized artist|title.
+   * @param {Array<object>} items
+   * @returns {Array<{ itemId: string, duplicateOfId: string, reason: 'catalogNumber' | 'artistTitle', key: string, artist: string, title: string }>}
+   */
+  function detectCatalogDuplicates(items) {
+    const list = Array.isArray(items) ? items : [];
+    const byCode = new Map();
+    const byArtistTitle = new Map();
+    const out = [];
+
+    list.forEach(function (item) {
+      if (!item || typeof item !== 'object') return;
+      const hit = findMatchingItem(item, null, byCode, byArtistTitle);
+      if (hit) {
+        out.push({
+          itemId: String(item.id || ''),
+          duplicateOfId: String(hit.existing.id || ''),
+          reason: hit.reason,
+          key: hit.key,
+          artist: String(item.artist || ''),
+          title: String(item.title || '')
+        });
+        return;
+      }
+      indexItemIntoLookup(item, null, byCode, byArtistTitle);
+    });
+
+    return out;
+  }
+
   function cloneJson(obj) {
     return JSON.parse(JSON.stringify(obj));
   }
@@ -522,37 +655,33 @@
    * Merge parsed Google Sheet releases onto a curated JSON base catalog:
    * - Backfills priority & recommendedShops onto matching curated items.
    * - Maps checked Sheet rows (`Got it? = TRUE`) onto matching base item IDs.
-   * - Appends brand-new Sheet rows not yet present in the JSON catalog.
+   * - Appends brand-new Sheet rows not yet present in the JSON catalog (deduplicating new rows too).
    *
    * @param {object} baseCatalog
    * @param {object} sheetParsed Output from parseGoogleSheetCsv (or a catalog object)
-   * @returns {{ catalog: object, sheetChecklist: Record<string, boolean>, addedCount: number, matchedCount: number }}
+   * @returns {{ catalog: object, sheetChecklist: Record<string, boolean>, addedCount: number, matchedCount: number, duplicates: Array<object> }}
    */
   function mergeCatalogWithSheet(baseCatalog, sheetParsed) {
     const mergedCatalog = cloneJson(baseCatalog);
     const sheetObj =
       sheetParsed && sheetParsed.catalog
         ? sheetParsed
-        : { catalog: sheetParsed, sheetChecklist: {} };
+        : { catalog: sheetParsed, sheetChecklist: {}, duplicates: [] };
     const sheetItems = (sheetObj.catalog && Array.isArray(sheetObj.catalog.items)) ? sheetObj.catalog.items : [];
     const rawSheetChecklist = sheetObj.sheetChecklist || {};
     const mergedSheetChecklist = {};
+    const duplicates = Array.isArray(sheetObj.duplicates) ? sheetObj.duplicates.slice() : [];
 
     const byId = new Map();
     const byCode = new Map();
     const byArtistTitle = new Map();
+    const baseItemIds = new Set();
     const usedIds = new Set();
 
     mergedCatalog.items.forEach(function (item) {
       usedIds.add(item.id);
-      byId.set(item.id, item);
-      extractItemCodes(item).forEach(function (code) {
-        if (!byCode.has(code)) byCode.set(code, item);
-      });
-      const atKey = buildNormalizedArtistTitleKey(item);
-      if (atKey && !byArtistTitle.has(atKey)) {
-        byArtistTitle.set(atKey, item);
-      }
+      baseItemIds.add(item.id);
+      indexItemIntoLookup(item, byId, byCode, byArtistTitle);
     });
 
     const categorySet = new Set(
@@ -565,33 +694,23 @@
     let addedCount = 0;
 
     sheetItems.forEach(function (sItem) {
-      let matched = byId.get(sItem.id) || null;
-      if (!matched) {
-        const codes = extractItemCodes(sItem);
-        for (let i = 0; i < codes.length; i++) {
-          if (byCode.has(codes[i])) {
-            matched = byCode.get(codes[i]);
-            break;
-          }
-        }
-      }
-      if (!matched) {
-        const atKey = buildNormalizedArtistTitleKey(sItem);
-        if (atKey && byArtistTitle.has(atKey)) {
-          matched = byArtistTitle.get(atKey);
-        }
-      }
-
+      const hit = findMatchingItem(sItem, byId, byCode, byArtistTitle);
       const isCheckedInSheet = Boolean(rawSheetChecklist[sItem.id]);
 
-      if (matched) {
-        matchedCount++;
-        if (sItem.priority && !matched.priority) {
-          matched.priority = sItem.priority;
+      if (hit) {
+        const matched = hit.existing;
+        if (baseItemIds.has(matched.id)) {
+          matchedCount++;
+        } else {
+          duplicates.push({
+            matchedId: matched.id,
+            reason: hit.reason,
+            key: hit.key,
+            artist: sItem.artist,
+            title: sItem.title
+          });
         }
-        if (sItem.recommendedShops && !matched.recommendedShops) {
-          matched.recommendedShops = sItem.recommendedShops;
-        }
+        mergeItemMetadata(matched, sItem);
         if (isCheckedInSheet) {
           mergedSheetChecklist[matched.id] = true;
         }
@@ -609,6 +728,7 @@
       usedIds.add(candidateId);
 
       mergedCatalog.items.push(newItem);
+      indexItemIntoLookup(newItem, byId, byCode, byArtistTitle);
       addedCount++;
 
       if (Array.isArray(mergedCatalog.categories) && newItem.category && !categorySet.has(newItem.category)) {
@@ -629,7 +749,8 @@
       catalog: mergedCatalog,
       sheetChecklist: mergedSheetChecklist,
       addedCount: addedCount,
-      matchedCount: matchedCount
+      matchedCount: matchedCount,
+      duplicates: duplicates
     };
   }
 
@@ -660,6 +781,7 @@
     parseCsv: parseCsv,
     isGoogleSheetCsvUrl: isGoogleSheetCsvUrl,
     parseGoogleSheetCsv: parseGoogleSheetCsv,
+    detectCatalogDuplicates: detectCatalogDuplicates,
     mergeCatalogWithSheet: mergeCatalogWithSheet,
     buildChecklistByCatNo: buildChecklistByCatNo
   };

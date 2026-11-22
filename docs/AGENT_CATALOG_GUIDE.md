@@ -41,7 +41,8 @@ When working with the user's Google Sheet:
 6. Format "Filing Location & Shelf Search Advice" starting with clear Gojuon kana cues (e.g. "Look under ヤ (Ya, for yama), Y, or Gundam (ガンダム)") so shelf dividers are easy to find in stores.
 7. Format "Target Used Price" with the yen range FIRST before any parentheses (e.g. "¥300–¥700 (Reg) / ¥800–¥1,400 (Ltd)").
 8. Set "Priority" to High, Medium, or Low, and fill "Recommended Shops" with the best concrete Japanese chains/stores for that release (e.g., Book Off, Suruga-ya, Mandarake Grandchaos, Lashinbang, Disk Union, Tower Records, Animate, GAMERS).
-9. Never cite or recommend direct image links from vgmdb.net, wikia.nocookie.net, fandom.com, or cdjapan.co.jp.
+9. Never add duplicate releases: before inserting a new row, check existing Catalog Numbers (Column E) and normalized Artist + Title (watch for singles that also appear on albums you already listed).
+10. Never cite or recommend direct image links from vgmdb.net, wikia.nocookie.net, fandom.com, or cdjapan.co.jp.
 
 When checking shop availability (Suruga-ya, Mandarake, Lashinbang, Book Off, Tower Records):
 - Filter to entries where "Got it?" is FALSE (unless the user asks otherwise).
@@ -58,7 +59,8 @@ All CD Hunt Google Sheets follow a single **9-column, 1-release-per-row** schema
 ### Non-Negotiable Sheet Rules
 1. **Strictly 1 Release Per Row:** Never group multiple singles or mini-albums into a single row. Each release gets its own row so it maps 1-to-1 to a cover card and `Got it?` checkbox.
 2. **Never delete or renumber existing rows lightly:** Downstream sync identifies releases by primary catalog number (first `ABC-1234` token in Column E) or normalized artist + title for digital tracks. Keep catalog numbers accurate and stable.
-3. **Never embed hotlinked image URLs from `vgmdb.net`, `wikia.nocookie.net`, `fandom.com`, or `cdjapan.co.jp`.**
+3. **Avoid Duplicate Releases:** Always check existing Catalog Numbers (Column E) and normalized Artist + Title (including checking single vs. album overlap) before inserting a new row. (`cd-hunt` automatically deduplicates matching catalog numbers/titles on load and shows a non-blocking warning toast; in Google Sheets you can also apply conditional formatting with `=COUNTIF($E$8:$E$500, E8)>1` on Column E to highlight duplicate catalog codes red.)
+4. **Never embed hotlinked image URLs from `vgmdb.net`, `wikia.nocookie.net`, `fandom.com`, or `cdjapan.co.jp`.**
 
 ### Canonical Columns (A–I Required)
 
