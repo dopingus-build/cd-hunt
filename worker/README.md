@@ -14,9 +14,10 @@ Cloudflare Worker + Cloudflare D1 backend for optional per-user cloud sync in [*
 | --- | --- | --- | --- |
 | `/auth/login` | `GET` | Public | Generates HMAC-signed `oauth_state` (`10m` TTL) and returns `302` redirect to GitHub OAuth (`scope` omitted). Optional `?redirect=<url>` must match `ALLOWED_ORIGINS` (`ALLOW_LOCALHOST`). `400` bad redirect, `500` if OAuth config missing. |
 | `/auth/callback` | `GET` | `state` JWT | Exchanges `code`, reads GitHub `/user`, discards GitHub token, signs `session` JWT, and returns `302` to verified redirect target (or `APP_REDIRECT_URL`) `#auth_token=<jwt>`. `400` invalid params/state, `502` GitHub error, `500` missing config. |
-| `/api/state` | `GET` | Bearer JWT | Checks origin & circuit breaker, increments daily `req_count`, and returns `{ ok, paused, user, state, updatedAt, resetsAt }`. `401` invalid token, `403` bad origin, `503` paused. |
-| `/api/state` | `PUT` | Bearer JWT | Validates payload (`schemaVersion: 1`, `cd_hunt_*` keys, `<= MAX_PAYLOAD_BYTES`), enforces per-user hourly write cap (`429`) and daily circuit breaker (`503`), increments counters, upserts `user_state`, returns `{ ok, paused, updatedAt, resetsAt }`. `400` invalid JSON/schema, `401` unauthorized, `403` bad origin, `413` oversized. |
-| `/api/status` | `GET` | Public | Returns operational health and quota usage (`{ ok, paused, reason, utcDate, resetsAt, usage, limits }`). `403` bad origin. |
+| `/api/state` | `GET` | Bearer JWT | Checks origin & circuit breaker, increments daily `req_count`, and returns `{ ok, paused, user, state, updatedAt, resetsAt, shareToken, shareUrl }`. `401` invalid token, `403` bad origin, `503` paused. |
+| `/api/state` | `PUT` | Bearer JWT | Validates payload (`schemaVersion: 1`, `cd_hunt_*` keys, `<= MAX_PAYLOAD_BYTES`), enforces per-user hourly write cap (`429`) and daily circuit breaker (`503`), strips transient `sheetSync`, increments counters, upserts `user_state`, optionally syncs Column A (`Got it?`) back to Google Sheets when `GOOGLE_SERVICE_ACCOUNT_JSON` is configured, and returns `{ ok, paused, updatedAt, resetsAt, shareToken, shareUrl, sheetSync? }`. `400` invalid JSON/schema, `401` unauthorized, `403` bad origin, `413` oversized. |
+| `/api/share/<token>` | `GET` | Capability JWT (`90d` TTL) | Public read-only endpoint (`Access-Control-Allow-Origin: *`) for Gemini/agents lacking GitHub credentials. Verifies `read_share` JWT (`401`), strips custom covers/internal fields, and returns `{ ok, user: { login }, updatedAt, activeCatalogUrl, catalogs }` or Markdown via `?format=markdown`. Also accepts `/api/share?token=<token>`. |
+| `/api/status` | `GET` | Public | Returns operational health, quota usage, and Google Sheet sync availability (`{ ok, paused, reason, utcDate, resetsAt, usage, limits, sheetSync }`). `403` bad origin. |
 | `/*` | `OPTIONS` | Origin | CORS preflight (`204` if origin allowed, `403` otherwise). Returns `404`/`405` for unknown routes/methods. |
 
 ## 3. Configuration & Secrets
@@ -35,7 +36,7 @@ Cloudflare Worker + Cloudflare D1 backend for optional per-user cloud sync in [*
 | `PAUSE_SYNC` | `"false"` | Manual emergency kill switch; set `"true"` to pause `/api/state` immediately |
 | `ALLOW_LOCALHOST` | *(unset)* | Optional `"true"` for local `localhost` / `127.0.0.1` testing (`wrangler dev`) |
 
-*(For HTTP integration tests, the Worker also honors optional `GITHUB_OAUTH_TOKEN_URL` and `GITHUB_USER_API_URL` env overrides.)*
+*(For HTTP integration tests, the Worker also honors optional `GITHUB_OAUTH_TOKEN_URL`, `GITHUB_USER_API_URL`, `GOOGLE_OAUTH_TOKEN_URL`, and `GOOGLE_SHEETS_API_BASE_URL` env overrides.)*
 
 ### Encrypted Cloudflare Secrets (`wrangler secret put`)
 
@@ -43,6 +44,7 @@ Never commit secrets to Git or place them in `wrangler.toml`:
 
 - **`GITHUB_CLIENT_SECRET`** — GitHub OAuth App client secret
 - **`JWT_SECRET`** — Cryptographically random 32+ byte HMAC-SHA256 signing key (`openssl rand -hex 32`)
+- **`GOOGLE_SERVICE_ACCOUNT_JSON`** *(optional)* — Google Cloud Service Account JSON key (`{ client_email, private_key, token_uri }`) for automatic two-way write-back of `Got it?` (`TRUE`/`FALSE`) into Column A of linked Google Sheets. On the live Worker, this is provisioned as `cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com`; to enable write-back on a Sheet, share it with that email as **Editor** (also visible via `GET /api/status` -> `sheetSync.serviceAccountEmail`). For self-hosted Workers, upload your own JSON via `wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON` (or `.dev.vars` locally).
 
 For local `wrangler dev` testing only, place these in `.dev.vars` (gitignored via `.gitignore`).
 

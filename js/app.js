@@ -9,6 +9,7 @@
   const storage = CDHunt.storage;
   const coverResolver = CDHunt.coverResolver;
   const sync = CDHunt.sync || null;
+  const sheetAdapter = CDHunt.sheetAdapter || null;
   const validateCatalog = window.validateCatalog || CDHunt.validateCatalog;
   const normalizeCatalogUrl = window.normalizeCatalogUrl || CDHunt.normalizeCatalogUrl || function (u) {
     return String(u || '').trim();
@@ -50,9 +51,12 @@
   let customRepoLoaded = false;
   let syncApiUrl = '';
   let syncSession = null;
+  let syncShareUrl = null;
   let syncPausedUntil = null;
   let syncPushTimer = null;
   let suppressSyncPush = false;
+  let sheetSyncBotEmail = null;
+  let sheetSyncStatusChecked = false;
 
   function deriveCategories(items) {
     const cats = [{ key: 'All', label: 'All Releases', dot: '#a1a1aa' }];
@@ -195,6 +199,35 @@
     return presetsPromise;
   }
 
+  function renderSheetSyncBotBanner() {
+    const banner = document.getElementById('sheetSyncBotBanner');
+    const textEl = document.getElementById('sheetSyncBotText');
+    if (!banner || !textEl) return;
+    if (sheetSyncBotEmail) {
+      textEl.textContent = 'Two-way Google Sheet sync: share your Sheet as Editor with ' + sheetSyncBotEmail;
+      banner.classList.remove('hidden');
+    } else {
+      textEl.textContent = '';
+      banner.classList.add('hidden');
+    }
+  }
+
+  async function loadSheetSyncBotInfo() {
+    if (!syncApiUrl || sheetSyncStatusChecked) return;
+    sheetSyncStatusChecked = true;
+    try {
+      const res = await fetch(syncApiUrl.replace(/\/+$/, '') + '/api/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.sheetSync && data.sheetSync.configured && data.sheetSync.serviceAccountEmail) {
+        sheetSyncBotEmail = String(data.sheetSync.serviceAccountEmail);
+        renderSheetSyncBotBanner();
+      }
+    } catch (err) {
+      // Ignore offline / mock failures silently
+    }
+  }
+
   function showCatalogLoader(visible) {
     const loader = document.getElementById('catalogLoaderScreen');
     if (!loader) return;
@@ -230,6 +263,8 @@
           infoEl.textContent = '';
         }
       }
+      renderSheetSyncBotBanner();
+      loadSheetSyncBotInfo();
       loadCatalogPresets();
     } else {
       loader.classList.add('hidden');
@@ -325,7 +360,24 @@
 
     resetAppStateForCatalog();
     applyCatalogData(catalog, opts);
+    const hadExistingChecklist = safeGetItem(CHECKLIST_KEY) !== null;
     loadStateFromStorage();
+
+    // Only seed Got it? = TRUE from a Sheet when no local/synced checklist baseline exists yet
+    // so user unchecks in cd-hunt or cloud D1 stay authoritative across Sheet reloads.
+    if (!hadExistingChecklist && opts.sheetChecklist && typeof opts.sheetChecklist === 'object') {
+      let addedFromSheet = false;
+      Object.keys(opts.sheetChecklist).forEach(function (id) {
+        if (opts.sheetChecklist[id] && !state.acquiredMap[id]) {
+          state.acquiredMap[id] = true;
+          addedFromSheet = true;
+        }
+      });
+      if (addedFromSheet) {
+        safeSetItem(CHECKLIST_KEY, JSON.stringify(state.acquiredMap));
+      }
+    }
+
     document.getElementById('viewModeLabel').textContent = state.viewMode === 'single' ? 'Grid View' : '1-Col View';
     hasLoadedCatalog = true;
     showCatalogLoader(false);
@@ -360,20 +412,81 @@
     return { type: 'index', url: normalizedUrl, catalogs: data.catalogs };
   }
 
+  function getSheetCacheKey(normalizedUrl) {
+    return storage.deriveStoragePrefix({ sourceUrl: normalizedUrl }) + '_sheet_csv_v1';
+  }
+
   async function loadAndApplyCatalogFromUrl(rawUrl) {
     const normalizedUrl = normalizeCatalogUrl(rawUrl);
     if (!normalizedUrl) {
-      throw new Error('Please enter a valid metadata JSON or repository URL.');
+      throw new Error('Please enter a valid metadata JSON, repository, or Google Sheet URL.');
+    }
+
+    if (sheetAdapter && sheetAdapter.isGoogleSheetCsvUrl(normalizedUrl)) {
+      const cacheKey = getSheetCacheKey(normalizedUrl);
+      let csvText = null;
+      let loadedFromOfflineCache = false;
+
+      try {
+        const sheetRes = await fetch(normalizedUrl);
+        if (!sheetRes.ok) {
+          throw new Error('Failed to load catalog from ' + normalizedUrl + ' (HTTP ' + sheetRes.status + ')');
+        }
+        csvText = await sheetRes.text();
+        safeSetItem(cacheKey, csvText);
+      } catch (err) {
+        const cachedCsv = safeGetItem(cacheKey);
+        if (!cachedCsv) throw err;
+        csvText = cachedCsv;
+        loadedFromOfflineCache = true;
+      }
+
+      const sheetParsed = sheetAdapter.parseGoogleSheetCsv(csvText, {
+        sourceUrl: normalizedUrl
+      });
+      applyValidatedCatalog(sheetParsed.catalog, {
+        sourceUrl: normalizedUrl,
+        sheetChecklist: sheetParsed.sheetChecklist
+      });
+      if (loadedFromOfflineCache) {
+        showToast('Loaded cached Google Sheet (offline)');
+      }
+      return { type: 'catalog', url: normalizedUrl, cached: loadedFromOfflineCache };
     }
 
     const res = await fetch(normalizedUrl);
     if (!res.ok) {
       throw new Error('Failed to load catalog from ' + normalizedUrl + ' (HTTP ' + res.status + ')');
     }
+
     const data = await res.json();
     if (isCatalogIndex(data)) {
       return applyCatalogIndex(data, normalizedUrl, 'Loaded repository index: ');
     }
+
+    if (data && data.meta && data.meta.googleSheetUrl && sheetAdapter) {
+      try {
+        const sheetCsvUrl = normalizeCatalogUrl(data.meta.googleSheetUrl);
+        if (sheetCsvUrl && sheetAdapter.isGoogleSheetCsvUrl(sheetCsvUrl)) {
+          const sheetRes = await fetch(sheetCsvUrl);
+          if (sheetRes.ok) {
+            const sheetCsvText = await sheetRes.text();
+            const sheetParsed = sheetAdapter.parseGoogleSheetCsv(sheetCsvText, {
+              sourceUrl: data.meta.googleSheetUrl
+            });
+            const merged = sheetAdapter.mergeCatalogWithSheet(data, sheetParsed);
+            applyValidatedCatalog(merged.catalog, {
+              sourceUrl: normalizedUrl,
+              sheetChecklist: merged.sheetChecklist
+            });
+            return { type: 'catalog', url: normalizedUrl };
+          }
+        }
+      } catch (err) {
+        // Non-fatal offline fallback: still apply base JSON catalog
+      }
+    }
+
     applyValidatedCatalog(data, { sourceUrl: normalizedUrl });
     return { type: 'catalog', url: normalizedUrl };
   }
@@ -386,11 +499,13 @@
   function updateSyncUI(statusText, tone) {
     const authBtn = document.getElementById('githubAuthBtn');
     const signOutBtn = document.getElementById('githubSignOutBtn');
+    const agentLinkBtn = document.getElementById('copyAgentLinkBtn');
     const statusPill = document.getElementById('syncStatusPill');
 
     if (!sync || !syncApiUrl) {
       if (authBtn) authBtn.classList.add('hidden');
       if (signOutBtn) signOutBtn.classList.add('hidden');
+      if (agentLinkBtn) agentLinkBtn.classList.add('hidden');
       if (statusPill) statusPill.classList.add('hidden');
       return;
     }
@@ -398,6 +513,7 @@
     if (syncSession) {
       if (authBtn) authBtn.classList.add('hidden');
       if (signOutBtn) signOutBtn.classList.remove('hidden');
+      if (agentLinkBtn) agentLinkBtn.classList.toggle('hidden', !syncShareUrl);
       if (statusPill) {
         statusPill.classList.remove('hidden', 'sync-pill-ok', 'sync-pill-warn', 'sync-pill-muted');
         statusPill.classList.add(
@@ -410,6 +526,7 @@
 
     if (authBtn) authBtn.classList.remove('hidden');
     if (signOutBtn) signOutBtn.classList.add('hidden');
+    if (agentLinkBtn) agentLinkBtn.classList.add('hidden');
     if (statusPill) {
       if (statusText) {
         statusPill.classList.remove('hidden', 'sync-pill-ok', 'sync-pill-warn', 'sync-pill-muted');
@@ -439,11 +556,23 @@
       hasLoadedCatalog ? state : null
     );
     if (!payload.updatedAt) payload.updatedAt = Date.now();
+    if (hasLoadedCatalog && sheetAdapter) {
+      const sheetUrl =
+        (CATALOG_META && CATALOG_META.googleSheetUrl) ||
+        (activeCatalogUrl && sheetAdapter.isGoogleSheetCsvUrl(activeCatalogUrl) ? activeCatalogUrl : '');
+      if (sheetUrl) {
+        payload.sheetSync = {
+          googleSheetUrl: sheetUrl,
+          checklistByCatNo: sheetAdapter.buildChecklistByCatNo(ALBUMS, state.acquiredMap)
+        };
+      }
+    }
     const pushOpts = options && options.keepalive ? { keepalive: true } : undefined;
     const res = await sync.pushCloudState(syncApiUrl, syncSession.token, payload, undefined, pushOpts);
     if (res.unauthorized) {
       sync.clearAuthSession(storage);
       syncSession = null;
+      syncShareUrl = null;
       updateSyncUI('Session expired', 'warn');
       showToast('GitHub sync session expired — please sign in again');
       return;
@@ -464,6 +593,9 @@
     if (!res.ok) {
       updateSyncUI('Offline — saved locally', 'muted');
       return;
+    }
+    if (res.shareUrl) {
+      syncShareUrl = res.shareUrl;
     }
     updateSyncUI('Synced', 'ok');
   }
@@ -1173,18 +1305,19 @@
     }).join('');
   }
 
-  function copyText(text) {
+  function copyText(text, customToast) {
+    const toastMsg = customToast || ('Copied: ' + text);
     if (window.navigator && window.navigator.clipboard && typeof window.navigator.clipboard.writeText === 'function') {
       window.navigator.clipboard.writeText(text).then(
-        function () { showToast('Copied: ' + text); },
-        function () { fallbackCopyText(text); }
+        function () { showToast(toastMsg); },
+        function () { fallbackCopyText(text, toastMsg); }
       );
       return;
     }
-    fallbackCopyText(text);
+    fallbackCopyText(text, toastMsg);
   }
 
-  function fallbackCopyText(text) {
+  function fallbackCopyText(text, toastMsg) {
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.position = 'fixed';
@@ -1193,7 +1326,7 @@
     ta.select();
     try {
       document.execCommand('copy');
-      showToast('Copied: ' + text);
+      showToast(toastMsg || ('Copied: ' + text));
     } catch (e) {
       showToast('Copy failed');
     }
@@ -1514,15 +1647,51 @@
                 reader.onerror = function () { reject(new Error('Failed to read file')); };
                 reader.readAsText(file);
               });
-          const parsed = JSON.parse(text);
-          applyValidatedCatalog(parsed, { fileName: file.name || 'local-catalog.json' });
-          showToast('Loaded local file: ' + (file.name || 'catalog.json'));
+          const fileName = file.name || 'local-catalog.json';
+          const isCsvFile =
+            /\.csv$/i.test(fileName) ||
+            (file.type && String(file.type).toLowerCase().indexOf('csv') !== -1);
+
+          if (isCsvFile && sheetAdapter) {
+            const sheetParsed = sheetAdapter.parseGoogleSheetCsv(text, {});
+            applyValidatedCatalog(sheetParsed.catalog, {
+              fileName: fileName,
+              sheetChecklist: sheetParsed.sheetChecklist
+            });
+            showToast('Loaded local CSV: ' + fileName);
+          } else {
+            let parsed = null;
+            try {
+              parsed = JSON.parse(text);
+            } catch (jsonErr) {
+              if (sheetAdapter && /^\s*(?:Got it\?|Aisle|Category|CD Hunt)/i.test(text.replace(/^\uFEFF/, ''))) {
+                const csvParsed = sheetAdapter.parseGoogleSheetCsv(text, {});
+                applyValidatedCatalog(csvParsed.catalog, {
+                  fileName: fileName,
+                  sheetChecklist: csvParsed.sheetChecklist
+                });
+                showToast('Loaded local CSV: ' + fileName);
+                return;
+              }
+              throw jsonErr;
+            }
+            applyValidatedCatalog(parsed, { fileName: fileName });
+            showToast('Loaded local file: ' + fileName);
+          }
         } catch (err) {
           showErrorBanner('App Initialization Error: ' + (err && err.message ? err.message : String(err)));
           showCatalogLoader(true);
         } finally {
           fileInput.value = '';
         }
+      });
+    }
+
+    const copyBotBtn = document.getElementById('copySheetBotEmailBtn');
+    if (copyBotBtn) {
+      copyBotBtn.addEventListener('click', function () {
+        if (!sheetSyncBotEmail) return;
+        copyText(sheetSyncBotEmail, 'Copied Sheet sync bot email');
       });
     }
 
@@ -1547,6 +1716,14 @@
       });
     }
 
+    const copyAgentLinkBtn = document.getElementById('copyAgentLinkBtn');
+    if (copyAgentLinkBtn) {
+      copyAgentLinkBtn.addEventListener('click', function () {
+        if (!syncShareUrl) return;
+        copyText(syncShareUrl + '?format=markdown', 'Copied semi-private Agent/Gemini status link');
+      });
+    }
+
     const githubSignOutBtn = document.getElementById('githubSignOutBtn');
     if (githubSignOutBtn) {
       githubSignOutBtn.addEventListener('click', function () {
@@ -1555,6 +1732,7 @@
         syncPushTimer = null;
         sync.clearAuthSession(storage);
         syncSession = null;
+        syncShareUrl = null;
         syncPausedUntil = null;
         updateSyncUI();
         showToast('Signed out of cloud sync (local progress kept)');
@@ -1594,6 +1772,7 @@
         if (pullRes.unauthorized) {
           sync.clearAuthSession(storage);
           syncSession = null;
+          syncShareUrl = null;
           updateSyncUI('Session expired', 'warn');
         } else if (pullRes.paused) {
           syncPausedUntil = pullRes.resetsAt || '00:00 UTC';
@@ -1608,6 +1787,7 @@
           } else if (Object.keys(localPayload.catalogs).length > 0 || localPayload.activeCatalogUrl) {
             needsCloudBackfill = true;
           }
+          syncShareUrl = pullRes.shareUrl || null;
           updateSyncUI('Synced', 'ok');
         }
       }

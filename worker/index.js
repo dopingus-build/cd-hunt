@@ -13,6 +13,9 @@ const DEFAULT_USER_HOURLY_WRITE_LIMIT = 60;
 const DEFAULT_MAX_PAYLOAD_BYTES = 131072;
 const OAUTH_STATE_TTL_SECONDS = 600;
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+const SHARE_TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60;
+const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
+const SHEET_CAT_CODE_REGEX = /\b([A-Z]{2,6}-\d{3,6}(?:~\d+)?)\b/g;
 const STORAGE_PREFIX_REGEX = /^cd_hunt_[a-z0-9_]+_[0-9a-f]{8}$/;
 
 const textEncoder = new TextEncoder();
@@ -310,6 +313,17 @@ function validateSyncPayload(payload) {
       return { valid: false, error: err };
     }
   }
+  if (payload.sheetSync !== undefined && payload.sheetSync !== null) {
+    if (!isPlainObject(payload.sheetSync)) {
+      return { valid: false, error: 'sheetSync must be a plain object' };
+    }
+    if (typeof payload.sheetSync.googleSheetUrl !== 'string' || payload.sheetSync.googleSheetUrl.length > 2048) {
+      return { valid: false, error: 'sheetSync.googleSheetUrl must be a string <= 2048 characters' };
+    }
+    if (!isPlainObject(payload.sheetSync.checklistByCatNo)) {
+      return { valid: false, error: 'sheetSync.checklistByCatNo must be a plain object' };
+    }
+  }
   return { valid: true };
 }
 
@@ -377,12 +391,309 @@ async function authenticateRequest(request, env, nowMs) {
   return claims;
 }
 
+function parseGoogleServiceAccount(env) {
+  const raw = env && env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) return null;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!parsed || typeof parsed.client_email !== 'string' || typeof parsed.private_key !== 'string') {
+      return null;
+    }
+    return {
+      clientEmail: parsed.client_email,
+      privateKey: parsed.private_key,
+      tokenUri: typeof parsed.token_uri === 'string' && parsed.token_uri
+        ? parsed.token_uri
+        : 'https://oauth2.googleapis.com/token'
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
+function extractSheetIdFromUrl(sheetUrl) {
+  const match = String(sheetUrl || '').trim().match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/i);
+  return match ? match[1] : null;
+}
+
+function extractSheetGidFromUrl(sheetUrl) {
+  const match = String(sheetUrl || '').trim().match(/(?:[?&#])gid=(\d+)/i);
+  return match && match[1] !== '0' ? match[1] : null;
+}
+
+function base64ToArrayBuffer(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+async function importPkcs8PrivateKey(pem) {
+  const normalizedPem = String(pem || '').replace(/\\n/g, '\n');
+  const b64Body = normalizedPem
+    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
+    .replace(/-----END PRIVATE KEY-----/g, '')
+    .replace(/\s+/g, '');
+  if (!b64Body) {
+    throw new Error('Empty Google Service Account private key');
+  }
+  const derBuffer = base64ToArrayBuffer(b64Body);
+  return getCrypto().subtle.importKey(
+    'pkcs8',
+    derBuffer,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+}
+
+async function getGoogleServiceAccountToken(sa, env, nowMs) {
+  const fetchFn = getFetch();
+  const tokenUrl = (env && env.GOOGLE_OAUTH_TOKEN_URL) || sa.tokenUri;
+  const ms = typeof nowMs === 'number' ? nowMs : Date.now();
+  const nowSec = Math.floor(ms / 1000);
+
+  const headerB64 = base64UrlEncodeString(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const payloadB64 = base64UrlEncodeString(
+    JSON.stringify({
+      iss: sa.clientEmail,
+      scope: GOOGLE_SHEETS_SCOPE,
+      aud: tokenUrl,
+      iat: nowSec,
+      exp: nowSec + 3600
+    })
+  );
+  const signingInput = headerB64 + '.' + payloadB64;
+
+  const key = await importPkcs8PrivateKey(sa.privateKey);
+  const sigBuf = await getCrypto().subtle.sign('RSASSA-PKCS1-v1_5', key, textEncoder.encode(signingInput));
+  const assertion = signingInput + '.' + base64UrlEncodeBytes(new Uint8Array(sigBuf));
+
+  const res = await fetchFn(tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body:
+      'grant_type=' +
+      encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer') +
+      '&assertion=' +
+      encodeURIComponent(assertion)
+  });
+  if (!res.ok) {
+    throw new Error('Google OAuth token exchange failed (HTTP ' + res.status + ')');
+  }
+  const data = await res.json();
+  if (!data || !data.access_token) {
+    throw new Error('Google OAuth response missing access_token');
+  }
+  return data.access_token;
+}
+
+async function syncChecklistToGoogleSheet(sheetSyncReq, env, nowMs) {
+  const sa = parseGoogleServiceAccount(env);
+  if (!sa) {
+    return { ok: false, skipped: true, reason: 'service_account_not_configured' };
+  }
+  const sheetId = extractSheetIdFromUrl(sheetSyncReq && sheetSyncReq.googleSheetUrl);
+  if (!sheetId) {
+    return { ok: false, skipped: true, reason: 'invalid_sheet_url' };
+  }
+
+  const checklistByCatNo = {};
+  if (sheetSyncReq && isPlainObject(sheetSyncReq.checklistByCatNo)) {
+    for (const [k, v] of Object.entries(sheetSyncReq.checklistByCatNo)) {
+      const norm = String(k || '').trim().toUpperCase();
+      if (norm) checklistByCatNo[norm] = Boolean(v);
+    }
+  }
+  if (Object.keys(checklistByCatNo).length === 0) {
+    return { ok: true, updatedRows: 0 };
+  }
+
+  try {
+    const fetchFn = getFetch();
+    const accessToken = await getGoogleServiceAccountToken(sa, env, nowMs);
+    const sheetsBase = ((env && env.GOOGLE_SHEETS_API_BASE_URL) || 'https://sheets.googleapis.com').replace(/\/+$/, '');
+
+    let rangePrefix = '';
+    const gid = extractSheetGidFromUrl(sheetSyncReq && sheetSyncReq.googleSheetUrl);
+    if (gid !== null) {
+      const metaUrl =
+        sheetsBase +
+        '/v4/spreadsheets/' +
+        encodeURIComponent(sheetId) +
+        '?fields=sheets.properties(sheetId,title)';
+      const metaRes = await fetchFn(metaUrl, {
+        method: 'GET',
+        headers: { Authorization: 'Bearer ' + accessToken }
+      });
+      if (metaRes.ok) {
+        const metaData = await metaRes.json();
+        const sheets = Array.isArray(metaData && metaData.sheets) ? metaData.sheets : [];
+        const matchedSheet = sheets.find(function (s) {
+          return s && s.properties && Number(s.properties.sheetId) === Number(gid);
+        });
+        if (matchedSheet && matchedSheet.properties && matchedSheet.properties.title) {
+          rangePrefix = "'" + String(matchedSheet.properties.title).replace(/'/g, "''") + "'!";
+        }
+      }
+    }
+
+    const rangeA1 = rangePrefix + 'A1:I500';
+    const encodedRange = rangePrefix ? encodeURIComponent(rangeA1) : rangeA1;
+    const rangeUrl = sheetsBase + '/v4/spreadsheets/' + encodeURIComponent(sheetId) + '/values/' + encodedRange;
+    const readRes = await fetchFn(rangeUrl, {
+      method: 'GET',
+      headers: { Authorization: 'Bearer ' + accessToken }
+    });
+    if (!readRes.ok) {
+      throw new Error('Google Sheets read failed (HTTP ' + readRes.status + ')');
+    }
+
+    const readData = await readRes.json();
+    const rows = Array.isArray(readData && readData.values) ? readData.values : [];
+    const updates = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row)) continue;
+      const colA = String(row[0] || '').trim().toUpperCase();
+      const colC = String(row[2] || '').trim().toUpperCase();
+      if (colA === 'GOT IT?' || colC === 'ARTIST / FRANCHISE') continue;
+
+      const searchHay = [String(row[4] || ''), String(row[3] || '')].join(' ');
+      let matchedCode = null;
+      let match;
+      SHEET_CAT_CODE_REGEX.lastIndex = 0;
+      while ((match = SHEET_CAT_CODE_REGEX.exec(searchHay)) !== null) {
+        const candidate = match[1].toUpperCase();
+        if (Object.prototype.hasOwnProperty.call(checklistByCatNo, candidate)) {
+          matchedCode = candidate;
+          break;
+        }
+      }
+      if (!matchedCode) continue;
+
+      const targetVal = checklistByCatNo[matchedCode] ? 'TRUE' : 'FALSE';
+      if (colA !== targetVal) {
+        updates.push({
+          range: rangePrefix + 'A' + (i + 1),
+          values: [[targetVal]]
+        });
+      }
+    }
+
+    if (updates.length > 0) {
+      const writeUrl = sheetsBase + '/v4/spreadsheets/' + encodeURIComponent(sheetId) + '/values:batchUpdate';
+      const writeRes = await fetchFn(writeUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + accessToken,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          valueInputOption: 'USER_ENTERED',
+          data: updates
+        })
+      });
+      if (!writeRes.ok) {
+        throw new Error('Google Sheets batchUpdate failed (HTTP ' + writeRes.status + ')');
+      }
+    }
+
+    return { ok: true, updatedRows: updates.length };
+  } catch (err) {
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+}
+
+async function buildShareInfo(request, claims, env, nowMs) {
+  if (!env || !env.JWT_SECRET || !claims || !claims.sub || !request || !request.url) {
+    return { shareToken: null, shareUrl: null };
+  }
+  const shareToken = await signToken(
+    {
+      purpose: 'read_share',
+      sub: String(claims.sub),
+      login: String(claims.login || '')
+    },
+    env.JWT_SECRET,
+    SHARE_TOKEN_TTL_SECONDS,
+    nowMs
+  );
+  const origin = new URL(request.url).origin;
+  return {
+    shareToken: shareToken,
+    shareUrl: origin + '/api/share/' + shareToken
+  };
+}
+
+function sanitizeShareState(parsedState, rowUpdatedAt) {
+  const raw = isPlainObject(parsedState) ? parsedState : {};
+  const rawCatalogs = isPlainObject(raw.catalogs) ? raw.catalogs : {};
+  const cleanCatalogs = {};
+
+  for (const [prefix, entry] of Object.entries(rawCatalogs)) {
+    if (!STORAGE_PREFIX_REGEX.test(prefix) || !isPlainObject(entry)) continue;
+    cleanCatalogs[prefix] = {
+      updatedAt: Number(entry.updatedAt) || 0,
+      checklist: isPlainObject(entry.checklist) ? entry.checklist : {},
+      viewMode: entry.viewMode === 'single' ? 'single' : 'grid'
+    };
+  }
+
+  const effectiveUpdatedAt =
+    rowUpdatedAt !== null && rowUpdatedAt !== undefined
+      ? Number(rowUpdatedAt)
+      : Number(raw.updatedAt) || null;
+
+  return {
+    schemaVersion: 1,
+    updatedAt: effectiveUpdatedAt,
+    activeCatalogUrl: typeof raw.activeCatalogUrl === 'string' ? raw.activeCatalogUrl : null,
+    catalogs: cleanCatalogs
+  };
+}
+
+function formatShareMarkdown(login, updatedAt, sanitizedState) {
+  const updatedStr = updatedAt ? new Date(updatedAt).toISOString() : 'Not yet synced';
+  const lines = [
+    '# CD Hunt Live Status (@' + String(login || 'user') + ')',
+    '',
+    '- Last Synced: `' + updatedStr + '`',
+    '- Active Catalog URL: ' + (sanitizedState.activeCatalogUrl ? sanitizedState.activeCatalogUrl : '_None_'),
+    '',
+    '## Catalog Checklists'
+  ];
+
+  const entries = Object.entries(sanitizedState.catalogs || {});
+  if (entries.length === 0) {
+    lines.push('', '_No synced catalog checklists yet._');
+  } else {
+    entries.forEach(function ([prefix, entry]) {
+      const checklist = entry.checklist || {};
+      const acquiredIds = Object.keys(checklist).filter(function (id) {
+        return checklist[id] === true;
+      });
+      lines.push('');
+      lines.push('### `' + prefix + '`');
+      lines.push('- Acquired Count: `' + acquiredIds.length + '`');
+      lines.push('- Acquired IDs (`Got it? = TRUE`): ' + (acquiredIds.length > 0 ? acquiredIds.map(function (id) { return '`' + id + '`'; }).join(', ') : '_None_'));
+    });
+  }
+
+  lines.push('');
+  return lines.join('\n');
+}
+
 async function handleStatus(env, corsHeaders, nowMs) {
   const utcDate = getUtcDateString(nowMs);
   const resetsAt = getNextUtcMidnightIso(nowMs);
   const limits = getLimits(env);
   const usage = await getDailyUsage(env && env.DB, utcDate);
   const circuit = checkCircuitBreaker(usage, env, false);
+  const sa = parseGoogleServiceAccount(env);
 
   return jsonResponse(
     {
@@ -395,7 +706,11 @@ async function handleStatus(env, corsHeaders, nowMs) {
         reqCount: usage.req_count,
         writeCount: usage.write_count
       },
-      limits: limits
+      limits: limits,
+      sheetSync: {
+        configured: Boolean(sa),
+        serviceAccountEmail: sa ? sa.clientEmail : null
+      }
     },
     200,
     corsHeaders
@@ -554,6 +869,8 @@ async function handleGetState(request, env, corsHeaders, nowMs) {
     }
   }
 
+  const shareInfo = await buildShareInfo(request, claims, env, nowMs);
+
   return jsonResponse(
     {
       ok: true,
@@ -565,10 +882,82 @@ async function handleGetState(request, env, corsHeaders, nowMs) {
       },
       state: parsedState,
       updatedAt: row ? Number(row.updated_at) : null,
-      resetsAt: resetsAt
+      resetsAt: resetsAt,
+      shareToken: shareInfo.shareToken,
+      shareUrl: shareInfo.shareUrl
     },
     200,
     corsHeaders
+  );
+}
+
+async function handleGetShare(request, url, rawToken, env, nowMs) {
+  const publicHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Accept',
+    'Cache-Control': 'no-store'
+  };
+
+  if (!rawToken || !env || !env.JWT_SECRET) {
+    return jsonResponse({ ok: false, error: 'Invalid or expired share token' }, 401, publicHeaders);
+  }
+  const claims = await verifyToken(rawToken.trim(), env.JWT_SECRET, nowMs);
+  if (!claims || claims.purpose !== 'read_share' || !claims.sub) {
+    return jsonResponse({ ok: false, error: 'Invalid or expired share token' }, 401, publicHeaders);
+  }
+  if (!env.DB) {
+    return jsonResponse({ ok: false, error: 'D1 database binding is missing' }, 500, publicHeaders);
+  }
+
+  const utcDate = getUtcDateString(nowMs);
+  const resetsAt = getNextUtcMidnightIso(nowMs);
+  const usage = await getDailyUsage(env.DB, utcDate);
+  const circuit = checkCircuitBreaker(usage, env, false);
+  if (circuit.paused) {
+    return jsonResponse({ ok: false, paused: true, reason: circuit.reason, resetsAt: resetsAt }, 503, publicHeaders);
+  }
+
+  await incrementDailyUsage(env.DB, utcDate, false);
+  const row = await env.DB
+    .prepare('SELECT github_login, state_json, updated_at FROM user_state WHERE github_id = ?')
+    .bind(String(claims.sub))
+    .first();
+
+  let parsedState = null;
+  if (row && typeof row.state_json === 'string') {
+    try {
+      parsedState = JSON.parse(row.state_json);
+    } catch (err) {
+      parsedState = null;
+    }
+  }
+
+  const sanitized = sanitizeShareState(parsedState, row ? row.updated_at : null);
+  const login = (row && row.github_login) || String(claims.login || '');
+  const formatParam = String(url.searchParams.get('format') || '').toLowerCase();
+  const acceptHeader = String(request.headers.get('Accept') || '').toLowerCase();
+  const wantsMarkdown = formatParam === 'markdown' || formatParam === 'md' || acceptHeader.includes('text/markdown');
+
+  if (wantsMarkdown) {
+    return new Response(formatShareMarkdown(login, sanitized.updatedAt, sanitized), {
+      status: 200,
+      headers: Object.assign({ 'Content-Type': 'text/markdown; charset=utf-8' }, publicHeaders)
+    });
+  }
+
+  return jsonResponse(
+    {
+      ok: true,
+      user: {
+        login: String(login)
+      },
+      updatedAt: sanitized.updatedAt,
+      activeCatalogUrl: sanitized.activeCatalogUrl,
+      catalogs: sanitized.catalogs
+    },
+    200,
+    publicHeaders
   );
 }
 
@@ -635,6 +1024,11 @@ async function handlePutState(request, env, corsHeaders, nowMs) {
     );
   }
 
+  const sheetSyncReq = parsedBody.sheetSync || null;
+  if (Object.prototype.hasOwnProperty.call(parsedBody, 'sheetSync')) {
+    delete parsedBody.sheetSync;
+  }
+
   const canonicalJson = JSON.stringify(parsedBody);
   await incrementDailyUsage(env.DB, utcDate, true);
   await env.DB
@@ -653,16 +1047,20 @@ async function handlePutState(request, env, corsHeaders, nowMs) {
     .bind(String(claims.sub), String(claims.login), canonicalJson, nowMs, hourWindow)
     .run();
 
-  return jsonResponse(
-    {
-      ok: true,
-      paused: false,
-      updatedAt: nowMs,
-      resetsAt: resetsAt
-    },
-    200,
-    corsHeaders
-  );
+  const shareInfo = await buildShareInfo(request, claims, env, nowMs);
+  const resBody = {
+    ok: true,
+    paused: false,
+    updatedAt: nowMs,
+    resetsAt: resetsAt,
+    shareToken: shareInfo.shareToken,
+    shareUrl: shareInfo.shareUrl
+  };
+  if (sheetSyncReq) {
+    resBody.sheetSync = await syncChecklistToGoogleSheet(sheetSyncReq, env, nowMs);
+  }
+
+  return jsonResponse(resBody, 200, corsHeaders);
 }
 
 /**
@@ -677,6 +1075,31 @@ async function handleFetch(request, env) {
   const corsHeaders = buildCorsHeaders(request, env);
   const origin = request.headers.get('Origin');
   const nowMs = Date.now();
+
+  if (url.pathname === '/api/share' || url.pathname.startsWith('/api/share/')) {
+    const publicCorsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Accept'
+    };
+    if (method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: publicCorsHeaders });
+    }
+    if (method !== 'GET') {
+      return jsonResponse({ ok: false, error: 'Method not allowed' }, 405, publicCorsHeaders);
+    }
+    let rawToken = '';
+    if (url.pathname.startsWith('/api/share/')) {
+      try {
+        rawToken = decodeURIComponent(url.pathname.slice('/api/share/'.length).replace(/\/+$/, ''));
+      } catch (err) {
+        rawToken = '';
+      }
+    } else {
+      rawToken = url.searchParams.get('token') || '';
+    }
+    return handleGetShare(request, url, rawToken, env, nowMs);
+  }
 
   if (method === 'OPTIONS') {
     if (!isOriginAllowed(origin, env)) {
@@ -721,5 +1144,8 @@ module.exports = {
   getAllowedOrigins: getAllowedOrigins,
   getUtcDateString: getUtcDateString,
   getNextUtcMidnightIso: getNextUtcMidnightIso,
-  getHourWindow: getHourWindow
+  getHourWindow: getHourWindow,
+  extractSheetIdFromUrl: extractSheetIdFromUrl,
+  extractSheetGidFromUrl: extractSheetGidFromUrl,
+  parseGoogleServiceAccount: parseGoogleServiceAccount
 };

@@ -15,6 +15,7 @@ const STORAGE_PATH = path.join(ROOT_DIR, 'js', 'storage.js');
 const COVER_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'cover-resolver.js');
 const CONFIG_PATH = path.join(ROOT_DIR, 'js', 'config.js');
 const SYNC_PATH = path.join(ROOT_DIR, 'js', 'sync.js');
+const SHEET_ADAPTER_PATH = path.join(ROOT_DIR, 'js', 'sheet-adapter.js');
 const APP_PATH = path.join(ROOT_DIR, 'js', 'app.js');
 const SCHEMA_PATH = path.join(ROOT_DIR, 'worker', 'schema.sql');
 const SAMPLE_CATALOG_PATH = path.join(ROOT_DIR, 'docs', 'sample-catalog.json');
@@ -369,6 +370,7 @@ async function bootSystemClient(sys, {
   const { elements, docListeners, winListeners, documentStub } = createDomHarness(html);
   const localStorage = createStorageInstance(initialStorage);
   const locationNavigations = [];
+  const copiedTexts = [];
   const requestLog = [];
   const locationObj = {
     origin,
@@ -394,7 +396,12 @@ async function bootSystemClient(sys, {
     if (urlStr.startsWith('https://raw.githubusercontent.com/')) {
       const parsedRaw = new URL(urlStr);
       urlStr = `${sys.metadataBaseUrl}${parsedRaw.pathname}`;
-    } else if (urlStr.includes('musicbrainz.org') || urlStr.includes('coverartarchive.org') || urlStr.includes('itunes.apple.com')) {
+    } else if (
+      urlStr.includes('musicbrainz.org') ||
+      urlStr.includes('coverartarchive.org') ||
+      urlStr.includes('itunes.apple.com') ||
+      urlStr.startsWith('https://docs.google.com/')
+    ) {
       if (coverMocks) return coverMocks(urlStr);
       return new Response(JSON.stringify({ releases: [], images: [], results: [] }), {
         status: 200,
@@ -435,7 +442,13 @@ async function bootSystemClient(sys, {
     document: documentStub,
     localStorage,
     location: locationObj,
-    navigator: {},
+    navigator: {
+      clipboard: {
+        async writeText(txt) {
+          copiedTexts.push(txt);
+        }
+      }
+    },
     addEventListener(type, fn) {
       if (!winListeners[type]) winListeners[type] = [];
       winListeners[type].push(fn);
@@ -462,7 +475,7 @@ async function bootSystemClient(sys, {
   }
   context.CDHunt.config.syncApiUrl = sys.workerBaseUrl;
   context.CDHunt.config.syncDebounceMs = syncDebounceMs;
-  for (const filePath of [SYNC_PATH, APP_PATH]) {
+  for (const filePath of [SYNC_PATH, SHEET_ADAPTER_PATH, APP_PATH]) {
     vm.runInContext(fs.readFileSync(filePath, 'utf8'), context, { filename: filePath });
   }
 
@@ -476,6 +489,7 @@ async function bootSystemClient(sys, {
     localStorage,
     locationObj,
     locationNavigations,
+    copiedTexts,
     requestLog,
     settle,
     async clickElement(id) {
@@ -784,5 +798,127 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     }
     await app.settle(100);
     assert.equal(sys.db.queryRaw('SELECT write_count FROM daily_usage')[0].write_count, baselineWrites + 1);
+  });
+
+  it('serves live semi-private /api/share link for Gemini/LLM agents and syncs Got it? back to Google Sheets via Service Account', async (t) => {
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256'
+      },
+      true,
+      ['sign', 'verify']
+    );
+    const pkcs8B64 = Buffer.from(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey)).toString('base64');
+    const pem = `-----BEGIN PRIVATE KEY-----\n${pkcs8B64.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
+
+    const sheetRows = [
+      ['CD Hunt Checklist'],
+      ['Got it?', 'Category', 'Artist', 'Title', 'Catalog Number', 'Filing', 'Price', 'Priority', 'Recommended Shops'],
+      ['FALSE', 'Games', 'Capcom', 'Breath of Fire III OST', 'CPCA-1004', 'Look under ブ', '¥3000', 'High', 'Mandarake']
+    ];
+    const batchUpdates = [];
+
+    const googleMockServer = http.createServer(async (req, res) => {
+      const reqUrl = new URL(req.url, 'http://127.0.0.1');
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const bodyStr = Buffer.concat(chunks).toString('utf8');
+
+      if (req.method === 'POST' && reqUrl.pathname === '/oauth/token') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ access_token: 'ya29.sys-sheet-token', expires_in: 3600 }));
+        return;
+      }
+      if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/sheetSys99/values/A1:I500') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ values: sheetRows }));
+        return;
+      }
+      if (req.method === 'POST' && reqUrl.pathname === '/v4/spreadsheets/sheetSys99/values:batchUpdate') {
+        const updatePayload = JSON.parse(bodyStr);
+        batchUpdates.push(updatePayload);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ totalUpdatedCells: updatePayload.data.length }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const googleMockUrl = await listenServer(googleMockServer);
+    t.after(() => closeServer(googleMockServer));
+
+    const sys = await startFullSystem({
+      GOOGLE_OAUTH_TOKEN_URL: `${googleMockUrl}/oauth/token`,
+      GOOGLE_SHEETS_API_BASE_URL: googleMockUrl,
+      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+        client_email: 'cd-hunt-sync@sys.iam.gserviceaccount.com',
+        private_key: pem,
+        token_uri: `${googleMockUrl}/oauth/token`
+      })
+    });
+    t.after(() => sys.close());
+
+    const sheetCsvText = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'FALSE,Games,Capcom,Breath of Fire III OST,CPCA-1004,Look under ブ,¥3000,High,Mandarake'
+    ].join('\n');
+
+    const sheetCatalogUrl = 'https://docs.google.com/spreadsheets/d/sheetSys99/edit';
+    const sheetCsvExportUrl = 'https://docs.google.com/spreadsheets/d/sheetSys99/export?format=csv';
+    const hash = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      'code_alice'
+    );
+
+    const app = await bootSystemClient(sys, {
+      hash,
+      syncDebounceMs: 10,
+      initialStorage: {
+        cd_hunt_catalog_url_v1: sheetCsvExportUrl
+      },
+      coverMocks: async (url) => {
+        if (url === sheetCsvExportUrl || url === sheetCatalogUrl) {
+          return new Response(sheetCsvText, { status: 200, headers: { 'Content-Type': 'text/csv' } });
+        }
+        return new Response(JSON.stringify({ releases: [], results: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    });
+
+    // Click #copyAgentLinkBtn -> copies live share link
+    assert.equal(app.elements.get('copyAgentLinkBtn').classList.contains('hidden'), false);
+    await app.clickElement('copyAgentLinkBtn');
+    const copiedShareMdUrl = app.copiedTexts.find((t) => t.includes('/api/share/'));
+    assert.ok(copiedShareMdUrl && copiedShareMdUrl.endsWith('?format=markdown'));
+
+    // Toggle CPCA-1004 acquired -> pushes sheetSync to Worker -> Google Sheet batchUpdate sets A3 = TRUE
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'sheet-cpca-1004' });
+    await app.settle(120);
+
+    assert.equal(batchUpdates.length, 1);
+    assert.deepEqual(batchUpdates[0].data, [{ range: 'A3', values: [['TRUE']] }]);
+
+    // External LLM agent (e.g. Gemini) reads the semi-private share link without GitHub credentials
+    const agentRes = await fetch(copiedShareMdUrl, { headers: { Origin: 'https://gemini.google.com' } });
+    assert.equal(agentRes.status, 200);
+    assert.equal(agentRes.headers.get('access-control-allow-origin'), '*');
+    const agentMd = await agentRes.text();
+    assert.ok(agentMd.includes('# CD Hunt Live Status (@alice)'));
+    assert.ok(agentMd.includes('`sheet-cpca-1004`'));
+
+    // JSON variant also works cleanly and strips transient/cover data
+    const agentJsonUrl = copiedShareMdUrl.replace('?format=markdown', '');
+    const agentJson = await (await fetch(agentJsonUrl)).json();
+    assert.equal(agentJson.ok, true);
+    assert.equal(agentJson.user.login, 'alice');
+    assert.equal(agentJson.activeCatalogUrl, sheetCsvExportUrl);
+    const catalogKeys = Object.keys(agentJson.catalogs);
+    assert.equal(catalogKeys.length, 1);
+    assert.deepEqual(agentJson.catalogs[catalogKeys[0]].checklist, { 'sheet-cpca-1004': true });
   });
 });

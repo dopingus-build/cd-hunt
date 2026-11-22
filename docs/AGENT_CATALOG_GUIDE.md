@@ -5,7 +5,15 @@ This is the **single self-contained reference file** for using **Gemini** (the c
 - **Single Canonical URL to Give Gemini:**
   `https://raw.githubusercontent.com/dopingus-build/cd-hunt/main/docs/AGENT_CATALOG_GUIDE.md`
 
-> **Architecture Context:** Your **Google Sheet** is your primary LLM-friendly research and data-entry workspace; **JSON catalogs in `cd-metadata`** are your durable, Google-independent snapshots; and **`cd-hunt`** (`https://dopingus-build.github.io/cd-hunt/`) + GitHub-authenticated Cloudflare D1 hold your live trip acquisition checklist (`Got it?`).
+> **Architecture Context:** Your **Google Sheet** works both as a standalone zero-JSON catalog (`Google-Sheet-Only` mode: paste the Sheet URL straight into `cd-hunt`, cached locally for offline basements, or import a local `.csv`) and as a live overlay (`meta.googleSheetUrl`) paired with a durable JSON snapshot in `cd-metadata`. **`cd-hunt`** (`https://dopingus-build.github.io/cd-hunt/`) + GitHub-authenticated Cloudflare D1 remain the authoritative store for your trip checklist (`Got it?`).
+
+### Giving Gemini / Agents Live Read Access Without GitHub Credentials
+
+Because Gemini cannot sign in with your GitHub account, CD Hunt mints a **semi-private, read-only capability link** whenever you sign in:
+1. Click **Sign in** in CD Hunt's top bar, then click **Agent Link** to copy your personal read-only status URL (`https://cd-hunt-sync.tndo.workers.dev/api/share/<token>?format=markdown`, or omit `?format=markdown` for JSON).
+2. Paste that URL to Gemini alongside your Google Sheet or catalog URL so Gemini can immediately inspect which CDs are already acquired (`Got it? = TRUE`) vs. still hunting.
+3. **What is exposed:** Only non-sensitive public CD catalog IDs, checklists, view mode, and your public GitHub username (`login`). Zero GitHub access tokens, emails, or private repo data ever touch D1 or `/api/share/<token>`.
+4. **Two-Way Google Sheet Sync (Service Account):** `GOOGLE_SERVICE_ACCOUNT_JSON` is live on the Worker (`cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com`, also surfaced inside **Catalog → Copy Bot Email** and at `https://cd-hunt-sync.tndo.workers.dev/api/status`). Share your Google Sheet with `cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com` as **Editor**, and toggling `Got it?` in `cd-hunt` will automatically write `TRUE`/`FALSE` back to Column A (including multi-tab sheets with `#gid=`).
 
 ---
 
@@ -77,6 +85,15 @@ All CD Hunt Google Sheets follow a single **9-column, 1-release-per-row** schema
    - Bottom section (optional): `Digital-Only Releases (Skip Physical Hunting)` banner row, repeated 9-column header, then `Digital-Only` rows (`digitalOnly: true`).
 2. **Flat Table Layout** (produced by Gemini's *"Export to Sheets"* button):
    - Row 1: 9-column header directly, followed by rows in Columns A–I (`Aisle / Category = "Digital-Only"` marks non-physical rows).
+
+### 1-Click Template Copy + Auto-Invite URL (For Collaborators & Forkers)
+When sharing a public template Google Sheet (for example, one imported from [`docs/sample-catalog-sheet.csv`](./sample-catalog-sheet.csv)), you can replace `/edit` with `/copy?title=...&userstoinvite=...` so clicking the link prompts the user to copy the template into their own Google Drive **and automatically invites the sync Service Account bot email** on confirmation:
+
+```text
+https://docs.google.com/spreadsheets/d/<TEMPLATE_SHEET_ID>/copy?title=My+CD+Hunt+Checklist&userstoinvite=cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com
+```
+
+*(Note: Google requires `/copy` links for `userstoinvite`; for already-existing sheets, use **Catalog -> Copy Bot Email** in `cd-hunt` or `GET /api/status` and add the bot as **Editor** under **Share**.)*
 
 ---
 

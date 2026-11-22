@@ -289,6 +289,7 @@ async function main() {
 
       await pageA.click('#githubAuthBtn');
       await pageA.waitForSelector('#githubSignOutBtn:not(.hidden)');
+      await pageA.waitForSelector('#copyAgentLinkBtn:not(.hidden)');
       await pageA.waitForFunction(() => {
         const pill = document.getElementById('syncStatusPill');
         return pill && pill.textContent.includes('@alice') && !pill.textContent.includes('Syncing');

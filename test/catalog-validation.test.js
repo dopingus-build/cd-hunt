@@ -5,18 +5,23 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const vm = require('node:vm');
+
 let validateCatalog = null;
 let normalizeCatalogUrl = null;
+let extractGoogleSheetId = null;
 let storageModule = null;
 let deriveStoragePrefix = null;
 let coverResolverModule = null;
+let sheetAdapterModule = null;
 let loadError = null;
 
 try {
-  ({ validateCatalog, normalizeCatalogUrl } = require('../js/validate.js'));
+  ({ validateCatalog, normalizeCatalogUrl, extractGoogleSheetId } = require('../js/validate.js'));
   storageModule = require('../js/storage.js');
   ({ deriveStoragePrefix } = storageModule);
   coverResolverModule = require('../js/cover-resolver.js');
+  sheetAdapterModule = require('../js/sheet-adapter.js');
 } catch (err) {
   loadError = err;
 }
@@ -1419,5 +1424,186 @@ describe('Cloud sync config and frontend sync module (js/config.js & js/sync.js)
     const geminiMd = fs.readFileSync(path.join(__dirname, '..', 'GEMINI.md'), 'utf8');
     assert.ok(geminiMd.includes('docs/AGENT_CATALOG_GUIDE.md'));
     assert.ok(geminiMd.includes('docs/sample-catalog-sheet.csv'));
+  });
+});
+
+describe('Google Sheet URL normalization & sheet-adapter CSV parsing/merging (js/validate.js & js/sheet-adapter.js)', () => {
+  it('extracts Google Sheet ID + optional gid and normalizes Google Sheets URLs to CSV export', () => {
+    const normalize = getNormalizer();
+    assert.equal(typeof extractGoogleSheetId, 'function');
+
+    assert.deepEqual(
+      extractGoogleSheetId('https://docs.google.com/spreadsheets/d/1fVOtXaNniW62Ze0iZcQxGXRLaCbDlUBHjGZNRkO9u6A/edit?usp=drivesdk'),
+      { sheetId: '1fVOtXaNniW62Ze0iZcQxGXRLaCbDlUBHjGZNRkO9u6A', gid: null }
+    );
+    assert.deepEqual(
+      extractGoogleSheetId('https://docs.google.com/spreadsheets/d/abc-123_XYZ/edit#gid=42'),
+      { sheetId: 'abc-123_XYZ', gid: '42' }
+    );
+    assert.deepEqual(
+      extractGoogleSheetId('https://docs.google.com/spreadsheets/d/abc-123_XYZ/export?format=csv&gid=99'),
+      { sheetId: 'abc-123_XYZ', gid: '99' }
+    );
+    assert.equal(extractGoogleSheetId('https://example.com/catalog.json'), null);
+    assert.equal(extractGoogleSheetId(''), null);
+
+    assert.equal(
+      normalize('https://docs.google.com/spreadsheets/d/1fVOtXaNniW62Ze0iZcQxGXRLaCbDlUBHjGZNRkO9u6A/edit?usp=drivesdk'),
+      'https://docs.google.com/spreadsheets/d/1fVOtXaNniW62Ze0iZcQxGXRLaCbDlUBHjGZNRkO9u6A/export?format=csv'
+    );
+    assert.equal(
+      normalize('https://docs.google.com/spreadsheets/d/abc-123_XYZ/edit#gid=42'),
+      'https://docs.google.com/spreadsheets/d/abc-123_XYZ/export?format=csv&gid=42'
+    );
+  });
+
+  it('parses RFC-4180 CSV with BOM, quoted commas/newlines, and escaped double quotes', () => {
+    const rows = sheetAdapterModule.parseCsv(
+      '\uFEFFA,B,C\r\nTRUE,"Quote ""here""","Line 1,\nLine 2"\r\n\r\nFALSE,Simple,Plain\n'
+    );
+    assert.equal(rows.length, 3);
+    assert.deepEqual(rows[0], ['A', 'B', 'C']);
+    assert.deepEqual(rows[1], ['TRUE', 'Quote "here"', 'Line 1,\nLine 2']);
+    assert.deepEqual(rows[2], ['FALSE', 'Simple', 'Plain']);
+    assert.deepEqual(sheetAdapterModule.parseCsv(''), []);
+  });
+
+  it('parses docs/sample-catalog-sheet.csv Dashboard Layout into a schema-valid catalog and checklists', () => {
+    const validate = getValidator();
+    const csvText = fs.readFileSync(path.join(__dirname, '..', 'docs', 'sample-catalog-sheet.csv'), 'utf8');
+    const parsed = sheetAdapterModule.parseGoogleSheetCsv(csvText, {
+      sourceUrl: 'https://docs.google.com/spreadsheets/d/template123/export?format=csv'
+    });
+
+    assert.deepEqual(validate(parsed.catalog), { valid: true, errors: [] });
+    assert.equal(parsed.catalog.meta.title, 'CD Hunt Physical & Digital Release Checklist');
+    assert.ok(parsed.catalog.meta.subtitle.includes('Canonical Google Sheet Template'));
+    assert.equal(parsed.catalog.items.length, 4);
+
+    const physical = parsed.catalog.items.filter((i) => !i.digitalOnly);
+    const digital = parsed.catalog.items.filter((i) => !!i.digitalOnly);
+    assert.equal(physical.length, 3);
+    assert.equal(digital.length, 1);
+
+    assert.equal(physical[0].regCatNo, 'CPCA-1004');
+    assert.equal(physical[0].artist, 'Capcom');
+    assert.equal(physical[0].artistJa, 'カプコン');
+    assert.equal(physical[0].kana, 'ブ');
+    assert.equal(physical[0].priority, 'High');
+    assert.ok(physical[0].recommendedShops.includes('Mandarake'));
+
+    // yama row prioritizes 通常盤 Regular (SRCL-12539) even with 3 editions listed
+    assert.equal(physical[1].regCatNo, 'SRCL-12539');
+    assert.equal(physical[1].mbEditions.length, 3);
+    assert.equal(digital[0].id.startsWith('sheet-dig-'), true);
+    assert.equal(digital[0].digitalOnly, true);
+  });
+
+  it('supports Flat Table Layout, explicit ID/Kana/iTunes columns, checked synonyms, and validation errors', () => {
+    const validate = getValidator();
+    const flatCsv = [
+      'Got it?,Category,Artist,Title,Catalog Number,Filing Location,Target Used Price,Priority,Recommended Shops,ID,Kana,iTunes Query',
+      'TRUE,J-Rock,bump of chicken,Jupiter,TFCC-86101 (通常盤),Look under バ (Ba),¥500,High,Book Off,bump-jupiter,バ,Jupiter BUMP OF CHICKEN',
+      'YES,J-Rock,bump of chicken,Jupiter Reissue,TFCC-86101,Look under バ,¥500,Low,,bump-jupiter,,',
+      '✓,Digital-Only,Digital Artist,Digital Song,N/A (Digital Only),Skip physical,,Medium,Mora,,,',
+      ',EmptySkip,,,,,,,,,'
+    ].join('\n');
+
+    const parsed = sheetAdapterModule.parseGoogleSheetCsv(flatCsv);
+    assert.deepEqual(validate(parsed.catalog), { valid: true, errors: [] });
+    assert.equal(parsed.catalog.items.length, 3);
+    assert.equal(parsed.catalog.items[0].id, 'bump-jupiter');
+    assert.equal(parsed.catalog.items[1].id, 'bump-jupiter-2');
+    assert.equal(parsed.catalog.items[2].digitalOnly, true);
+    assert.deepEqual(parsed.sheetChecklist, {
+      'bump-jupiter': true,
+      'bump-jupiter-2': true,
+      [parsed.catalog.items[2].id]: true
+    });
+    assert.equal(parsed.rowChecklistByCatNo['TFCC-86101'], true);
+
+    assert.throws(() => sheetAdapterModule.parseGoogleSheetCsv('foo,bar\n1,2'), /header row/i);
+    assert.throws(() => sheetAdapterModule.parseGoogleSheetCsv('Got it?,Title,Catalog Number\n,,'), /no release rows/i);
+  });
+
+  it('merges Google Sheet updates and new rows onto base JSON catalog and builds catno checklist map', () => {
+    const baseCatalog = makeValidCatalog({
+      items: [
+        makeValidItem({
+          id: 'curated-akfg',
+          category: 'Anime Themes & Chara',
+          artist: 'Asian Kung-Fu Generation',
+          title: 'Sol-fa',
+          regCatNo: 'KSCL-737',
+          catalog: 'KSCL-737 (通常盤)',
+          mbEditions: [{ catno: 'KSCL-737', label: '通常盤 Regular' }]
+        }),
+        makeValidItem({
+          id: 'curated-dig',
+          digitalOnly: true,
+          artist: 'Hanatan',
+          title: 'gradation',
+          regCatNo: '',
+          catalog: 'Digital-Only',
+          mbEditions: []
+        })
+      ]
+    });
+
+    const csvOverlay = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'TRUE,Anime Themes & Chara,Asian Kung-Fu Generation,Sol-fa,KSCL-737 (通常盤),Look under ア,¥600,High,"Book Off, Disk Union"',
+      'FALSE,Game OST,Keiichi Okabe,NieR:Automata OST,SQEX-10589~91,Look under ナ,¥2500,High,Mandarake',
+      'TRUE,Digital-Only,Hanatan,gradation,N/A (Digital Only),Digital only,,Low,iTunes JP'
+    ].join('\n');
+
+    const sheetParsed = sheetAdapterModule.parseGoogleSheetCsv(csvOverlay);
+    const merged = sheetAdapterModule.mergeCatalogWithSheet(baseCatalog, sheetParsed);
+
+    assert.equal(merged.matchedCount, 2);
+    assert.equal(merged.addedCount, 1);
+    assert.equal(merged.catalog.items.length, 3);
+    assert.equal(merged.catalog.items[0].priority, 'High');
+    assert.equal(merged.catalog.items[0].recommendedShops, 'Book Off, Disk Union');
+    assert.equal(merged.catalog.items[2].regCatNo, 'SQEX-10589~91');
+    assert.ok(merged.catalog.categories.some((c) => c.key === 'Game OST'));
+    assert.deepEqual(merged.sheetChecklist, {
+      'curated-akfg': true,
+      'curated-dig': true
+    });
+
+    const byCatNo = sheetAdapterModule.buildChecklistByCatNo(merged.catalog.items, {
+      'curated-akfg': true,
+      'curated-dig': true
+    });
+    assert.deepEqual(byCatNo, {
+      'KSCL-737': true,
+      'SQEX-10589~91': false
+    });
+    assert.equal(sheetAdapterModule.isGoogleSheetCsvUrl('https://docs.google.com/spreadsheets/d/abc/edit'), true);
+    assert.equal(sheetAdapterModule.isGoogleSheetCsvUrl('https://example.com/catalog.json'), false);
+
+    // Browser global attachment check
+    const sandbox = { CDHunt: { extractGoogleSheetId } };
+    sandbox.window = sandbox;
+    sandbox.globalThis = sandbox;
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'js', 'sheet-adapter.js'), 'utf8'), sandbox);
+    assert.equal(typeof sandbox.window.CDHunt.sheetAdapter.parseGoogleSheetCsv, 'function');
+  });
+
+  it('cleanly strips surrounding quotes from parenthetical titles for itunesQuery and requiredGroups', () => {
+    const csv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'FALSE,Anime,yama,"""slash"" (Gundam OP)",SRCL-12539 (通常盤),Look under ヤ,¥500,High,Book Off',
+      'FALSE,Digital-Only,Rokudenashi,"""ホウキボシ"" (Houkiboshi)",N/A (Digital Only),Digital only,,Low,iTunes JP'
+    ].join('\n');
+
+    const parsed = sheetAdapterModule.parseGoogleSheetCsv(csv);
+    const yama = parsed.catalog.items[0];
+    const rokudenashi = parsed.catalog.items[1];
+    assert.equal(yama.itunesQuery, 'yama slash');
+    assert.deepEqual(yama.requiredGroups, [['slash'], ['yama']]);
+    assert.equal(rokudenashi.itunesQuery, 'Rokudenashi ホウキボシ');
+    assert.deepEqual(rokudenashi.requiredGroups, [['ホウキボシ'], ['Rokudenashi']]);
   });
 });

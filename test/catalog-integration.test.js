@@ -49,6 +49,7 @@ const STORAGE_PATH = path.join(ROOT_DIR, 'js', 'storage.js');
 const COVER_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'cover-resolver.js');
 const CONFIG_PATH = path.join(ROOT_DIR, 'js', 'config.js');
 const SYNC_PATH = path.join(ROOT_DIR, 'js', 'sync.js');
+const SHEET_ADAPTER_PATH = path.join(ROOT_DIR, 'js', 'sheet-adapter.js');
 const APP_PATH = path.join(ROOT_DIR, 'js', 'app.js');
 
 const { deriveStoragePrefix } = require('../js/storage.js');
@@ -200,6 +201,7 @@ async function bootApp({
   const coverResolverSource = fs.readFileSync(COVER_RESOLVER_PATH, 'utf8');
   const configSource = fs.readFileSync(CONFIG_PATH, 'utf8');
   const syncSource = fs.readFileSync(SYNC_PATH, 'utf8');
+  const sheetAdapterSource = fs.readFileSync(SHEET_ADAPTER_PATH, 'utf8');
   const appScript = fs.readFileSync(APP_PATH, 'utf8');
 
   const fallbackImgsById = new Map();
@@ -429,6 +431,7 @@ async function bootApp({
   context.CDHunt.config.syncApiUrl = syncApiUrl;
   context.CDHunt.config.syncDebounceMs = syncDebounceMs;
   vm.runInContext(syncSource, context, { filename: SYNC_PATH });
+  vm.runInContext(sheetAdapterSource, context, { filename: SHEET_ADAPTER_PATH });
   vm.runInContext(appScript, context, { filename: APP_PATH });
 
   async function flush() {
@@ -591,6 +594,7 @@ describe('HTML entrypoint generalization & script wiring', () => {
     assert.ok(html.includes('id="copyShareLinkBtn"'), 'Copy Share Link button should exist');
     assert.ok(html.includes('id="catalogPresetsList"'), 'Dynamic presets container should exist');
     assert.ok(html.includes('id="githubAuthBtn"'), 'GitHub sign-in button should exist');
+    assert.ok(html.includes('id="copyAgentLinkBtn"'), 'Agent Link button should exist');
     assert.ok(html.includes('id="githubSignOutBtn"'), 'GitHub sign-out button should exist');
     assert.ok(html.includes('id="syncStatusPill"'), 'Cloud sync status pill should exist');
 
@@ -600,6 +604,7 @@ describe('HTML entrypoint generalization & script wiring', () => {
       '<script src="./js/cover-resolver.js"></script>',
       '<script src="./js/config.js"></script>',
       '<script src="./js/sync.js"></script>',
+      '<script src="./js/sheet-adapter.js"></script>',
       '<script src="./js/app.js"></script>'
     ];
 
@@ -2258,5 +2263,245 @@ describe('Priority and Recommended Shops rendering', () => {
     assert.equal(app.elements.get('lbPriorityBadge').textContent, '');
     assert.equal(app.elements.get('lbShopsRow').classList.contains('hidden'), true);
     assert.equal(app.elements.get('lbShops').textContent, '');
+  });
+});
+
+describe('Google Sheet direct loading, JSON hybrid overlay, and Agent Link button', () => {
+  it('loads a public Google Sheet URL directly via CSV export, applies Got it? checkmarks, and renders items', async () => {
+    const csvText = fs.readFileSync(path.join(ROOT_DIR, 'docs', 'sample-catalog-sheet.csv'), 'utf8')
+      .replace('FALSE,Video Game Soundtracks,Capcom', 'TRUE,Video Game Soundtracks,Capcom');
+    const fetchedUrls = [];
+
+    const app = await bootApp({
+      search: '?catalog=' + encodeURIComponent('https://docs.google.com/spreadsheets/d/sheet123abc/edit?usp=drivesdk'),
+      fetchImpl: async (url) => {
+        fetchedUrls.push(String(url));
+        if (String(url) === 'https://docs.google.com/spreadsheets/d/sheet123abc/export?format=csv') {
+          return {
+            ok: true,
+            status: 200,
+            async text() {
+              return csvText;
+            }
+          };
+        }
+        throw new Error('Unexpected fetch: ' + url);
+      }
+    });
+
+    assert.ok(fetchedUrls.includes('https://docs.google.com/spreadsheets/d/sheet123abc/export?format=csv'));
+    assert.notEqual(app.elements.get('errorBanner').style.display, 'block');
+    assert.equal(app.elements.get('progressBadge').textContent, '1 / 3');
+    const gridHtml = app.elements.get('albumGrid').innerHTML;
+    assert.ok(gridHtml.includes('Capcom'));
+    assert.ok(gridHtml.includes('CPCA-1004'));
+    assert.ok(app.elements.get('digitalGrid').innerHTML.includes('Hanatan'));
+  });
+
+  it('merges live Google Sheet overlay onto JSON catalog with meta.googleSheetUrl and falls back offline', async () => {
+    const baseJson = {
+      schemaVersion: 1,
+      meta: {
+        title: 'Hybrid Hunt',
+        googleSheetUrl: 'https://docs.google.com/spreadsheets/d/hybrid999/edit'
+      },
+      categories: [
+        { key: 'All', label: 'All Releases', dot: '#a1a1aa' },
+        { key: 'J-Rock', label: 'J-Rock', dot: '#f43f5e' }
+      ],
+      items: [
+        {
+          id: 'cur-akfg',
+          category: 'J-Rock',
+          artist: 'Asian Kung-Fu Generation',
+          title: 'Sol-fa',
+          regCatNo: 'KSCL-737',
+          catalog: 'KSCL-737 (通常盤)',
+          kana: 'ア',
+          filing: 'Look under ア',
+          price: '¥400–¥800'
+        }
+      ]
+    };
+
+    const sheetCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'TRUE,J-Rock,Asian Kung-Fu Generation,Sol-fa,KSCL-737,Look under ア,¥500,High,"Book Off, Disk Union"',
+      'FALSE,Game OST,Keiichi Okabe,NieR:Automata OST,SQEX-10589~91,Look under ナ,¥2,500,Medium,Mandarake'
+    ].join('\n');
+
+    const appMerged = await bootApp({
+      search: '?catalog=' + encodeURIComponent('https://cdn.example/hybrid.json'),
+      fetchImpl: async (url) => {
+        if (String(url) === 'https://cdn.example/hybrid.json') {
+          return { ok: true, status: 200, async json() { return baseJson; } };
+        }
+        if (String(url) === 'https://docs.google.com/spreadsheets/d/hybrid999/export?format=csv') {
+          return { ok: true, status: 200, async text() { return sheetCsv; } };
+        }
+        throw new Error('Unexpected fetch: ' + url);
+      }
+    });
+
+    assert.equal(appMerged.elements.get('progressBadge').textContent, '1 / 2');
+    assert.ok(appMerged.elements.get('albumGrid').innerHTML.includes('NieR:Automata OST'));
+
+    // Offline fallback when Google Sheet CSV fails to load
+    const appFallback = await bootApp({
+      search: '?catalog=' + encodeURIComponent('https://cdn.example/hybrid.json'),
+      fetchImpl: async (url) => {
+        if (String(url) === 'https://cdn.example/hybrid.json') {
+          return { ok: true, status: 200, async json() { return baseJson; } };
+        }
+        if (String(url) === 'https://docs.google.com/spreadsheets/d/hybrid999/export?format=csv') {
+          throw new Error('Sheet unreachable offline');
+        }
+        throw new Error('Unexpected fetch: ' + url);
+      }
+    });
+    assert.equal(appFallback.elements.get('progressBadge').textContent, '0 / 1');
+    assert.notEqual(appFallback.elements.get('errorBanner').style.display, 'block');
+  });
+
+  it('reveals #copyAgentLinkBtn when pullCloudState returns shareUrl and copies Markdown share link', async () => {
+    const sampleCatalog = JSON.parse(fs.readFileSync(SAMPLE_CATALOG_PATH, 'utf8'));
+    const jwt = makeFakeSyncJwt({ login: 'alice' });
+    const shareUrl = 'https://cd-hunt-sync.tndo.workers.dev/api/share/signed-share-token-abc';
+
+    const app = await bootApp({
+      catalogObject: sampleCatalog,
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      fetchImpl: async (url, init = {}) => {
+        const method = String(init.method || 'GET').toUpperCase();
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                ok: true,
+                user: { login: 'alice' },
+                state: null,
+                updatedAt: null,
+                shareToken: 'signed-share-token-abc',
+                shareUrl
+              };
+            }
+          };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+
+    const agentBtn = app.elements.get('copyAgentLinkBtn');
+    assert.equal(agentBtn.classList.contains('hidden'), false);
+    await app.clickElement('copyAgentLinkBtn');
+    assert.ok(app.copiedTexts.includes(shareUrl + '?format=markdown'));
+    assert.equal(app.elements.get('toast').textContent, 'Copied semi-private Agent/Gemini status link');
+
+    await app.clickElement('githubSignOutBtn');
+    assert.equal(agentBtn.classList.contains('hidden'), true);
+  });
+
+  it('loads local .csv files via #catalogFileInput without needing JSON', async () => {
+    const csvText = fs.readFileSync(path.join(ROOT_DIR, 'docs', 'sample-catalog-sheet.csv'), 'utf8')
+      .replace('FALSE,Video Game Soundtracks,Capcom', 'TRUE,Video Game Soundtracks,Capcom');
+
+    const app = await bootApp();
+    await app.selectLocalFile('trip-sheet.csv', csvText);
+
+    assert.equal(app.elements.get('progressBadge').textContent, '1 / 3');
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('CPCA-1004'));
+    assert.equal(app.elements.get('toast').textContent, 'Loaded local CSV: trip-sheet.csv');
+    assert.equal(app.elements.get('copyShareLinkBtn').classList.contains('hidden'), true);
+
+    // Also handles CSV content even if filename lacks .csv extension
+    await app.selectLocalFile('exported-sheet.txt', csvText);
+    assert.equal(app.elements.get('toast').textContent, 'Loaded local CSV: exported-sheet.txt');
+  });
+
+  it('caches Google Sheet CSV offline and preserves explicit local unchecks across Sheet reloads', async () => {
+    const csvText = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'TRUE,Game OST,Capcom,Breath of Fire III OST,CPCA-1004,Look under ブ,¥3000,High,Mandarake',
+      'FALSE,J-Rock,Asian Kung-Fu Generation,Sol-fa,KSCL-737,Look under ア,¥500,Medium,Book Off'
+    ].join('\n');
+    const sheetUrl = 'https://docs.google.com/spreadsheets/d/offlineSheet1/edit';
+    const exportUrl = 'https://docs.google.com/spreadsheets/d/offlineSheet1/export?format=csv';
+
+    // 1. Initial online load: seeds CPCA-1004 (TRUE in Sheet) and caches CSV locally
+    const app1 = await bootApp({
+      search: '?catalog=' + encodeURIComponent(sheetUrl),
+      fetchImpl: async (url) => {
+        if (String(url) === exportUrl) {
+          return { ok: true, status: 200, async text() { return csvText; } };
+        }
+        throw new Error('Unexpected fetch: ' + url);
+      }
+    });
+    assert.equal(app1.elements.get('progressBadge').textContent, '1 / 2');
+
+    // User explicitly unchecks CPCA-1004 inside cd-hunt
+    app1.triggerDocumentClick('toggle-acq', { 'data-id': 'sheet-cpca-1004' });
+    assert.equal(app1.elements.get('progressBadge').textContent, '0 / 2');
+
+    // 2. Subsequent offline reload with saved localStorage: restores CSV from offline cache
+    //    AND preserves explicit uncheck instead of re-checking CPCA-1004 from stale TRUE in Sheet
+    const savedSnapshot = Object.fromEntries(app1.localStorage._store.entries());
+    const appOffline = await bootApp({
+      initialStorage: savedSnapshot,
+      fetchImpl: async (url) => {
+        if (String(url) === exportUrl) {
+          throw new Error('Device offline');
+        }
+        throw new Error('Unexpected fetch: ' + url);
+      }
+    });
+    assert.equal(appOffline.elements.get('toast').textContent, 'Loaded cached Google Sheet (offline)');
+    assert.equal(appOffline.elements.get('progressBadge').textContent, '0 / 2');
+    assert.ok(appOffline.elements.get('albumGrid').innerHTML.includes('Sol-fa'));
+  });
+
+  it('reveals #sheetSyncBotBanner with Service Account email when /api/status reports configured, and hides when unconfigured', async () => {
+    const botEmail = 'cd-hunt-sync@cd-hunt-sheets.iam.gserviceaccount.com';
+    const appConfigured = await bootApp({
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      fetchImpl: async (url) => {
+        if (String(url) === 'https://cd-hunt-sync.tndo.workers.dev/api/status') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { ok: true, sheetSync: { configured: true, serviceAccountEmail: botEmail } };
+            }
+          };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+
+    const banner = appConfigured.elements.get('sheetSyncBotBanner');
+    assert.equal(banner.classList.contains('hidden'), false);
+    assert.ok(appConfigured.elements.get('sheetSyncBotText').textContent.includes(botEmail));
+    await appConfigured.clickElement('copySheetBotEmailBtn');
+    assert.ok(appConfigured.copiedTexts.includes(botEmail));
+
+    const appUnconfigured = await bootApp({
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      fetchImpl: async (url) => {
+        if (String(url) === 'https://cd-hunt-sync.tndo.workers.dev/api/status') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { ok: true, sheetSync: { configured: false, serviceAccountEmail: null } };
+            }
+          };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+    assert.equal(appUnconfigured.elements.get('sheetSyncBotBanner').classList.contains('hidden'), true);
   });
 });

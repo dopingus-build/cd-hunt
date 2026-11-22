@@ -43,6 +43,9 @@ function createMockD1() {
               if (normalized.startsWith('SELECT github_id, github_login, state_json, updated_at, hour_window, hour_writes FROM user_state WHERE github_id = ?')) {
                 return cloneRow(userState.get(params[0]));
               }
+              if (normalized.startsWith('SELECT github_login, state_json, updated_at FROM user_state WHERE github_id = ?')) {
+                return cloneRow(userState.get(params[0]));
+              }
               if (normalized.startsWith('SELECT updated_at, hour_window, hour_writes FROM user_state WHERE github_id = ?')) {
                 const row = userState.get(params[0]);
                 return row
@@ -783,5 +786,355 @@ describe('Per-user hourly rate limiting & daily free-tier self-pausing circuit b
     ).json();
     assert.equal(manualStatus.paused, true);
     assert.equal(manualStatus.reason, 'manual_pause_enabled');
+  });
+});
+
+describe('Semi-private read-only share endpoint (/api/share) and Google Service Account write-back', () => {
+  it('validates optional sheetSync fields cleanly in validateSyncPayload', () => {
+    const valid = validateSyncPayload({
+      schemaVersion: 1,
+      catalogs: {},
+      sheetSync: {
+        googleSheetUrl: 'https://docs.google.com/spreadsheets/d/abc123/edit',
+        checklistByCatNo: { 'CPCA-1004': true }
+      }
+    });
+    assert.equal(valid.valid, true);
+    assert.equal(validateSyncPayload({ schemaVersion: 1, catalogs: {}, sheetSync: 'bad' }).valid, false);
+    assert.equal(
+      validateSyncPayload({ schemaVersion: 1, catalogs: {}, sheetSync: { googleSheetUrl: 123, checklistByCatNo: {} } }).valid,
+      false
+    );
+    assert.equal(
+      validateSyncPayload({ schemaVersion: 1, catalogs: {}, sheetSync: { googleSheetUrl: 'https://x', checklistByCatNo: [] } }).valid,
+      false
+    );
+  });
+
+  it('mints read_share tokens in /api/state, serves /api/share JSON & Markdown across any Origin, and strips covers/tokens', async () => {
+    const env = makeEnv();
+    const sessionJwt = await signToken({ purpose: 'session', sub: '12345', login: 'dopingus' }, TEST_JWT_SECRET, 3600);
+
+    const payload = {
+      schemaVersion: 1,
+      updatedAt: 1700000000000,
+      activeCatalogUrl: 'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/2026-japan.json',
+      catalogs: {
+        cd_hunt_osaka_0123abcd: {
+          updatedAt: 1700000000000,
+          checklist: { 'bof3-ost': true, 'slash-op': false },
+          customCovers: { 'bof3-ost': { variants: [{ url: 'https://cover.example/a.jpg' }], selectedIndex: 0 } },
+          viewMode: 'single'
+        }
+      }
+    };
+
+    const putRes = await workerFetch(
+      new Request('https://sync.example/api/state', {
+        method: 'PUT',
+        headers: { Origin: DEFAULT_ORIGIN, Authorization: 'Bearer ' + sessionJwt, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }),
+      env
+    );
+    assert.equal(putRes.status, 200);
+    const putJson = await putRes.json();
+    assert.ok(putJson.shareToken);
+    assert.equal(putJson.shareUrl, 'https://sync.example/api/share/' + putJson.shareToken);
+
+    const getRes = await workerFetch(
+      new Request('https://sync.example/api/state', {
+        headers: { Origin: DEFAULT_ORIGIN, Authorization: 'Bearer ' + sessionJwt }
+      }),
+      env
+    );
+    const getJson = await getRes.json();
+    assert.ok(getJson.shareToken);
+    assert.ok(getJson.shareUrl.startsWith('https://sync.example/api/share/'));
+
+    // Public OPTIONS preflight on /api/share accepts any Origin (e.g. Gemini)
+    const preflight = await workerFetch(
+      new Request('https://sync.example/api/share/' + getJson.shareToken, {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://gemini.google.com' }
+      }),
+      env
+    );
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), '*');
+
+    // Method not allowed on /api/share
+    const postShare = await workerFetch(
+      new Request('https://sync.example/api/share/' + getJson.shareToken, {
+        method: 'POST',
+        headers: { Origin: 'https://gemini.google.com' }
+      }),
+      env
+    );
+    assert.equal(postShare.status, 405);
+
+    // Valid GET /api/share/<token> JSON from external origin strips customCovers
+    const shareJsonRes = await workerFetch(
+      new Request(getJson.shareUrl, {
+        headers: { Origin: 'https://gemini.google.com' }
+      }),
+      env
+    );
+    assert.equal(shareJsonRes.status, 200);
+    assert.equal(shareJsonRes.headers.get('access-control-allow-origin'), '*');
+    const shareJson = await shareJsonRes.json();
+    assert.deepEqual(shareJson.user, { login: 'dopingus' });
+    assert.equal(shareJson.activeCatalogUrl, payload.activeCatalogUrl);
+    assert.deepEqual(shareJson.catalogs.cd_hunt_osaka_0123abcd.checklist, { 'bof3-ost': true, 'slash-op': false });
+    assert.equal(shareJson.catalogs.cd_hunt_osaka_0123abcd.customCovers, undefined);
+
+    // Valid GET /api/share?token=<token>&format=markdown returns readable Markdown checklist
+    const shareMdRes = await workerFetch(
+      new Request('https://sync.example/api/share?token=' + encodeURIComponent(getJson.shareToken) + '&format=markdown'),
+      env
+    );
+    assert.equal(shareMdRes.status, 200);
+    assert.ok(shareMdRes.headers.get('content-type').includes('text/markdown'));
+    const mdText = await shareMdRes.text();
+    assert.ok(mdText.includes('# CD Hunt Live Status (@dopingus)'));
+    assert.ok(mdText.includes('`bof3-ost`'));
+    assert.equal(mdText.includes('slash-op'), false);
+
+    // Rejects missing, tampered, and wrong-purpose (session) JWTs with 401
+    assert.equal((await workerFetch(new Request('https://sync.example/api/share/bad-token'), env)).status, 401);
+    assert.equal((await workerFetch(new Request('https://sync.example/api/share/' + sessionJwt), env)).status, 401);
+  });
+
+  it('signs RS256 Google OAuth assertions and batch-updates Column A of Google Sheets when GOOGLE_SERVICE_ACCOUNT_JSON is set', async () => {
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256'
+      },
+      true,
+      ['sign', 'verify']
+    );
+    const pkcs8Buf = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey);
+    const pkcs8B64 = Buffer.from(pkcs8Buf).toString('base64');
+    const pem = `-----BEGIN PRIVATE KEY-----\n${pkcs8B64.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
+
+    const saJson = JSON.stringify({
+      client_email: 'cd-hunt-bot@demo-project.iam.gserviceaccount.com',
+      private_key: pem,
+      token_uri: 'https://oauth.google.mock/token'
+    });
+
+    const sheetWrites = [];
+    let capturedAssertion = null;
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init = {}) => {
+      const u = String(url);
+      if (u === 'https://oauth.google.mock/token') {
+        const params = new URLSearchParams(String(init.body || ''));
+        capturedAssertion = params.get('assertion');
+        return new Response(JSON.stringify({ access_token: 'ya29.mock-sheet-token', expires_in: 3600 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (u === 'https://sheets.google.mock/v4/spreadsheets/sheetXYZ123/values/A1:I500') {
+        assert.equal(init.headers.Authorization, 'Bearer ya29.mock-sheet-token');
+        return new Response(
+          JSON.stringify({
+            values: [
+              ['CD Hunt Title'],
+              ['Got it?', 'Category', 'Artist', 'Title', 'Catalog Number'],
+              ['FALSE', 'Game', 'Capcom', 'Breath of Fire III OST', 'CPCA-1004'],
+              ['TRUE', 'Anime', 'yama', 'slash', 'SRCL-12539 (通常盤)'],
+              ['FALSE', 'J-Rock', 'AKFG', 'Sol-fa', 'KSCL-737']
+            ]
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (u === 'https://sheets.google.mock/v4/spreadsheets/sheetXYZ123/values:batchUpdate') {
+        sheetWrites.push(JSON.parse(init.body));
+        return new Response(JSON.stringify({ totalUpdatedCells: 2 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      throw new Error('Unexpected Google API fetch: ' + u);
+    };
+
+    try {
+      const env = makeEnv({
+        GOOGLE_SERVICE_ACCOUNT_JSON: saJson,
+        GOOGLE_SHEETS_API_BASE_URL: 'https://sheets.google.mock'
+      });
+
+      const statusRes = await workerFetch(
+        new Request('https://sync.example/api/status', { headers: { Origin: DEFAULT_ORIGIN } }),
+        env
+      );
+      const statusJson = await statusRes.json();
+      assert.deepEqual(statusJson.sheetSync, {
+        configured: true,
+        serviceAccountEmail: 'cd-hunt-bot@demo-project.iam.gserviceaccount.com'
+      });
+
+      const sessionJwt = await signToken({ purpose: 'session', sub: '12345', login: 'dopingus' }, TEST_JWT_SECRET, 3600);
+      const putRes = await workerFetch(
+        new Request('https://sync.example/api/state', {
+          method: 'PUT',
+          headers: { Origin: DEFAULT_ORIGIN, Authorization: 'Bearer ' + sessionJwt, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            schemaVersion: 1,
+            updatedAt: 1700000000000,
+            activeCatalogUrl: 'https://docs.google.com/spreadsheets/d/sheetXYZ123/export?format=csv',
+            catalogs: {
+              cd_hunt_sheet_00112233: {
+                updatedAt: 1700000000000,
+                checklist: { 'sheet-cpca-1004': true },
+                viewMode: 'grid'
+              }
+            },
+            sheetSync: {
+              googleSheetUrl: 'https://docs.google.com/spreadsheets/d/sheetXYZ123/edit',
+              checklistByCatNo: {
+                'CPCA-1004': true,
+                'SRCL-12539': false,
+                'KSCL-737': false
+              }
+            }
+          })
+        }),
+        env
+      );
+      assert.equal(putRes.status, 200);
+      const putBody = await putRes.json();
+      assert.deepEqual(putBody.sheetSync, { ok: true, updatedRows: 2 });
+
+      // Verify RS256 assertion signature against public key and ensure D1 stripped transient sheetSync
+      assert.ok(capturedAssertion);
+      const [h, p, s] = capturedAssertion.split('.');
+      const verified = await crypto.subtle.verify(
+        'RSASSA-PKCS1-v1_5',
+        keyPair.publicKey,
+        Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64'),
+        new TextEncoder().encode(h + '.' + p)
+      );
+      assert.equal(verified, true);
+      const savedD1Json = JSON.parse(env.DB.userState.get('12345').state_json);
+      assert.equal(savedD1Json.sheetSync, undefined);
+
+      assert.equal(sheetWrites.length, 1);
+      assert.equal(sheetWrites[0].valueInputOption, 'USER_ENTERED');
+      assert.deepEqual(sheetWrites[0].data, [
+        { range: 'A3', values: [['TRUE']] },
+        { range: 'A4', values: [['FALSE']] }
+      ]);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+  });
+
+  it('resolves multi-tab gid titles when googleSheetUrl includes #gid=42 and scopes read/batchUpdate to that tab', async () => {
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256'
+      },
+      true,
+      ['sign', 'verify']
+    );
+    const pkcs8B64 = Buffer.from(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey)).toString('base64');
+    const pem = `-----BEGIN PRIVATE KEY-----\n${pkcs8B64.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
+    const saJson = JSON.stringify({
+      client_email: 'cd-hunt-bot@demo-project.iam.gserviceaccount.com',
+      private_key: pem,
+      token_uri: 'https://oauth.google.mock/token'
+    });
+
+    const requestedUrls = [];
+    const sheetWrites = [];
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init = {}) => {
+      const u = String(url);
+      requestedUrls.push(u);
+      if (u === 'https://oauth.google.mock/token') {
+        return new Response(JSON.stringify({ access_token: 'ya29.gid-token' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (u === 'https://sheets.google.mock/v4/spreadsheets/sheetMulti99?fields=sheets.properties(sheetId,title)') {
+        return new Response(
+          JSON.stringify({
+            sheets: [
+              { properties: { sheetId: 0, title: 'Default Tab' } },
+              { properties: { sheetId: 42, title: 'Osaka Tab' } }
+            ]
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (u === 'https://sheets.google.mock/v4/spreadsheets/sheetMulti99/values/' + encodeURIComponent("'Osaka Tab'!A1:I500")) {
+        return new Response(
+          JSON.stringify({
+            values: [
+              ['Got it?', 'Category', 'Artist', 'Title', 'Catalog Number'],
+              ['FALSE', 'Game', 'Capcom', 'Breath of Fire III OST', 'CPCA-1004']
+            ]
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (u === 'https://sheets.google.mock/v4/spreadsheets/sheetMulti99/values:batchUpdate') {
+        sheetWrites.push(JSON.parse(init.body));
+        return new Response(JSON.stringify({ totalUpdatedCells: 1 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      throw new Error('Unexpected fetch URL: ' + u);
+    };
+
+    try {
+      const env = makeEnv({
+        GOOGLE_SERVICE_ACCOUNT_JSON: saJson,
+        GOOGLE_SHEETS_API_BASE_URL: 'https://sheets.google.mock'
+      });
+      const sessionJwt = await signToken({ purpose: 'session', sub: '12345', login: 'dopingus' }, TEST_JWT_SECRET, 3600);
+      const putRes = await workerFetch(
+        new Request('https://sync.example/api/state', {
+          method: 'PUT',
+          headers: { Origin: DEFAULT_ORIGIN, Authorization: 'Bearer ' + sessionJwt, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            schemaVersion: 1,
+            updatedAt: 1700000000000,
+            activeCatalogUrl: 'https://docs.google.com/spreadsheets/d/sheetMulti99/export?format=csv&gid=42',
+            catalogs: {
+              cd_hunt_sheet_00112233: {
+                updatedAt: 1700000000000,
+                checklist: { 'sheet-cpca-1004': true },
+                viewMode: 'grid'
+              }
+            },
+            sheetSync: {
+              googleSheetUrl: 'https://docs.google.com/spreadsheets/d/sheetMulti99/edit#gid=42',
+              checklistByCatNo: { 'CPCA-1004': true }
+            }
+          })
+        }),
+        env
+      );
+      assert.equal(putRes.status, 200);
+      const putBody = await putRes.json();
+      assert.deepEqual(putBody.sheetSync, { ok: true, updatedRows: 1 });
+      assert.ok(requestedUrls.includes('https://sheets.google.mock/v4/spreadsheets/sheetMulti99?fields=sheets.properties(sheetId,title)'));
+      assert.deepEqual(sheetWrites[0].data, [{ range: "'Osaka Tab'!A2", values: [['TRUE']] }]);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
   });
 });

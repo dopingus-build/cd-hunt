@@ -593,7 +593,9 @@
         user: body.user || null,
         state: body.state || null,
         updatedAt: body.updatedAt || null,
-        resetsAt: body.resetsAt || null
+        resetsAt: body.resetsAt || null,
+        shareToken: body.shareToken || null,
+        shareUrl: body.shareUrl || null
       };
     } catch (err) {
       return { ok: false, offline: true, error: err && err.message ? err.message : String(err) };
@@ -648,7 +650,10 @@
         ok: true,
         paused: false,
         updatedAt: body.updatedAt || null,
-        resetsAt: body.resetsAt || null
+        resetsAt: body.resetsAt || null,
+        shareToken: body.shareToken || null,
+        shareUrl: body.shareUrl || null,
+        sheetSync: body.sheetSync || null
       };
     } catch (err) {
       return { ok: false, offline: true, error: err && err.message ? err.message : String(err) };

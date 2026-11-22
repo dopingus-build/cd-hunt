@@ -6,8 +6,9 @@ Catalog metadata lives externally (such as the companion flat repository [`dopin
 
 ## Key Features
 
-- **Pluggable Metadata Loader:** Pick presets from `cd-metadata/index.json`, paste a direct catalog JSON URL (GitHub `blob`/`raw` URLs auto-convert to `raw.githubusercontent.com`), paste a bare GitHub repository or `/tree/<branch>` URL to load its `index.json` presets, or load a local `.json` file.
-- **Deep Links & Auto-Restore:** URL-loaded catalogs sync to `?catalog=<url>`, persist in `localStorage` (`cd_hunt_catalog_url_v1`) for automatic reload on revisit, and include **Copy Share Link** plus **Backup** JSON export/import.
+- **Google-Sheet-Only Mode (Zero-JSON UX) + Hybrid Overlay:** Paste any public Google Sheet URL directly into CD Hunt (or upload a local `.csv` file) without creating a JSON file or GitHub metadata repository. `cd-hunt` parses the Sheet client-side via [`js/sheet-adapter.js`](./js/sheet-adapter.js), caches the CSV locally for offline shop visits, and preserves your local/D1 checkmarks and unchecks on subsequent reloads. You can also keep a durable JSON snapshot in `cd-metadata` paired with `meta.googleSheetUrl` for live overlay + new row merging.
+- **Pluggable Metadata Loader (Google Sheets, JSON & GitHub):** Paste a public Google Sheet URL (auto-converted from `/edit` to `/export?format=csv`), pick presets from `cd-metadata/index.json`, paste a direct catalog JSON URL (GitHub `blob`/`raw` URLs auto-convert to `raw.githubusercontent.com`), paste a bare GitHub repository or `/tree/<branch>` URL to load its `index.json` presets, or load a local `.json`/`.csv` file. Once the Worker Service Account is configured, CD Hunt's Catalog Loader displays the bot email (`sheetSync.serviceAccountEmail`) with a **Copy Bot Email** button for one-click **Editor** sharing.
+- **Deep Links, Agent Status Link & Auto-Restore:** URL-loaded catalogs sync to `?catalog=<url>`, persist in `localStorage` (`cd_hunt_catalog_url_v1`), and include **Copy Share Link**, **Backup** JSON export/import, plus **Agent Link** (when signed in) to copy a semi-private read-only `/api/share/<token>?format=markdown` URL for Gemini/LLMs without sharing GitHub credentials.
 - **Isolated Storage per Catalog:** Progress, cover caches, view mode, and banner dismissal are automatically namespaced (`deriveStoragePrefix`) so separate catalogs never collide in `localStorage`.
 - **Schema Validation (`schemaVersion: 1`):** Loaded catalogs are validated client-side by `js/validate.js` against [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json).
 - **通常盤-Priority Cover Art Resolution:** Instant offline SVG jewel-case + obi strip covers (`buildJewelCaseDataURI`), lazy two-stage resolution via MusicBrainz/Cover Art Archive (`mbEditions`) and Apple iTunes Search API (`itunesQuery` + `requiredGroups`), multi-edition carousel, and separation of `digitalOnly: true` tracks from the physical shelf-hunting counter.
@@ -30,11 +31,12 @@ cd-hunt/
 ├── css/
 │   └── styles.css                 # Zero-CDN responsive dark UI styles
 ├── js/
-│   ├── validate.js                # Versioned schema validator & GitHub URL normalizer
+│   ├── validate.js                # Versioned schema validator, GitHub & Google Sheets URL normalizer
 │   ├── storage.js                 # Sandbox-safe localStorage wrapper & derived key prefixing
 │   ├── cover-resolver.js          # Offline SVG obi generator + MusicBrainz/iTunes lookup
 │   ├── config.js                  # Static frontend sync endpoint config (window.CDHunt.config)
 │   ├── sync.js                    # GitHub session JWT handling, state merge, & cloud sync client
+│   ├── sheet-adapter.js           # Canonical 9-column Google Sheet CSV parser & hybrid overlay merger
 │   └── app.js                     # App state, catalog loader, rendering, modals, & sync wiring
 ├── schemas/
 │   └── catalog.v1.schema.json     # JSON Schema (Draft 2020-12) for schemaVersion: 1 catalogs
@@ -68,13 +70,14 @@ Optional per-user cloud sync is deployed live using the architecture in [`docs/C
 
 ## Using Your Own Metadata
 
-1. **Curating via Gemini / Google Sheets:** Point Gemini (or create a reusable **Gemini Gem**) at the single self-contained guide [`docs/AGENT_CATALOG_GUIDE.md`](./docs/AGENT_CATALOG_GUIDE.md) and start from the 9-column, 1-release-per-row template [`docs/sample-catalog-sheet.csv`](./docs/sample-catalog-sheet.csv) (or use the Antigravity workspace skill [`.agents/skills/cd-hunt-catalog/SKILL.md`](./.agents/skills/cd-hunt-catalog/SKILL.md) + [`GEMINI.md`](./GEMINI.md)).
+1. **Curating via Gemini / Google Sheets:** Point Gemini (or create a reusable **Gemini Gem**) at the single self-contained guide [`docs/AGENT_CATALOG_GUIDE.md`](./docs/AGENT_CATALOG_GUIDE.md) and start from the 9-column, 1-release-per-row template [`docs/sample-catalog-sheet.csv`](./docs/sample-catalog-sheet.csv) (or use the Antigravity workspace skill [`.agents/skills/cd-hunt-catalog/SKILL.md`](./.agents/skills/cd-hunt-catalog/SKILL.md) + [`GEMINI.md`](./GEMINI.md)). For two-way Column A (`Got it?`) sync back to your Google Sheet, share your Sheet as **Editor** with `cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com` (also shown via **Copy Bot Email** inside the Catalog Loader). When sharing a public template Google Sheet with others, replacing `/edit` with `/copy?title=My+CD+Hunt+Checklist&userstoinvite=cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com` gives them a 1-click confirmation prompt that duplicates the sheet and invites the sync Service Account automatically.
 2. **Creating JSON Catalogs (`schemaVersion: 1`):** Follow [`docs/METADATA.md`](./docs/METADATA.md) and [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json) (see [`docs/sample-catalog.json`](./docs/sample-catalog.json) as a template).
 3. Open the app ([live site](https://dopingus-build.github.io/cd-hunt/) or `index.html`), and load metadata via any of:
+   - **Public Google Sheet URL:** `https://docs.google.com/spreadsheets/d/<id>/edit` (auto-converted to `/export?format=csv` by [`js/sheet-adapter.js`](./js/sheet-adapter.js) and cached locally for offline use)
    - **Direct File URL:** `https://github.com/<owner>/<repo>/blob/main/<catalog>.json` or `https://raw.githubusercontent.com/...`
    - **GitHub Metadata Repository URL:** `https://github.com/<owner>/<repo>` (or `.../tree/<branch>`) containing a root `index.json`
-   - **Local JSON File:** Upload directly from your device via **Load Local JSON File**
-4. For URL-loaded catalogs, your active catalog URL is saved in `localStorage` (`cd_hunt_catalog_url_v1`), synced to `?catalog=`, and shareable via **Copy Share Link**.
+   - **Local JSON / CSV File:** Upload directly from your device via **Load Local JSON / CSV**
+4. For URL-loaded catalogs, your active catalog URL is saved in `localStorage` (`cd_hunt_catalog_url_v1`), synced to `?catalog=`, and shareable via **Copy Share Link**. When signed in with GitHub, click **Agent Link** to copy a semi-private read-only `/api/share/<token>?format=markdown` link so Gemini can read your live checklist without GitHub credentials.
 
 ## Running Tests
 

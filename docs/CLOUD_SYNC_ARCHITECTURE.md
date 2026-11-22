@@ -18,11 +18,12 @@ This document describes the as-built architecture, deployment topology, API cont
 
 | Component | Location / Live Coordinate | Role |
 | --- | --- | --- |
-| **Static Web App** | [`https://dopingus-build.github.io/cd-hunt/`](https://dopingus-build.github.io/cd-hunt/) ([`index.html`](../index.html), [`css/styles.css`](../css/styles.css)) | Zero-build UI shell hosting toolbar sync controls (`#syncStatusPill`, `#githubAuthBtn`, `#githubSignOutBtn`). |
+| **Static Web App** | [`https://dopingus-build.github.io/cd-hunt/`](https://dopingus-build.github.io/cd-hunt/) ([`index.html`](../index.html), [`css/styles.css`](../css/styles.css)) | Zero-build UI shell hosting toolbar sync controls (`#syncStatusPill`, `#githubAuthBtn`, `#copyAgentLinkBtn`, `#githubSignOutBtn`). |
 | **Frontend Config** | [`js/config.js`](../js/config.js) | Exposes `window.CDHunt.config.syncApiUrl = 'https://cd-hunt-sync.tndo.workers.dev'` (setting `''` disables cloud sync cleanly for forks or local standalone bundles). |
 | **Frontend Sync Client** | [`js/sync.js`](../js/sync.js) | Session JWT capture (`#auth_token=`) & validation, loopback-only `?syncApi=` override resolution (`cd_hunt_sync_api_url_v1`), custom-cover extraction, state merge, and `/api/state` HTTP calls. |
-| **App Controller** | [`js/app.js`](../js/app.js) | Startup pull/merge/backfill, `<login>/cd-metadata` discovery, 2.5s debounced explicit-mutation push, mobile `visibilitychange`/`pagehide` `keepalive` flush, and pill status transitions. |
-| **Cloudflare Worker** | `cd-hunt-sync` (`https://cd-hunt-sync.tndo.workers.dev`, [`worker/index.mjs`](../worker/index.mjs) -> [`worker/index.js`](../worker/index.js)) | Stateless OAuth handler, CORS origin checker, HMAC-SHA256 JWT signer/verifier, payload validator, rate limiter, and daily circuit breaker. |
+| **Google Sheet CSV Adapter** | [`js/sheet-adapter.js`](../js/sheet-adapter.js) | RFC-4180 CSV parser supporting both Dashboard and Flat Table canonical 9-column Google Sheets, hybrid JSON overlay merging (`meta.googleSheetUrl`), and catalog-number checklist mapping for write-back. |
+| **App Controller** | [`js/app.js`](../js/app.js) | Startup pull/merge/backfill, `<login>/cd-metadata` discovery, Google Sheet & hybrid JSON loading, 2.5s debounced explicit-mutation push (including optional `sheetSync` payload), mobile `visibilitychange`/`pagehide` `keepalive` flush, **Agent Link** clipboard copy, and pill status transitions. |
+| **Cloudflare Worker** | `cd-hunt-sync` (`https://cd-hunt-sync.tndo.workers.dev`, [`worker/index.mjs`](../worker/index.mjs) -> [`worker/index.js`](../worker/index.js)) | Stateless OAuth handler, CORS origin checker, HMAC-SHA256 JWT signer/verifier (`session` + `read_share`), semi-private `/api/share/<token>` JSON/Markdown reader, RS256 Google Service Account Sheets API v4 Column A write-back, payload validator, rate limiter, and daily circuit breaker. |
 | **Cloudflare D1** | `cd-hunt-db` (UUID `d09adf93-b9ba-4198-896a-5faa1bfcda08`, [`worker/schema.sql`](../worker/schema.sql)) | SQLite storage for per-user synced state JSON, hourly per-user write counters, and global daily UTC usage counters. |
 
 - **Wrangler Configuration ([`worker/wrangler.toml`](../worker/wrangler.toml)):** Pins public `GITHUB_CLIENT_ID = "Ov23liJMYOGioIFPGvzK"`, comma-separated `ALLOWED_ORIGINS = "https://dopingus-build.github.io"`, `APP_REDIRECT_URL = "https://dopingus-build.github.io/cd-hunt/"`, `DAILY_REQ_LIMIT = "80000"`, `DAILY_WRITE_LIMIT = "80000"`, `USER_HOURLY_WRITE_LIMIT = "60"`, `MAX_PAYLOAD_BYTES = "131072"`, and `PAUSE_SYNC = "false"`.
@@ -72,9 +73,10 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | `/auth/login` | `GET` | Public | Signs an HMAC `oauth_state` JWT (`10m` TTL, optional validated `redirect` matching `ALLOWED_ORIGINS` or loopback when `ALLOW_LOCALHOST = "true"`) and returns `302` to GitHub OAuth (`scope` omitted). `400` bad redirect, `500` missing OAuth config. |
 | `/auth/callback` | `GET` | `state` JWT | Verifies `state`, exchanges `code` with `GITHUB_CLIENT_ID` + `GITHUB_CLIENT_SECRET`, fetches `/user`, discards GitHub token, mints session JWT (`30d` TTL), and returns `302` to validated redirect URL `#auth_token=<jwt>`. `400` invalid params/state, `502` GitHub failure. |
-| `/api/state` | `GET` | Bearer JWT | Verifies origin (`403`), JWT (`401`), `PAUSE_SYNC` & daily request threshold (`503`), increments `req_count`, and returns `{ ok: true, paused: false, user, state, updatedAt, resetsAt }`. |
-| `/api/state` | `PUT` | Bearer JWT | Verifies origin (`403`), JWT (`401`), `PAUSE_SYNC` & daily write threshold (`503`), payload size `<= MAX_PAYLOAD_BYTES` (`413`), schema validation (`400`), per-user hourly cap (`429` + `Retry-After`), increments counters, upserts `user_state`, and returns `{ ok: true, paused: false, updatedAt, resetsAt }`. |
-| `/api/status` | `GET` | Public | Verifies origin (`403`) and returns `{ ok: true, paused, reason, utcDate, resetsAt, usage: { reqCount, writeCount }, limits }` without consuming write quota. |
+| `/api/state` | `GET` | Bearer JWT | Verifies origin (`403`), JWT (`401`), `PAUSE_SYNC` & daily request threshold (`503`), increments `req_count`, and returns `{ ok: true, paused: false, user, state, updatedAt, resetsAt, shareToken, shareUrl }`. |
+| `/api/state` | `PUT` | Bearer JWT | Verifies origin (`403`), JWT (`401`), `PAUSE_SYNC` & daily write threshold (`503`), payload size `<= MAX_PAYLOAD_BYTES` (`413`), schema validation (`400`), per-user hourly cap (`429` + `Retry-After`), strips transient `sheetSync`, increments counters, upserts `user_state`, optionally syncs Column A (`Got it?`) back to Google Sheets via `GOOGLE_SERVICE_ACCOUNT_JSON`, and returns `{ ok: true, paused: false, updatedAt, resetsAt, shareToken, shareUrl, sheetSync? }`. |
+| `/api/share/<token>` | `GET` | Capability JWT (`90d` TTL) | Public read-only endpoint (`Access-Control-Allow-Origin: *`, `Cache-Control: no-store`) for Gemini/agents lacking GitHub credentials. Verifies `purpose === 'read_share'` (`401`), obeys daily read circuit breaker (`503`), strips custom covers/internal fields, and returns `{ ok, user: { login }, updatedAt, activeCatalogUrl, catalogs }` or Markdown via `?format=markdown`. Also accepts `/api/share?token=<token>`. |
+| `/api/status` | `GET` | Public | Verifies origin (`403`) and returns `{ ok: true, paused, reason, utcDate, resetsAt, usage: { reqCount, writeCount }, limits, sheetSync: { configured, serviceAccountEmail } }` without consuming write quota. |
 | `/*` | `OPTIONS` | Origin | CORS preflight (`204` if origin allowed, `403` otherwise). Unknown routes/methods return `404`/`405`. |
 
 ---
@@ -211,7 +213,7 @@ When `CDHunt.config.syncApiUrl === ''`, `#syncStatusPill`, `#githubAuthBtn`, and
 ## 7. Security Model
 
 - **Publicly Committed Files (`cd-hunt/worker/`):** [`worker/index.js`](../worker/index.js), [`worker/index.mjs`](../worker/index.mjs), [`worker/schema.sql`](../worker/schema.sql), [`worker/wrangler.toml`](../worker/wrangler.toml) (public `GITHUB_CLIENT_ID`, D1 UUID, non-secret `[vars]`).
-- **Encrypted Cloudflare Secrets (`wrangler secret put`):** `GITHUB_CLIENT_SECRET` and `JWT_SECRET` (never committed; local `.dev.vars` and `.wrangler/` are gitignored).
+- **Encrypted Cloudflare Secrets (`wrangler secret put`):** `GITHUB_CLIENT_SECRET`, `JWT_SECRET`, and optional `GOOGLE_SERVICE_ACCOUNT_JSON` for two-way Column A Google Sheet checkoff sync (never committed; local `.dev.vars` and `.wrangler/` are gitignored).
 - **Origin & Token Controls:**
   - CORS and OAuth `?redirect=` validate strictly against comma-separated `ALLOWED_ORIGINS` (plus localhost/127.0.0.1 only when `ALLOW_LOCALHOST = "true"`).
   - Unauthenticated calls to `/api/state` fail with `HTTP 401`.

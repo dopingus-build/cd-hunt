@@ -12,8 +12,10 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
     const html = await res.text();
 
     assert.ok(html.includes('id="githubAuthBtn"'), 'Expected #githubAuthBtn in live HTML');
+    assert.ok(html.includes('id="copyAgentLinkBtn"'), 'Expected #copyAgentLinkBtn in live HTML');
     assert.ok(html.includes('id="githubSignOutBtn"'), 'Expected #githubSignOutBtn in live HTML');
     assert.ok(html.includes('id="syncStatusPill"'), 'Expected #syncStatusPill in live HTML');
+    assert.ok(html.includes('id="sheetSyncBotBanner"'), 'Expected #sheetSyncBotBanner in live HTML');
 
     const orderedScripts = [
       '<script src="./js/validate.js"></script>',
@@ -21,6 +23,7 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
       '<script src="./js/cover-resolver.js"></script>',
       '<script src="./js/config.js"></script>',
       '<script src="./js/sync.js"></script>',
+      '<script src="./js/sheet-adapter.js"></script>',
       '<script src="./js/app.js"></script>'
     ];
     let lastIdx = -1;
@@ -40,6 +43,7 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
 
     for (const assetPath of [
       'js/sync.js',
+      'js/sheet-adapter.js',
       'js/app.js',
       'js/validate.js',
       'js/storage.js',
@@ -64,6 +68,7 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
     assert.match(String(body.utcDate), /^\d{4}-\d{2}-\d{2}$/);
     assert.ok(body.resetsAt);
     assert.ok(body.limits && body.limits.dailyReqLimit > 0 && body.limits.dailyWriteLimit > 0);
+    assert.ok(body.sheetSync && typeof body.sheetSync.configured === 'boolean');
   });
 
   it('allows CORS preflight from SITE_ORIGIN and rejects untrusted foreign origins', async () => {
@@ -121,5 +126,13 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
       }
     });
     assert.equal(invalidAuthRes.status, 401);
+  });
+
+  it('allows cross-origin GET /api/share/* from external origins and rejects invalid share tokens with 401', async () => {
+    const res = await fetch(`${WORKER_URL}/api/share/invalid-token`, {
+      headers: { Origin: 'https://gemini.google.com' }
+    });
+    assert.equal(res.status, 401);
+    assert.equal(res.headers.get('access-control-allow-origin'), '*');
   });
 });

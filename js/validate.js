@@ -284,14 +284,44 @@
   }
 
   /**
+   * Extract Google Sheet ID and optional tab gid from a Google Sheets URL.
+   * @param {string} rawUrl
+   * @returns {{ sheetId: string, gid: string | null } | null}
+   */
+  function extractGoogleSheetId(rawUrl) {
+    const trimmed = String(rawUrl || '').trim();
+    if (!trimmed) return null;
+    const match = trimmed.match(
+      /^https:\/\/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]+)(?:\/[^\s?#]*)?(?:\?([^#]*))?(?:#(.*))?$/i
+    );
+    if (!match) return null;
+    const sheetId = match[1];
+    const queryStr = match[2] || '';
+    const hashStr = match[3] || '';
+    const queryGid = queryStr.match(/(?:^|&)gid=(\d+)/i);
+    const hashGid = hashStr.match(/(?:^|&)gid=(\d+)/i);
+    const gid = (queryGid && queryGid[1]) || (hashGid && hashGid[1]) || null;
+    return { sheetId: sheetId, gid: gid };
+  }
+
+  /**
    * Normalize a catalog metadata URL, converting GitHub blob/raw, tree, or repository root URLs
-   * to raw.githubusercontent.com URLs.
+   * to raw.githubusercontent.com URLs, and Google Sheets URLs to public CSV export URLs.
    * @param {string} rawUrl
    * @returns {string}
    */
   function normalizeCatalogUrl(rawUrl) {
     const trimmed = String(rawUrl || '').trim();
     if (!trimmed) return '';
+    const sheetInfo = extractGoogleSheetId(trimmed);
+    if (sheetInfo) {
+      return (
+        'https://docs.google.com/spreadsheets/d/' +
+        sheetInfo.sheetId +
+        '/export?format=csv' +
+        (sheetInfo.gid ? '&gid=' + sheetInfo.gid : '')
+      );
+    }
     const match = trimmed.match(
       /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:blob|raw)\/([^?#]+?)(?:[?#].*)?$/i
     );
@@ -316,12 +346,14 @@
   if (root) {
     root.validateCatalog = validateCatalog;
     root.normalizeCatalogUrl = normalizeCatalogUrl;
+    root.extractGoogleSheetId = extractGoogleSheetId;
     root.CDHunt = root.CDHunt || {};
     root.CDHunt.validateCatalog = validateCatalog;
     root.CDHunt.normalizeCatalogUrl = normalizeCatalogUrl;
+    root.CDHunt.extractGoogleSheetId = extractGoogleSheetId;
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { validateCatalog, normalizeCatalogUrl };
+    module.exports = { validateCatalog, normalizeCatalogUrl, extractGoogleSheetId };
   }
 })(typeof window !== 'undefined' ? window : typeof globalThis !== 'undefined' ? globalThis : null);
