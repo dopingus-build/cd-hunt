@@ -100,35 +100,121 @@
     for (let i = 0; i < editions.length; i++) {
       const ed = editions[i];
       if (!ed || !ed.catno) continue;
-      try {
-        const mbUrl = 'https://musicbrainz.org/ws/2/release/?query=catno:' + encodeURIComponent(ed.catno) + '&fmt=json&limit=4';
-        const res = await fetchFn(mbUrl, { headers: { Accept: 'application/json' } });
-        if (!res.ok) continue;
-        const data = await res.json();
-        const releases = Array.isArray(data.releases) ? data.releases : [];
-        for (let r = 0; r < releases.length; r++) {
-          const rel = releases[r];
-          if (!rel || !rel.id) continue;
-          const caaUrl = 'https://coverartarchive.org/release/' + rel.id + '/front-500';
-          if (seen.has(caaUrl)) continue;
-          const ok = await verifyImageLoad(caaUrl);
-          if (ok) {
-            seen.add(caaUrl);
-            variants.push({
-              url: caaUrl,
-              label: ed.label || '通常盤 Regular',
-              catNo: ed.catno,
-              source: 'musicbrainz',
-              isRegular: (ed.label || '').indexOf('通常') !== -1 || ed.catno === item.regCatNo
-            });
-            break;
-          }
+      const cleanCat = String(ed.catno).trim().replace(/[～〜]/g, '~');
+      const catCandidates = [cleanCat];
+      if (cleanCat.indexOf('~') !== -1) {
+        const baseCat = cleanCat.split('~')[0].trim();
+        if (baseCat && catCandidates.indexOf(baseCat) === -1) {
+          catCandidates.push(baseCat);
         }
-      } catch (e) {
-        // Continue silently
+      }
+
+      let foundForEdition = false;
+      for (let c = 0; c < catCandidates.length && !foundForEdition; c++) {
+        try {
+          const mbUrl = 'https://musicbrainz.org/ws/2/release/?query=catno:' + encodeURIComponent(catCandidates[c]) + '&fmt=json&limit=4';
+          const res = await fetchFn(mbUrl, { headers: { Accept: 'application/json' } });
+          if (!res.ok) continue;
+          const data = await res.json();
+          const releases = Array.isArray(data.releases) ? data.releases : [];
+          for (let r = 0; r < releases.length; r++) {
+            const rel = releases[r];
+            if (!rel || !rel.id) continue;
+            const caaUrl = 'https://coverartarchive.org/release/' + rel.id + '/front-500';
+            if (seen.has(caaUrl)) continue;
+            const ok = await verifyImageLoad(caaUrl);
+            if (ok) {
+              seen.add(caaUrl);
+              variants.push({
+                url: caaUrl,
+                label: ed.label || '通常盤 Regular',
+                catNo: cleanCat,
+                source: 'musicbrainz',
+                isRegular: (ed.label || '').indexOf('通常') !== -1 || cleanCat === item.regCatNo
+              });
+              foundForEdition = true;
+              break;
+            }
+          }
+        } catch (e) {
+          // Continue silently
+        }
       }
     }
     return variants;
+  }
+
+  const CJK_CHAR_REGEX = /[\u3040-\u30ff\u3400-\u9fff]/;
+
+  function stripNestedParens(str) {
+    let cur = String(str || '');
+    let prev;
+    do {
+      prev = cur;
+      cur = cur.replace(/\s*(?:\([^()（）]*\)|（[^()（）]*）)(?![A-Za-z0-9_\u3040-\u30ff\u3400-\u9fff])\s*/g, ' ');
+    } while (cur !== prev);
+    return cur.replace(/\s+/g, ' ').trim();
+  }
+
+  function normalizeForMatch(str) {
+    return String(str || '')
+      .normalize('NFKC')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[〜～~'"“”‘’「」『』・･:：!！?？/／&＆\-–—_.,()（）\[\]]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function matchesRequiredGroups(rawHay, groups) {
+    const list = Array.isArray(groups) ? groups : [];
+    if (list.length === 0) return true;
+    const normHay = normalizeForMatch(rawHay);
+    const compactHay = normHay.replace(/\s+/g, '');
+
+    return list.every(function (grp) {
+      if (!Array.isArray(grp) || grp.length === 0) return true;
+      return grp.some(function (kw) {
+        const normKw = normalizeForMatch(kw);
+        if (!normKw) return false;
+        if (normHay.indexOf(normKw) !== -1) return true;
+        if (CJK_CHAR_REGEX.test(normKw) && compactHay.indexOf(normKw.replace(/\s+/g, '')) !== -1) {
+          return true;
+        }
+        return false;
+      });
+    });
+  }
+
+  /**
+   * Build a concise Google Image Search query string for a catalog item's jacket.
+   * @param {object} item
+   * @returns {string}
+   */
+  function buildJacketSearchQuery(item) {
+    const entry = item && typeof item === 'object' ? item : {};
+    const cleanArtist = stripNestedParens(entry.artist || '')
+      .replace(/\s+(?:feat\.?|ft\.?|featuring|with|w\/)\s+.*$/i, '')
+      .replace(/^["'“”‘’「『]+|["'“”‘’」』]+$/g, '')
+      .replace(/["“”]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const rawTitle = entry.titleJa || entry.title || '';
+    const cleanTitle = stripNestedParens(rawTitle)
+      .replace(/^["'“”‘’「『]+|["'“”‘’」』]+$/g, '')
+      .replace(/["“”]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (entry.digitalOnly) {
+      return [cleanArtist, cleanTitle, 'ジャケット'].filter(Boolean).join(' ').trim();
+    }
+
+    const rawCat = String(entry.regCatNo || '').trim().replace(/[～〜]/g, '~');
+    const regCat = rawCat && !/^(?:n\/a|digital(?:-only)?|—|-)$/i.test(rawCat) ? rawCat : '';
+    return [regCat, cleanArtist, cleanTitle, '通常盤', 'CD'].filter(Boolean).join(' ').trim();
   }
 
   function classifyItunesEdition(collectionName, isDigital) {
@@ -163,47 +249,94 @@
     const entities = item.digitalOnly ? ['song', 'album'] : ['album'];
     const seen = new Set();
 
-    for (let c = 0; c < countries.length; c++) {
-      const country = countries[c];
-      for (let e = 0; e < entities.length; e++) {
-        const entity = entities[e];
-        try {
-          const url = 'https://itunes.apple.com/search?term=' + encodeURIComponent(item.itunesQuery) + '&country=' + country + '&entity=' + entity + '&limit=8';
-          const res = await fetchFn(url);
-          if (!res.ok) continue;
-          const data = await res.json();
-          const results = Array.isArray(data.results) ? data.results : [];
+    async function queryItunesPass(term, passCountries, passEntities) {
+      const cleanTerm = String(term || '').trim();
+      if (!cleanTerm) return;
 
-          for (let i = 0; i < results.length; i++) {
-            if (candidates.length >= 6) break;
-            const r = results[i];
-            const hay = ((r.trackName || '') + ' ' + (r.collectionName || '') + ' ' + (r.artistName || '')).toLowerCase();
-            const isValid = groups.every(function (grp) {
-              return grp.some(function (kw) {
-                return hay.indexOf(kw.toLowerCase()) !== -1;
-              });
-            });
-            if (isValid && r.artworkUrl100) {
-              const hiRes = r.artworkUrl100.replace('100x100bb', '600x600bb');
-              if (seen.has(hiRes)) continue;
-              const ok = await verifyImageLoad(hiRes);
-              if (ok) {
-                seen.add(hiRes);
-                const edInfo = classifyItunesEdition(r.collectionName, !!item.digitalOnly);
-                candidates.push({
-                  url: hiRes,
-                  label: edInfo.label,
-                  catNo: edInfo.isRegular ? (item.regCatNo || '') : '',
-                  source: 'itunes-' + country,
-                  isRegular: edInfo.isRegular,
-                  score: edInfo.score + (country === 'jp' ? 10 : 0)
-                });
+      for (let c = 0; c < passCountries.length; c++) {
+        const country = passCountries[c];
+        for (let e = 0; e < passEntities.length; e++) {
+          const entity = passEntities[e];
+          try {
+            const url = 'https://itunes.apple.com/search?term=' + encodeURIComponent(cleanTerm) + '&country=' + country + '&entity=' + entity + '&limit=8';
+            const res = await fetchFn(url);
+            if (!res.ok) continue;
+            const data = await res.json();
+            const results = Array.isArray(data.results) ? data.results : [];
+
+            for (let i = 0; i < results.length; i++) {
+              if (candidates.length >= 6) break;
+              const r = results[i];
+              const hay = (r.trackName || '') + ' ' + (r.collectionName || '') + ' ' + (r.artistName || '');
+              if (matchesRequiredGroups(hay, groups) && r.artworkUrl100) {
+                const hiRes = r.artworkUrl100.replace('100x100bb', '600x600bb');
+                if (seen.has(hiRes)) continue;
+                const ok = await verifyImageLoad(hiRes);
+                if (ok) {
+                  seen.add(hiRes);
+                  const edInfo = classifyItunesEdition(r.collectionName, !!item.digitalOnly);
+                  candidates.push({
+                    url: hiRes,
+                    label: edInfo.label,
+                    catNo: edInfo.isRegular ? (item.regCatNo || '') : '',
+                    source: 'itunes-' + country,
+                    isRegular: edInfo.isRegular,
+                    score: edInfo.score + (country === 'jp' ? 10 : 0)
+                  });
+                }
               }
             }
+          } catch (err) {
+            // Continue
           }
-        } catch (err) {
-          // Continue
         }
+      }
+    }
+
+    await queryItunesPass(item.itunesQuery, countries, entities);
+
+    if (candidates.length === 0) {
+      const primaryQuery = String(item.itunesQuery || '').trim();
+      const fallbackTerms = [];
+      const seenTerms = new Set([primaryQuery.toLowerCase()]);
+
+      function addFallbackTerm(t) {
+        const clean = String(t || '').trim();
+        if (!clean || fallbackTerms.length >= 2) return;
+        const lower = clean.toLowerCase();
+        if (seenTerms.has(lower)) return;
+        seenTerms.add(lower);
+        fallbackTerms.push(clean);
+      }
+
+      if (item.artistJa && primaryQuery.indexOf(item.artistJa) === -1) {
+        const cleanArtist = stripNestedParens(item.artist || '')
+          .replace(/\s+(?:feat\.?|ft\.?|featuring|with|w\/)\s+.*$/i, '')
+          .trim();
+        const baseTitle = stripNestedParens(item.title || '')
+          .replace(/^["'“”‘’「『]+|["'“”‘’」』]+$/g, '')
+          .replace(/["“”]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (item.artist && primaryQuery.indexOf(item.artist) !== -1) {
+          addFallbackTerm(primaryQuery.replace(item.artist, item.artistJa));
+        } else if (cleanArtist && primaryQuery.indexOf(cleanArtist) !== -1) {
+          addFallbackTerm(primaryQuery.replace(cleanArtist, item.artistJa));
+        } else if (baseTitle) {
+          addFallbackTerm(item.artistJa + ' ' + baseTitle);
+        }
+      }
+
+      if (item.titleJa && String(item.titleJa).trim()) {
+        addFallbackTerm(item.titleJa);
+      }
+
+      for (let f = 0; f < fallbackTerms.length && candidates.length === 0; f++) {
+        await queryItunesPass(fallbackTerms[f], ['jp'], ['album', 'song']);
+      }
+
+      if (candidates.length === 0 && !item.digitalOnly) {
+        await queryItunesPass(primaryQuery, ['jp'], ['song']);
       }
     }
 
@@ -226,6 +359,8 @@
     escapeAttr: escapeAttr,
     buildJewelCaseDataURI: buildJewelCaseDataURI,
     verifyImageLoad: verifyImageLoad,
+    normalizeForMatch: normalizeForMatch,
+    buildJacketSearchQuery: buildJacketSearchQuery,
     tryMusicBrainzCovers: tryMusicBrainzCovers,
     classifyItunesEdition: classifyItunesEdition,
     tryItunesCovers: tryItunesCovers

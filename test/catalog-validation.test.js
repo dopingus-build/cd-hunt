@@ -1607,7 +1607,162 @@ describe('Google Sheet URL normalization & sheet-adapter CSV parsing/merging (js
     assert.equal(yama.itunesQuery, 'yama slash');
     assert.deepEqual(yama.requiredGroups, [['slash'], ['yama']]);
     assert.equal(rokudenashi.itunesQuery, 'Rokudenashi ホウキボシ');
-    assert.deepEqual(rokudenashi.requiredGroups, [['ホウキボシ'], ['Rokudenashi']]);
+    assert.deepEqual(rokudenashi.requiredGroups, [['ホウキボシ', 'Houkiboshi'], ['Rokudenashi']]);
+  });
+
+  it('builds clean cover queries, requiredGroups, editions, and Jacket Search URLs across complex real Sheet rows', async () => {
+    const complexCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'FALSE,Anime,(K)NoW_NAME,"""KNOCK on the CORE / Ash-like Snow"" (Fairy gone S1 OP & ED)",THCS-60240,Look under ノ,¥700,Medium,Suruga-ya',
+      'FALSE,Anime,ChouCho (ちょうちょ),"""transient blue"" (Limited Acoustic Single — includes ""Authentic symphony (Acoustic ver.)"")",LZM-2118 (Venue/Web Ltd),Look under チ,¥900,High,Mandarake',
+      'FALSE,Anime,EGOIST,"GREATEST HITS 2011-2017 ""ALTER EGO"" (Best Album)",VVCL-1155 (Reg) / VVCL-1151～2 (Ltd A BD),Look under エ,¥1200,Medium,Suruga-ya',
+      'FALSE,Anime,SawanoHiroyuki[nZk]:LiSA (澤野弘之),"""narrative / NOISEofRAIN"" (Mobile Suit Gundam NT Theme)",VVCL-1362 (Reg CD) / VVCL-1360～1 (Ltd CD+DVD),Look under サ,¥800,Medium,Suruga-ya',
+      'FALSE,Anime,Shiyui (シユイ),"""ホロウ"" (Hollow) (Demon Lord 2099 OP, CD+Blu-ray)",AICL-4670～4671,Look under シ,¥2400,Medium,Animate',
+      'FALSE,Anime,Aooo,"""DAYS!"" (Grow Up Show ED + ""ユラリユレル"" cover, CD+Blu-ray)",SRCL-13763～4,Look under ア,¥1000,Low,Tower Records',
+      'FALSE,Anime,Lapis Re:LiGHTs (ラピスリライツ),"""私たちのSTARTRAIL / プラネタリウム""",VICL-37548 (Reg) / VIZL-1779 (Ltd),Look under ラ,¥600,Medium,Suruga-ya',
+      'FALSE,Anime,Mia REGINA,"""月海の揺り籠"" (Tsukiumi no Yurikago) (Aquatope ED1)",LACM-24156 (Anime CD Reg) / LACM-24155 (Artist CD+BD Ltd),Look under ミ,¥500,Medium,Suruga-ya',
+      'FALSE,Seiyuu,Rico Sasaki (佐々木李子),スタート! (Start!) (Artist Editions ONLY for Track 4 "フレンドパスワード" — Skip AKCY-58073),AKCY-58075 (Artist CD+Photobook) / AKCY-58074/B (Artist CD+DVD),Look under サ,¥1200,High,Animate',
+      'FALSE,Anime,Void_Chords feat. LIO,"""FLARE"" (Arifureta S1 OP)",LACM-14917,Look under ボ,¥500,Medium,Book Off',
+      'FALSE,OST,SukaSuka OST,青い記憶 (Aoi Kioku) (Shuumatsu Nani Shitemasu ka? 2-CD Set),LACA-9522～9523,Look under ア,¥2000,High,Mandarake',
+      'FALSE,Anime,Princession Orchestra,Character Single: Ripple (プリンセッション・オーケストラ キャラクターソング Ripple),KICM-3387～3388,Look under プ,¥600,Low,Animate'
+    ].join('\n');
+
+    const parsed = sheetAdapterModule.parseGoogleSheetCsv(complexCsv);
+    const items = parsed.catalog.items;
+    assert.equal(items.length, 12);
+
+    const byId = new Map(items.map((x) => [x.id, x]));
+    assert.equal(byId.get('sheet-thcs-60240').itunesQuery, '(K)NoW_NAME KNOCK on the CORE');
+    assert.deepEqual(byId.get('sheet-thcs-60240').requiredGroups, [['KNOCK on the CORE', 'Ash-like Snow'], ['(K)NoW_NAME']]);
+
+    assert.equal(byId.get('sheet-lzm-2118').itunesQuery, 'ChouCho transient blue');
+    assert.deepEqual(byId.get('sheet-lzm-2118').requiredGroups, [['transient blue'], ['ChouCho', 'ちょうちょ']]);
+
+    assert.equal(byId.get('sheet-vvcl-1155').itunesQuery, 'EGOIST GREATEST HITS 2011-2017 ALTER EGO');
+    assert.equal(byId.get('sheet-vvcl-1155').mbEditions[1].catno, 'VVCL-1151~2');
+    assert.equal(byId.get('sheet-vvcl-1155').mbEditions[1].label, 'Ltd A BD');
+
+    assert.equal(byId.get('sheet-vvcl-1362').itunesQuery, 'SawanoHiroyuki[nZk] narrative');
+    assert.ok(byId.get('sheet-vvcl-1362').requiredGroups[1].includes('LiSA'));
+    assert.ok(byId.get('sheet-vvcl-1362').requiredGroups[1].includes('澤野弘之'));
+
+    assert.equal(byId.get('sheet-aicl-4670-4671').regCatNo, 'AICL-4670~4671');
+    assert.equal(byId.get('sheet-aicl-4670-4671').itunesQuery, 'Shiyui ホロウ');
+    assert.deepEqual(byId.get('sheet-aicl-4670-4671').requiredGroups, [['ホロウ', 'Hollow'], ['Shiyui', 'シユイ']]);
+
+    // English editorial notes mentioning a Japanese track must NOT become titleJa
+    assert.equal(byId.get('sheet-srcl-13763-4').titleJa, undefined);
+    assert.equal(byId.get('sheet-akcy-58075').titleJa, undefined);
+    // "Skip AKCY-58073" in Title column must NOT leak into mbEditions
+    assert.deepEqual(byId.get('sheet-akcy-58075').mbEditions.map((e) => e.catno), ['AKCY-58075', 'AKCY-58074']);
+    assert.equal(byId.get('sheet-akcy-58075').itunesQuery, 'Rico Sasaki スタート!');
+
+    // Lapis Re:LiGHTs is NOT chopped at colon, while embedded STARTRAIL & LiGHTs become matching tokens
+    assert.equal(byId.get('sheet-vicl-37548').itunesQuery, 'Lapis Re:LiGHTs 私たちのSTARTRAIL');
+    assert.ok(byId.get('sheet-vicl-37548').requiredGroups[0].includes('STARTRAIL'));
+    assert.ok(byId.get('sheet-vicl-37548').requiredGroups[1].includes('LiGHTs'));
+
+    // "(Anime CD Reg)" beats "(Artist CD+BD Ltd)" as regular edition
+    assert.equal(byId.get('sheet-lacm-24156').regCatNo, 'LACM-24156');
+    assert.equal(byId.get('sheet-lacm-24156').mbEditions[0].label, 'Anime CD Reg');
+
+    // feat. stripped from artist query; OST artist alias omitted from requiredGroups; genuine titleJa preserved
+    assert.equal(byId.get('sheet-lacm-14917').itunesQuery, 'Void_Chords FLARE');
+    assert.equal(byId.get('sheet-laca-9522-9523').itunesQuery, '青い記憶');
+    assert.deepEqual(byId.get('sheet-laca-9522-9523').requiredGroups, [['青い記憶', 'Aoi Kioku']]);
+    assert.equal(byId.get('sheet-kicm-3387-3388').itunesQuery, 'Princession Orchestra Ripple');
+    assert.equal(byId.get('sheet-kicm-3387-3388').titleJa, 'プリンセッション・オーケストラ キャラクターソング Ripple');
+
+    // Jacket Google Search query builder (physical vs digitalOnly)
+    assert.equal(
+      coverResolverModule.buildJacketSearchQuery(byId.get('sheet-akcy-58075')),
+      'AKCY-58075 Rico Sasaki スタート! 通常盤 CD'
+    );
+    assert.equal(
+      coverResolverModule.buildJacketSearchQuery({
+        digitalOnly: true,
+        regCatNo: 'DIGITAL-ONLY',
+        artist: 'Hanatan',
+        title: '"gradation"'
+      }),
+      'Hanatan gradation ジャケット'
+    );
+
+    // coverResolver normalized matching + artistJa/song fallbacks + MusicBrainz range fallback
+    class OkImg {
+      set src(_) {
+        this.naturalWidth = 600;
+        this.naturalHeight = 600;
+        if (this.onload) this.onload();
+      }
+    }
+
+    const itunesFetched = [];
+    const normFetch = async (url) => {
+      itunesFetched.push(url);
+      if (url.includes(encodeURIComponent('EGOIST GREATEST HITS 2011-2017 ALTER EGO')) && url.includes('country=jp')) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              results: [{ trackName: 'EGOIST', collectionName: 'GREATEST HITS 2011-2017 “ALTER EGO”', artistName: 'EGOIST', artworkUrl100: 'https://ex.com/alter/100x100bb.jpg' }]
+            };
+          }
+        };
+      }
+      if (url.includes(encodeURIComponent('佐々木李子 スタート!'))) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              results: [{ trackName: 'スタート!', collectionName: 'スタート! - Single', artistName: '佐々木 李子', artworkUrl100: 'https://ex.com/rico/100x100bb.jpg' }]
+            };
+          }
+        };
+      }
+      if (url.includes(encodeURIComponent('(K)NoW_NAME KNOCK on the CORE')) && url.includes('entity=song') && url.includes('country=jp')) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              results: [{ trackName: 'KNOCK on the CORE', collectionName: 'OP&ED「KNOCK on the CORE/Ash-like Snow」', artistName: '(K)NoW_NAME', artworkUrl100: 'https://ex.com/knock/100x100bb.jpg' }]
+            };
+          }
+        };
+      }
+      return { ok: true, async json() { return { results: [] }; } };
+    };
+
+    await withMockBrowserGlobals({ fetch: normFetch, Image: OkImg }, async () => {
+      const egoistCovers = await coverResolverModule.tryItunesCovers(byId.get('sheet-vvcl-1155'));
+      assert.equal(egoistCovers[0].url, 'https://ex.com/alter/600x600bb.jpg');
+
+      const ricoCovers = await coverResolverModule.tryItunesCovers(byId.get('sheet-akcy-58075'));
+      assert.equal(ricoCovers[0].url, 'https://ex.com/rico/600x600bb.jpg');
+      assert.ok(itunesFetched.some((u) => u.includes(encodeURIComponent('佐々木李子 スタート!'))));
+
+      const knowCovers = await coverResolverModule.tryItunesCovers(byId.get('sheet-thcs-60240'));
+      assert.equal(knowCovers[0].url, 'https://ex.com/knock/600x600bb.jpg');
+      assert.ok(itunesFetched.some((u) => u.includes('entity=song') && u.includes(encodeURIComponent('(K)NoW_NAME KNOCK on the CORE'))));
+    });
+
+    const mbUrls = [];
+    const mbFetch = async (url) => {
+      mbUrls.push(url);
+      if (url.includes('catno:AICL-4670~4671')) {
+        return { ok: true, async json() { return { releases: [] }; } };
+      }
+      if (url.includes('catno:AICL-4670')) {
+        return { ok: true, async json() { return { releases: [{ id: 'rel-hollow-1' }] }; } };
+      }
+      return { ok: true, async json() { return { releases: [] }; } };
+    };
+    const mbCovers = await withMockBrowserGlobals({ fetch: mbFetch, Image: OkImg }, () =>
+      coverResolverModule.tryMusicBrainzCovers(byId.get('sheet-aicl-4670-4671'))
+    );
+    assert.equal(mbCovers.length, 1);
+    assert.equal(mbCovers[0].catNo, 'AICL-4670~4671');
+    assert.equal(mbUrls.length, 2);
   });
 
   it('auto-deduplicates within Google Sheets, detects duplicates without digital placeholder false positives, and deduplicates merged new rows', () => {

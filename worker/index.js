@@ -15,7 +15,7 @@ const OAUTH_STATE_TTL_SECONDS = 600;
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const SHARE_TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60;
 const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
-const SHEET_CAT_CODE_REGEX = /\b([A-Z]{2,6}-\d{3,6}(?:~\d+)?)\b/g;
+const SHEET_CAT_CODE_REGEX = /\b([A-Z]{2,6}-\d{3,6}(?:[~～〜]\d+)?)\b/g;
 const STORAGE_PREFIX_REGEX = /^cd_hunt_[a-z0-9_]+_[0-9a-f]{8}$/;
 
 const textEncoder = new TextEncoder();
@@ -503,7 +503,7 @@ async function syncChecklistToGoogleSheet(sheetSyncReq, env, nowMs) {
   const checklistByCatNo = {};
   if (sheetSyncReq && isPlainObject(sheetSyncReq.checklistByCatNo)) {
     for (const [k, v] of Object.entries(sheetSyncReq.checklistByCatNo)) {
-      const norm = String(k || '').trim().toUpperCase();
+      const norm = String(k || '').trim().replace(/[～〜]/g, '~').toUpperCase();
       if (norm) checklistByCatNo[norm] = Boolean(v);
     }
   }
@@ -562,17 +562,25 @@ async function syncChecklistToGoogleSheet(sheetSyncReq, env, nowMs) {
       const colC = String(row[2] || '').trim().toUpperCase();
       if (colA === 'GOT IT?' || colC === 'ARTIST / FRANCHISE') continue;
 
-      const searchHay = [String(row[4] || ''), String(row[3] || '')].join(' ');
-      let matchedCode = null;
-      let match;
-      SHEET_CAT_CODE_REGEX.lastIndex = 0;
-      while ((match = SHEET_CAT_CODE_REGEX.exec(searchHay)) !== null) {
-        const candidate = match[1].toUpperCase();
-        if (Object.prototype.hasOwnProperty.call(checklistByCatNo, candidate)) {
-          matchedCode = candidate;
-          break;
+      function findCodeInText(text) {
+        let match;
+        SHEET_CAT_CODE_REGEX.lastIndex = 0;
+        while ((match = SHEET_CAT_CODE_REGEX.exec(String(text || ''))) !== null) {
+          const candidate = match[1].replace(/[～〜]/g, '~').toUpperCase();
+          if (Object.prototype.hasOwnProperty.call(checklistByCatNo, candidate)) {
+            return candidate;
+          }
+          if (candidate.indexOf('~') !== -1) {
+            const baseCat = candidate.split('~')[0];
+            if (Object.prototype.hasOwnProperty.call(checklistByCatNo, baseCat)) {
+              return baseCat;
+            }
+          }
         }
+        return null;
       }
+
+      const matchedCode = findCodeInText(row[4]) || findCodeInText(row[3]);
       if (!matchedCode) continue;
 
       const targetVal = checklistByCatNo[matchedCode] ? 'TRUE' : 'FALSE';

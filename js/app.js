@@ -1301,7 +1301,9 @@
       triggerCarouselAnimation(artBox, direction);
     }
 
-    const qText = (item.regCatNo || '') + ' ' + item.artist + ' ' + (item.titleJa || item.title) + ' 通常盤 CD';
+    const qText = typeof coverResolver.buildJacketSearchQuery === 'function'
+      ? coverResolver.buildJacketSearchQuery(item)
+      : [item.regCatNo || '', item.artist || '', item.titleJa || item.title || '', item.digitalOnly ? 'ジャケット' : '通常盤 CD'].filter(Boolean).join(' ').trim();
     document.getElementById('lbGoogleSearchLink').href = 'https://www.google.com/search?tbm=isch&q=' + encodeURIComponent(qText);
 
     const isAcquired = !!state.acquiredMap[item.id];

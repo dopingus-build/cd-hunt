@@ -2679,4 +2679,96 @@ describe('Google Sheet direct loading, JSON hybrid overlay, and Agent Link butto
     assert.ok(sniffToast.includes('Loaded local CSV: sheet-export.txt'));
     assert.ok(sniffToast.includes('Merged 1 duplicate row (CPCA-1004)'));
   });
+
+  it('produces clean Crate Flip jacket search links and resolves iTunes covers from real-world Sheet rows', async () => {
+    const sheetCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'FALSE,Anime,(K)NoW_NAME,"""KNOCK on the CORE / Ash-like Snow"" (Fairy gone S1 OP & ED)",THCS-60240,Look under ノ,¥700,Medium,Suruga-ya',
+      'FALSE,Seiyuu,Rico Sasaki (佐々木李子),スタート! (Start!) (Artist Editions ONLY for Track 4 "フレンドパスワード" — Skip AKCY-58073),AKCY-58075 (Artist CD+Photobook) / AKCY-58074/B (Artist CD+DVD),Look under サ,¥1200,High,Animate',
+      'FALSE,Digital-Only,Rokudenashi (ロクデナシ),"""ホウキボシ"" (Houkiboshi)",N/A (Digital Only),Digital only,,Low,iTunes JP'
+    ].join('\n');
+
+    class VerifiedMockImg {
+      set src(_) {
+        this.naturalWidth = 600;
+        this.naturalHeight = 600;
+        if (this.onload) this.onload();
+      }
+    }
+
+    const seenItunesUrls = [];
+    const app = await bootApp({
+      imageImpl: VerifiedMockImg,
+      fetchImpl: async (url) => {
+        const u = String(url);
+        if (u.includes('export?format=csv')) {
+          return { ok: true, status: 200, async text() { return sheetCsv; } };
+        }
+        if (u.includes('musicbrainz.org')) {
+          return { ok: true, status: 200, async json() { return { releases: [] }; } };
+        }
+        if (u.includes('itunes.apple.com')) {
+          seenItunesUrls.push(u);
+          if (u.includes(encodeURIComponent('(K)NoW_NAME KNOCK on the CORE')) && u.includes('country=jp')) {
+            return {
+              ok: true,
+              status: 200,
+              async json() {
+                return {
+                  results: [
+                    {
+                      trackName: 'KNOCK on the CORE',
+                      collectionName: 'TVアニメ『Fairy gone』OP&ED「KNOCK on the CORE/Ash-like Snow」 - EP',
+                      artistName: '(K)NoW_NAME',
+                      artworkUrl100: 'https://img.example/know/100x100bb.jpg'
+                    }
+                  ]
+                };
+              }
+            };
+          }
+          if (u.includes(encodeURIComponent('佐々木李子 スタート!'))) {
+            return {
+              ok: true,
+              status: 200,
+              async json() {
+                return {
+                  results: [
+                    {
+                      trackName: 'スタート!',
+                      collectionName: 'スタート! - Single',
+                      artistName: '佐々木 李子',
+                      artworkUrl100: 'https://img.example/rico/100x100bb.jpg'
+                    }
+                  ]
+                };
+              }
+            };
+          }
+          return { ok: true, status: 200, async json() { return { results: [] }; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+
+    await app.inputText('catalogUrlInput', 'https://docs.google.com/spreadsheets/d/realPatternSheet/edit');
+    await app.clickElement('loadCatalogUrlBtn');
+    await app.triggerIntersection('sheet-thcs-60240');
+    await app.triggerIntersection('sheet-akcy-58075');
+
+    assert.ok(app.elements.get('art-slot-sheet-thcs-60240').innerHTML.includes('https://img.example/know/600x600bb.jpg'));
+    assert.ok(app.elements.get('art-slot-sheet-akcy-58075').innerHTML.includes('https://img.example/rico/600x600bb.jpg'));
+    assert.ok(seenItunesUrls.some((u) => u.includes(encodeURIComponent('佐々木李子 スタート!'))));
+
+    // Check clean Jacket Google Search links in Crate Flip lightbox for both physical and digital items
+    app.triggerDocumentClick('open-lb', { 'data-lb-idx': '1' });
+    const ricoHref = decodeURIComponent(app.elements.get('lbGoogleSearchLink').href);
+    assert.ok(ricoHref.includes('AKCY-58075 Rico Sasaki スタート! 通常盤 CD'));
+    assert.equal(ricoHref.includes('AKCY-58073'), false);
+
+    app.triggerDocumentClick('open-lb', { 'data-lb-idx': '2' });
+    const digHref = decodeURIComponent(app.elements.get('lbGoogleSearchLink').href);
+    assert.ok(digHref.includes('Rokudenashi ホウキボシ ジャケット'));
+    assert.equal(digHref.includes('通常盤 CD'), false);
+  });
 });

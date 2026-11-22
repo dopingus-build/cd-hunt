@@ -948,6 +948,8 @@ describe('Semi-private read-only share endpoint (/api/share) and Google Service 
               ['Got it?', 'Category', 'Artist', 'Title', 'Catalog Number'],
               ['FALSE', 'Game', 'Capcom', 'Breath of Fire III OST', 'CPCA-1004'],
               ['TRUE', 'Anime', 'yama', 'slash', 'SRCL-12539 (通常盤)'],
+              ['FALSE', 'Anime', 'Shiyui', 'Hollow', 'AICL-4670～4671'],
+              ['FALSE', 'Seiyuu', 'Rico Sasaki', 'Start! (Skip AKCY-58073)', 'AKCY-58075 (Photobook)'],
               ['FALSE', 'J-Rock', 'AKFG', 'Sol-fa', 'KSCL-737']
             ]
           }),
@@ -1001,6 +1003,9 @@ describe('Semi-private read-only share endpoint (/api/share) and Google Service 
               checklistByCatNo: {
                 'CPCA-1004': true,
                 'SRCL-12539': false,
+                'AICL-4670~4671': true,
+                'AKCY-58075': false,
+                'AKCY-58073': true,
                 'KSCL-737': false
               }
             }
@@ -1010,7 +1015,7 @@ describe('Semi-private read-only share endpoint (/api/share) and Google Service 
       );
       assert.equal(putRes.status, 200);
       const putBody = await putRes.json();
-      assert.deepEqual(putBody.sheetSync, { ok: true, updatedRows: 2 });
+      assert.deepEqual(putBody.sheetSync, { ok: true, updatedRows: 3 });
 
       // Verify RS256 assertion signature against public key and ensure D1 stripped transient sheetSync
       assert.ok(capturedAssertion);
@@ -1029,7 +1034,8 @@ describe('Semi-private read-only share endpoint (/api/share) and Google Service 
       assert.equal(sheetWrites[0].valueInputOption, 'USER_ENTERED');
       assert.deepEqual(sheetWrites[0].data, [
         { range: 'A3', values: [['TRUE']] },
-        { range: 'A4', values: [['FALSE']] }
+        { range: 'A4', values: [['FALSE']] },
+        { range: 'A5', values: [['TRUE']] }
       ]);
     } finally {
       globalThis.fetch = prevFetch;

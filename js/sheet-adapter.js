@@ -28,8 +28,13 @@
     };
 
   const CATEGORY_PALETTE = ['#f59e0b', '#f43f5e', '#10b981', '#38bdf8', '#a855f7', '#22d3ee'];
-  const CAT_CODE_REGEX = /\b([A-Z]{2,6}-\d{3,6}(?:~\d+)?)\b/g;
-  const SINGLE_CAT_CODE_REGEX = /^[A-Z]{2,6}-\d{3,6}(?:~\d+)?$/;
+  const JP_CHAR_REGEX = /[\u3040-\u30ff\u3400-\u9fff]/;
+  const CAT_CODE_REGEX = /\b([A-Z]{2,6}-\d{3,6}(?:[~～〜]\d+)?)\b/g;
+  const SINGLE_CAT_CODE_REGEX = /^[A-Z]{2,6}-\d{3,6}(?:[~～〜]\d+)?$/;
+
+  function normalizeCatCode(code) {
+    return String(code || '').trim().replace(/[～〜]/g, '~').toUpperCase();
+  }
 
   /**
    * Parse RFC-4180 CSV text (supporting quoted commas, newlines, and escaped "" quotes).
@@ -172,35 +177,47 @@
   }
 
   function extractCatalogCodes(rawCatalog, rawTitle) {
-    const combined = [String(rawCatalog || ''), String(rawTitle || '')].join(' / ');
-    const results = [];
-    const seen = new Set();
+    function scanSource(sourceStr) {
+      const found = [];
+      const seen = new Set();
+      let match;
+      CAT_CODE_REGEX.lastIndex = 0;
+      while ((match = CAT_CODE_REGEX.exec(sourceStr)) !== null) {
+        const code = normalizeCatCode(match[1]);
+        if (seen.has(code)) continue;
+        seen.add(code);
 
-    let match;
-    CAT_CODE_REGEX.lastIndex = 0;
-    while ((match = CAT_CODE_REGEX.exec(combined)) !== null) {
-      const code = match[1];
-      if (seen.has(code)) continue;
-      seen.add(code);
+        const tail = sourceStr.slice(match.index + match[0].length, match.index + match[0].length + 45);
+        const contextParen = tail.match(/^\s*\(([^)]+)\)/);
+        const ctx = contextParen ? contextParen[1] : tail;
+        const isRegularHint = /(通常|\breg\b|\bregular\b|\bstd\b|\bstandard\b)/i.test(ctx);
+        const isLimited = /(初回|限定|\bltd\b|\blimited\b|type\s*[ab]|期間生産|complete\s*box|venue\/web)/i.test(ctx);
+        const isAnime = /(anime|アニメ盤|期間生産)/i.test(ctx);
 
-      const tail = combined.slice(match.index + match[0].length, match.index + match[0].length + 40);
-      const contextParen = tail.match(/^\s*\(([^)]+)\)/);
-      const ctx = contextParen ? contextParen[1] : tail;
-      const isLimited = /(初回|限定|limited|type\s*[ab]|anime|期間生産)/i.test(ctx);
-      const isRegularHint = /(通常|reg\b|regular|std\b|standard)/i.test(ctx);
+        let kind = 'other';
+        let label = contextParen ? contextParen[1].trim() : '通常盤 Regular';
+        if (isRegularHint && !isLimited) {
+          kind = 'regular';
+          label = isAnime && contextParen ? contextParen[1].trim() : '通常盤 Regular';
+        } else if (isLimited || isAnime) {
+          kind = 'limited';
+          if (!contextParen) {
+            label = isAnime ? '期間生産限定 Anime' : '初回盤 Limited';
+          }
+        }
 
-      let kind = 'other';
-      if (isRegularHint && !isLimited) {
-        kind = 'regular';
-      } else if (isLimited) {
-        kind = 'limited';
+        found.push({
+          catno: code,
+          kind: kind,
+          label: label
+        });
       }
+      return found;
+    }
 
-      results.push({
-        catno: code,
-        kind: kind,
-        label: kind === 'limited' ? (contextParen ? contextParen[1].trim() : '初回盤 Limited') : '通常盤 Regular'
-      });
+    let results = scanSource(String(rawCatalog || ''));
+    if (results.length === 0) {
+      results = scanSource(String(rawTitle || ''));
     }
 
     if (results.length > 0 && !results.some(function (r) { return r.kind === 'regular'; })) {
@@ -247,34 +264,219 @@
       .slice(0, 48);
   }
 
+  function stripParentheticals(str) {
+    let cur = String(str || '');
+    let prev;
+    do {
+      prev = cur;
+      cur = cur.replace(/\s*(?:\([^()（）]*\)|（[^()（）]*）)(?![A-Za-z0-9_\u3040-\u30ff\u3400-\u9fff])\s*/g, ' ');
+    } while (cur !== prev);
+    return cur.replace(/\s+/g, ' ').trim();
+  }
+
+  function extractTopLevelParens(str) {
+    const s = String(str || '');
+    const out = [];
+    let depth = 0;
+    let start = -1;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (ch === '(' || ch === '（') {
+        if (depth === 0) start = i + 1;
+        depth++;
+      } else if (ch === ')' || ch === '）') {
+        if (depth > 0) {
+          depth--;
+          if (depth === 0 && start !== -1) {
+            const inner = s.slice(start, i).trim();
+            if (inner) out.push(inner);
+            start = -1;
+          }
+        }
+      }
+    }
+    return out;
+  }
+
   function cleanDisplayTitleForQuery(rawTitle) {
-    return String(rawTitle || '')
-      .replace(/\s*\([^)]*\)\s*/g, ' ')
-      .replace(/\s*（[^）]*）\s*/g, ' ')
+    return stripParentheticals(rawTitle)
+      .replace(/^["'“”‘’「『]+|["'“”‘’」』]+$/g, '')
+      .replace(/["“”]/g, ' ')
+      .replace(/^(?:Character\s+Single|Image\s+Song|Theme\s+Song)\s*:\s*/i, '')
+      .replace(/\s+-\s+(?:EP|Single|Mini[- ]Album)$/i, '')
       .replace(/\s+/g, ' ')
-      .trim()
-      .replace(/^["'「]+|["'」]+$/g, '')
       .trim();
   }
 
-  function buildRequiredGroups(artist, artistJa, title, titleJa) {
+  function extractTitleJa(rawTitle) {
+    const parens = extractTopLevelParens(rawTitle);
+    for (let i = 0; i < parens.length; i++) {
+      const text = parens[i];
+      if (!JP_CHAR_REGEX.test(text)) continue;
+      if (
+        /^(?:artist\s+editions?|limited|includes|also\s+on|skip\b|track\s+\d|by\s+)/i.test(text) ||
+        /\b(?:cover|cd\+bd|cd\+dvd|cd\+blu-ray|slipcase|editions?\s+only|skip\s+[a-z]{2,6}-\d)/i.test(text)
+      ) {
+        continue;
+      }
+      const jpMatches = text.match(/[\u3040-\u30ff\u3400-\u9fff]/g) || [];
+      const latinMatches = text.match(/[a-zA-Z]/g) || [];
+      const jpCount = jpMatches.length;
+      const latinCount = latinMatches.length;
+      if (jpCount >= 2 && (jpCount >= latinCount || jpCount / (jpCount + latinCount) >= 0.45)) {
+        return text;
+      }
+    }
+    return '';
+  }
+
+  function extractTitleAlt(cleanTitle, rawTitle) {
+    if (!JP_CHAR_REGEX.test(String(cleanTitle || ''))) return '';
+    const parens = extractTopLevelParens(rawTitle);
+    if (parens.length === 0) return '';
+    const candidate = parens[0].replace(/^["'“”‘’「『]+|["'“”‘’」』]+$/g, '').trim();
+    if (!candidate || candidate.length > 42) return '';
+    if (JP_CHAR_REGEX.test(candidate)) return '';
+    if (/[;,—–+]/.test(candidate)) return '';
+    if (/\b(?:op|ed|op\d|ed\d|theme|album|single|ost|ep|set|edition|limited|regular|cover|ver|cd|bd|dvd|blu-ray|track|includes|also|skip|by|movie|season|s\d|ova)\b/i.test(candidate)) {
+      return '';
+    }
+    return candidate;
+  }
+
+  function extractArtistSearchInfo(artist, artistJa) {
+    const raw = String(artist || '').trim();
+    const parenNotes = extractTopLevelParens(raw);
+    const strippedParens = stripParentheticals(raw);
+    const withoutFeat = strippedParens
+      .replace(/\s+(?:feat\.?|ft\.?|featuring|with|w\/)\s+.*$/i, '')
+      .trim();
+
+    const isOstAlias = /\b(?:ost|soundtrack)\b/i.test(withoutFeat) || /^various\s+artists?$/i.test(withoutFeat);
+    const primaryParts = withoutFeat
+      .split(/\s*(?:\/|＆|&)\s*/)
+      .map(function (p) { return p.trim(); })
+      .filter(Boolean);
+
+    const firstPart = primaryParts[0] || '';
+    let primaryArtist = firstPart;
+    const bracketColon = firstPart.match(/^(.*?\])\s*:\s*(.+)$/);
+    const spacedColon = firstPart.match(/^(.+?)\s+:\s+(.+)$/);
+    if (bracketColon && bracketColon[1].trim()) {
+      primaryArtist = bracketColon[1].trim();
+    } else if (spacedColon && spacedColon[1].trim()) {
+      primaryArtist = spacedColon[1].trim();
+    }
+
+    const aliases = [];
+    const seen = new Set();
+    function addAlias(val) {
+      const clean = String(val || '').trim();
+      if (!clean) return;
+      const lower = clean.toLowerCase();
+      if (seen.has(lower)) return;
+      seen.add(lower);
+      aliases.push(clean);
+    }
+
+    if (!isOstAlias) {
+      addAlias(primaryArtist);
+      primaryParts.forEach(function (part) {
+        addAlias(part);
+        const colonIdx = part.indexOf(':');
+        if (colonIdx !== -1) {
+          const postColon = part.slice(colonIdx + 1).trim();
+          if (postColon.length >= 4) {
+            addAlias(postColon);
+          }
+        }
+      });
+      parenNotes.forEach(function (note) {
+        const cleanNote = note.trim();
+        if (!cleanNote || cleanNote.length < 2) return;
+        if (/^(?:enemy\s+side|various|ost|soundtrack|theme|op|ed)$/i.test(cleanNote)) return;
+        addAlias(cleanNote);
+      });
+      if (artistJa) addAlias(artistJa);
+    }
+
+    return {
+      queryArtist: isOstAlias ? '' : primaryArtist,
+      aliases: aliases,
+      isOstAlias: isOstAlias
+    };
+  }
+
+  function buildTitleVariants(cleanTitle, titleJa, titleAlt) {
+    const clean = String(cleanTitle || '').trim();
+    const sides = clean
+      .split(/\s*(?:\/|／)\s*/)
+      .map(function (s) { return s.trim(); })
+      .filter(Boolean);
+
+    const queryTitle = (sides[0] || clean)
+      .replace(/[~～〜]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const titleKeywords = [];
+    const seen = new Set();
+    function addKw(val) {
+      const str = String(val || '').trim();
+      if (!str) return;
+      const key = str.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      titleKeywords.push(str);
+    }
+
+    const baseList = sides.length > 1 ? sides : (clean ? [clean] : []);
+    baseList.forEach(function (side) {
+      addKw(side);
+
+      if (JP_CHAR_REGEX.test(side)) {
+        const asciiMatches = side.match(/[A-Za-z][A-Za-z0-9'-]{4,}/g) || [];
+        asciiMatches.forEach(function (tok) {
+          if (tok.length >= 5) addKw(tok);
+        });
+      }
+
+      const withoutOst = side.replace(/\s+(?:Original\s+Soundtrack|OST)$/i, '').trim();
+      if (withoutOst && withoutOst !== side && withoutOst.length >= 4) {
+        addKw(withoutOst);
+      }
+
+      [side, withoutOst].forEach(function (cand) {
+        if (!cand || !/\b(?:II|III|IV)\b/.test(cand)) return;
+        const arabic = cand
+          .replace(/\bIII\b/g, '3')
+          .replace(/\bIV\b/g, '4')
+          .replace(/\bII\b/g, '2');
+        addKw(arabic);
+      });
+    });
+
+    if (titleJa) addKw(titleJa);
+    if (titleAlt) addKw(titleAlt);
+
+    return {
+      queryTitle: queryTitle,
+      titleKeywords: titleKeywords
+    };
+  }
+
+  function buildRequiredGroups(artist, artistJa, title, titleJa, titleAlt) {
     const cleanTitle = cleanDisplayTitleForQuery(title) || String(title || '').trim();
-    const titleGroup = [];
-    if (cleanTitle) titleGroup.push(cleanTitle);
-    if (titleJa && titleJa !== cleanTitle) titleGroup.push(titleJa);
+    const titleVariants = buildTitleVariants(cleanTitle, titleJa, titleAlt);
+    const artistInfo = extractArtistSearchInfo(artist, artistJa);
 
     const groups = [];
-    if (titleGroup.length > 0) {
-      groups.push(titleGroup);
+    if (titleVariants.titleKeywords.length > 0) {
+      groups.push(titleVariants.titleKeywords);
     }
-
-    const artistGroup = [];
-    if (artist) artistGroup.push(artist);
-    if (artistJa && artistJa !== artist) artistGroup.push(artistJa);
-    if (artistGroup.length > 0 && artistGroup[0] !== 'Various Artists') {
-      groups.push(artistGroup);
+    if (artistInfo.aliases.length > 0) {
+      groups.push(artistInfo.aliases);
     }
-
     if (groups.length === 0) {
       groups.push(['Soundtrack']);
     }
@@ -396,11 +598,10 @@
       const rawExplicitItunes = cell(colMap.itunesQuery);
 
       const artistSplit = splitBilingualParen(rawArtist || 'Unknown Artist');
-      const titleSplit = splitBilingualParen(rawTitle || 'Untitled Release');
       const artist = artistSplit.en;
       const artistJa = artistSplit.ja;
       const title = rawTitle || 'Untitled Release';
-      const titleJa = titleSplit.ja;
+      const titleJa = extractTitleJa(rawTitle || '');
 
       const digitalOnly =
         inDigitalSection ||
@@ -429,8 +630,11 @@
       usedIds.add(finalId);
 
       const kana = rawExplicitKana || (digitalOnly ? '—' : extractKanaFromFiling(rawFiling));
-      const cleanTitleForSearch = cleanDisplayTitleForQuery(title) || title;
-      const itunesQuery = rawExplicitItunes || [artist, cleanTitleForSearch].filter(Boolean).join(' ').trim();
+      const cleanTitle = cleanDisplayTitleForQuery(title) || title;
+      const titleAlt = extractTitleAlt(cleanTitle, title);
+      const titleSearch = buildTitleVariants(cleanTitle, titleJa, titleAlt);
+      const artistSearch = extractArtistSearchInfo(artist, artistJa);
+      const itunesQuery = rawExplicitItunes || [artistSearch.queryArtist, titleSearch.queryTitle].filter(Boolean).join(' ').trim();
 
       const item = {
         id: finalId,
@@ -452,7 +656,7 @@
       if (rawRecommendedShops) item.recommendedShops = rawRecommendedShops;
       if (itunesQuery) {
         item.itunesQuery = itunesQuery;
-        item.requiredGroups = buildRequiredGroups(artist, artistJa, title, titleJa);
+        item.requiredGroups = buildRequiredGroups(artist, artistJa, title, titleJa, titleAlt);
       }
 
       const acquired = isCheckedValue(rawGotIt);
@@ -510,7 +714,7 @@
     const codes = new Set();
     if (item.regCatNo) {
       String(item.regCatNo).split(/[,/\s]+/).forEach(function (c) {
-        const norm = c.trim().toUpperCase();
+        const norm = normalizeCatCode(c);
         if (SINGLE_CAT_CODE_REGEX.test(norm)) codes.add(norm);
       });
     }
@@ -518,7 +722,7 @@
       item.mbEditions.forEach(function (ed) {
         const rawCode = ed && (ed.catno || ed.catNo);
         if (!rawCode) return;
-        const norm = String(rawCode).trim().toUpperCase();
+        const norm = normalizeCatCode(rawCode);
         if (SINGLE_CAT_CODE_REGEX.test(norm)) codes.add(norm);
       });
     }
@@ -527,7 +731,7 @@
       CAT_CODE_REGEX.lastIndex = 0;
       const str = String(item.catalog);
       while ((m = CAT_CODE_REGEX.exec(str)) !== null) {
-        codes.add(m[1].toUpperCase());
+        codes.add(normalizeCatCode(m[1]));
       }
     }
     return Array.from(codes);
