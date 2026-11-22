@@ -1629,16 +1629,25 @@
     });
 
     let touchStartX = 0;
-    const stage = document.getElementById('lbStage');
-    stage.addEventListener('touchstart', function (e) {
-      touchStartX = e.changedTouches[0].screenX;
-    }, { passive: true });
-    stage.addEventListener('touchend', function (e) {
-      const dx = e.changedTouches[0].screenX - touchStartX;
-      if (Math.abs(dx) > 45) {
-        stepLightbox(dx < 0 ? 1 : -1);
-      }
-    }, { passive: true });
+    let touchStartY = 0;
+    const coverFrame = document.getElementById('lbCoverFrame');
+    if (coverFrame) {
+      coverFrame.addEventListener('touchstart', function (e) {
+        const touch = e.changedTouches && e.changedTouches[0];
+        if (!touch) return;
+        touchStartX = touch.screenX;
+        touchStartY = typeof touch.screenY === 'number' ? touch.screenY : 0;
+      }, { passive: true });
+      coverFrame.addEventListener('touchend', function (e) {
+        const touch = e.changedTouches && e.changedTouches[0];
+        if (!touch) return;
+        const dx = touch.screenX - touchStartX;
+        const dy = typeof touch.screenY === 'number' ? touch.screenY - touchStartY : 0;
+        if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy)) {
+          stepLightbox(dx < 0 ? 1 : -1);
+        }
+      }, { passive: true });
+    }
 
     // Catalog Metadata Loader Controls
     const openLoaderBtn = document.getElementById('openCatalogLoaderBtn');

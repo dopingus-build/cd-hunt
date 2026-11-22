@@ -508,11 +508,11 @@ async function bootApp({
       }
       await flush();
     },
-    async swipeLightbox(dx) {
-      const stage = elements.get('lbStage');
-      assert.ok(stage, 'Element #lbStage must exist');
-      stage.dispatchEvent({ type: 'touchstart', changedTouches: [{ screenX: 200 }] });
-      stage.dispatchEvent({ type: 'touchend', changedTouches: [{ screenX: 200 + dx }] });
+    async swipeLightbox(dx, { targetId = 'lbCoverFrame', dy = 0 } = {}) {
+      const el = elements.get(targetId);
+      assert.ok(el, `Element #${targetId} must exist`);
+      el.dispatchEvent({ type: 'touchstart', changedTouches: [{ screenX: 200, screenY: 200 }] });
+      el.dispatchEvent({ type: 'touchend', changedTouches: [{ screenX: 200 + dx, screenY: 200 + dy }] });
       await flush();
     },
     triggerDocumentClick(action, attrs = {}) {
@@ -1326,7 +1326,11 @@ describe('Crate Flip Lightbox modal, navigation, and custom cover variant manage
     assert.equal(app.elements.get('lbCounter').textContent, '1 / 3');
     assert.equal(lbArtBox.classList.contains('carousel-anim-prev'), true);
 
-    // Swipe navigation on #lbStage (dx < -45 -> next, dx > 45 -> prev)
+    // Swipe navigation restricted to #lbCoverFrame (dx < -45 -> next, dx > 45 -> prev; ignores #lbStage & vertical gestures)
+    await app.swipeLightbox(-80, { targetId: 'lbStage' });
+    assert.equal(app.elements.get('lbCounter').textContent, '1 / 3');
+    await app.swipeLightbox(-50, { dy: 120 });
+    assert.equal(app.elements.get('lbCounter').textContent, '1 / 3');
     await app.swipeLightbox(-80);
     assert.equal(app.elements.get('lbCounter').textContent, '2 / 3');
     assert.equal(lbArtBox.classList.contains('carousel-anim-next'), true);
