@@ -79,6 +79,7 @@ async function attachExternalRoutes(context, appOrigin, workerBaseUrl, opts = {}
   const authCode = opts.authCode || 'code_alice';
   const stateFlags = opts.stateFlags || {};
   const sampleSheetCsv = fs.readFileSync(path.join(ROOT_DIR, 'docs', 'sample-catalog-sheet.csv'), 'utf8');
+  const dupSheetCsv = opts.dupSheetCsv || '';
 
   await context.route(
     (url) => url.origin + url.pathname === `${workerBaseUrl}/auth/login`,
@@ -141,6 +142,20 @@ async function attachExternalRoutes(context, appOrigin, workerBaseUrl, opts = {}
           contentType: 'text/csv; charset=utf-8',
           headers: { 'Access-Control-Allow-Origin': '*' },
           body: sampleSheetCsv
+        });
+        return;
+      }
+
+      if (reqUrl.href === 'https://docs.google.com/spreadsheets/d/e2eDupSheet/export?format=csv') {
+        if (stateFlags.dupSheetOffline) {
+          await route.abort('failed');
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/csv; charset=utf-8',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: dupSheetCsv
         });
         return;
       }
@@ -269,6 +284,19 @@ async function main() {
   const saPem = `-----BEGIN PRIVATE KEY-----\n${pkcs8B64.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
   const saBotEmail = 'cd-hunt-e2e@e2e-project.iam.gserviceaccount.com';
   const sheetBatchUpdates = [];
+  const dupSheetRows = [
+    ['Got it?', 'Aisle / Category', 'Artist / Franchise', 'Title / Release Details', 'Catalog Number'],
+    ['FALSE', 'Video Game Soundtracks', 'Capcom (カプコン)', 'Breath of Fire III OST', 'CPCA-1004'],
+    ['TRUE', 'Video Game Soundtracks', 'Capcom', 'Breath of Fire III OST (Dup)', 'CPCA-1004'],
+    ['FALSE', 'J-Rock', 'Asian Kung-Fu Generation', 'Sol-fa', 'KSCL-737']
+  ];
+  const dupSheetBatchUpdates = [];
+  const e2eDupSheetCsv = [
+    'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+    'FALSE,Video Game Soundtracks,Capcom (カプコン),Breath of Fire III OST,CPCA-1004,Look under ブ,"¥3,000",,',
+    'TRUE,Video Game Soundtracks,Capcom,Breath of Fire III OST (Dup),CPCA-1004,Look under ブ,"¥3,500",High,Mandarake',
+    'FALSE,J-Rock,Asian Kung-Fu Generation,Sol-fa,KSCL-737,Look under ア,¥500,Medium,Book Off'
+  ].join('\n');
 
   const mockGoogleServer = http.createServer(async (req, res) => {
     const reqUrl = new URL(req.url, 'http://127.0.0.1');
@@ -299,6 +327,27 @@ async function main() {
       sheetBatchUpdates.push(body);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ totalUpdatedCells: body.data.length }));
+      return;
+    }
+    if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/e2eDupSheet/values/A1:I500') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ values: dupSheetRows }));
+      return;
+    }
+    if (req.method === 'POST' && reqUrl.pathname === '/v4/spreadsheets/e2eDupSheet/values:batchUpdate') {
+      const body = JSON.parse(bodyText);
+      dupSheetBatchUpdates.push(body);
+      for (const item of body.data || []) {
+        const m = String(item.range || '').match(/A(\d+)$/);
+        if (m) {
+          const rowIdx = Number(m[1]) - 1;
+          if (dupSheetRows[rowIdx]) {
+            dupSheetRows[rowIdx][0] = String(item.values[0][0]);
+          }
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ totalUpdatedCells: (body.data || []).length }));
       return;
     }
     res.writeHead(404);
@@ -477,10 +526,14 @@ async function main() {
       await ctxB.close();
     }
 
-    // Device C: Standalone Google Sheet mode + Bot Email Banner + Write-Back + /api/share + Offline CSV Cache
-    const stateFlags = { sheetOffline: false };
+    // Device C: Standalone Google Sheet mode + Bot Email Banner + Write-Back + /api/share + Offline CSV Cache + Search/Filters + Backup + Duplicate Sheets + Local CSV + Sign-out
+    const stateFlags = { sheetOffline: false, dupSheetOffline: false };
     const ctxC = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-    await attachExternalRoutes(ctxC, appOrigin, workerBaseUrl, { authCode: 'code_bob', stateFlags });
+    await attachExternalRoutes(ctxC, appOrigin, workerBaseUrl, {
+      authCode: 'code_bob',
+      stateFlags,
+      dupSheetCsv: e2eDupSheetCsv
+    });
     const pageC = await ctxC.newPage();
     const pageCErrors = [];
     let latestShareUrl = null;
@@ -543,11 +596,126 @@ async function main() {
       assert.ok(shareMd.includes('# CD Hunt Live Status (@bob)'));
       assert.ok(shareMd.includes('`sheet-cpca-1004`'));
 
-      // Flip Google Sheet offline and reload Chromium -> restores offline CSV cache cleanly with 1/3 preserved
+      // Search, clear, category pills, hunting-only toggle, and empty state reset
+      await pageC.fill('#searchInput', 'Sol-fa');
+      await pageC.waitForFunction(() => document.getElementById('visibleCountText')?.textContent.includes('1 of 3'));
+      await pageC.click('#clearSearchBtn');
+      await pageC.waitForFunction(() => document.getElementById('visibleCountText')?.textContent.includes('Showing 3 physical'));
+      await pageC.click('[data-action="set-cat"][data-cat="J-Rock / J-Pop"]');
+      await pageC.waitForFunction(() => document.getElementById('visibleCountText')?.textContent.includes('1 of 3'));
+      await pageC.click('[data-action="set-cat"][data-cat="All"]');
+      await pageC.waitForFunction(() => document.getElementById('visibleCountText')?.textContent.includes('Showing 3 physical'));
+      await pageC.click('#huntingOnlyBtn');
+      await pageC.waitForFunction(() => document.getElementById('visibleCountText')?.textContent.includes('Showing 2 physical'));
+      await pageC.fill('#searchInput', 'zzzz-no-match');
+      await pageC.waitForSelector('#emptyState:not(.hidden)');
+      await pageC.click('#resetFiltersBtn');
+      await pageC.waitForSelector('#emptyState', { state: 'hidden' });
+      await pageC.waitForFunction(() => document.getElementById('visibleCountText')?.textContent.includes('Showing 3 physical'));
+
+      // Backup & Restore modal export + import + SQLite sync
+      await pageC.click('#backupBtn');
+      await pageC.waitForSelector('#backupModal.open');
+      const backupPayload = JSON.parse(await pageC.inputValue('#backupTextarea'));
+      assert.equal(backupPayload.checklist['sheet-cpca-1004'], true);
+      backupPayload.checklist['sheet-kscl-737'] = true;
+      await pageC.fill('#backupTextarea', JSON.stringify(backupPayload));
+      await pageC.click('#importBackupBtn');
+      await pageC.waitForSelector('#backupModal', { state: 'hidden' });
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '2 / 3');
+      const backupDeadline = Date.now() + 4500;
+      let syncedBackupKscl = false;
+      while (Date.now() < backupDeadline) {
+        const rows = db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '2002'");
+        if (rows.length === 1) {
+          const parsed = JSON.parse(rows[0].state_json);
+          const hasKscl = Object.values(parsed.catalogs || {}).some((c) => c && c.checklist && c.checklist['sheet-kscl-737']);
+          if (hasKscl) {
+            syncedBackupKscl = true;
+            break;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(syncedBackupKscl, true, 'Expected Backup import to sync sheet-kscl-737 to SQLite');
+
+      // Flip Google Sheet offline and reload Chromium -> restores offline CSV cache cleanly with 2/3 preserved
       stateFlags.sheetOffline = true;
       await pageC.reload({ waitUntil: 'domcontentloaded' });
-      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 3');
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '2 / 3');
       await pageC.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Loaded cached Google Sheet (offline)'));
+
+      // Load duplicate Google Sheet e2eDupSheet -> auto-deduplicates 3 rows into 2 physical items & reconciles duplicate rows
+      await pageC.click('#openCatalogLoaderBtn');
+      await pageC.waitForSelector('#catalogLoaderScreen:not(.hidden)');
+      await pageC.fill('#catalogUrlInput', 'https://docs.google.com/spreadsheets/d/e2eDupSheet/edit');
+      await pageC.click('#loadCatalogUrlBtn');
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 2');
+      await pageC.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Merged 1 duplicate row (CPCA-1004)'));
+
+      async function waitForDupBatchUpdateCount(minLen) {
+        const dl = Date.now() + 4500;
+        while (Date.now() < dl) {
+          if (dupSheetBatchUpdates.length >= minLen) return;
+          await new Promise((r) => setTimeout(r, 40));
+        }
+        throw new Error(`Timed out waiting for dupSheetBatchUpdates >= ${minLen} (got ${dupSheetBatchUpdates.length})`);
+      }
+
+      await waitForDupBatchUpdateCount(1);
+      assert.equal(dupSheetRows[1][0], 'TRUE');
+      assert.equal(dupSheetRows[2][0], 'TRUE');
+
+      const beforeUncheck = dupSheetBatchUpdates.length;
+      await pageC.click('.check-btn[data-action="toggle-acq"][data-id="sheet-cpca-1004"]');
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '0 / 2');
+      await waitForDupBatchUpdateCount(beforeUncheck + 1);
+      assert.deepEqual(dupSheetBatchUpdates[dupSheetBatchUpdates.length - 1].data, [
+        { range: 'A2', values: [['FALSE']] },
+        { range: 'A3', values: [['FALSE']] }
+      ]);
+
+      const beforeRecheck = dupSheetBatchUpdates.length;
+      await pageC.click('.check-btn[data-action="toggle-acq"][data-id="sheet-cpca-1004"]');
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 2');
+      await waitForDupBatchUpdateCount(beforeRecheck + 1);
+      assert.deepEqual(dupSheetBatchUpdates[dupSheetBatchUpdates.length - 1].data, [
+        { range: 'A2', values: [['TRUE']] },
+        { range: 'A3', values: [['TRUE']] }
+      ]);
+
+      const dupShareMd = await (await fetch(`${latestShareUrl}?format=markdown`, { headers: { Origin: 'https://agent.example' } })).text();
+      assert.ok(dupShareMd.includes('`sheet-cpca-1004`'));
+      assert.equal(dupShareMd.includes('sheet-cpca-1004-2'), false);
+
+      stateFlags.dupSheetOffline = true;
+      await pageC.reload({ waitUntil: 'domcontentloaded' });
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 2');
+      await pageC.waitForFunction(() => {
+        const msg = document.getElementById('toast')?.textContent || '';
+        return msg.includes('Loaded cached Google Sheet (offline)') && msg.includes('Merged 1 duplicate row (CPCA-1004)');
+      });
+
+      // Local .csv upload via real <input type="file"> + Sign-out keeps local progress
+      await pageC.click('#openCatalogLoaderBtn');
+      await pageC.waitForSelector('#catalogLoaderScreen:not(.hidden)');
+      await pageC.setInputFiles('#catalogFileInput', {
+        name: 'local-dup.csv',
+        mimeType: 'text/csv',
+        buffer: Buffer.from(e2eDupSheetCsv, 'utf8')
+      });
+      await pageC.waitForSelector('#catalogLoaderScreen', { state: 'hidden' });
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 / 2');
+      await pageC.waitForFunction(() => {
+        const msg = document.getElementById('toast')?.textContent || '';
+        return msg.includes('Loaded local CSV: local-dup.csv') && msg.includes('Merged 1 duplicate row (CPCA-1004)');
+      });
+
+      await pageC.click('#githubSignOutBtn');
+      await pageC.waitForSelector('#githubAuthBtn:not(.hidden)');
+      await pageC.waitForSelector('#copyAgentLinkBtn', { state: 'hidden' });
+      await pageC.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Signed out of cloud sync'));
+      assert.equal(await pageC.textContent('#progressBadge'), '1 / 2');
       assert.equal(pageCErrors.length, 0, `Unexpected Device C errors: ${pageCErrors.join('; ')}`);
     } catch (err) {
       console.error('Device C debug:', { url: pageC.url(), errors: pageCErrors });
@@ -556,7 +724,7 @@ async function main() {
       await ctxC.close();
     }
 
-    console.log('✓ Browser E2E checks passed (desktop + 375px mobile, OAuth, multi-device SQLite sync, Google Sheet mode, Service Account write-back, /api/share, offline CSV cache, keepalive flush)');
+    console.log('✓ Browser E2E checks passed (desktop + 375px mobile, OAuth, multi-device SQLite sync, search/filters, backup modal, Google Sheet + dedup + write-back, /api/share, offline CSV cache, local CSV upload, sign-out, keepalive flush)');
   } finally {
     await browser.close();
     await Promise.all([

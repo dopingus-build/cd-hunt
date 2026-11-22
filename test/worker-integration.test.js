@@ -177,6 +177,7 @@ async function startIntegrationServers(envOverrides = {}) {
     workerBaseUrl,
     githubBaseUrl,
     db,
+    workerEnv,
     tokenExchangeLog,
     async loginViaHttp(oauthCode, redirectParam) {
       const loginPath = redirectParam
@@ -792,5 +793,80 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
     assert.equal(put3.ok, true);
     assert.equal(put3.sheetSync.ok, false);
     assert.ok(put3.sheetSync.error.includes('403'));
+  });
+
+  it('enforces PAUSE_SYNC kill-switch across /api/status, /api/state, and /api/share, and reports sheetSync.configured=false when unset', async (t) => {
+    const env = await startIntegrationServers();
+    t.after(() => env.close());
+
+    const statusInitial = await (
+      await fetch(`${env.workerBaseUrl}/api/status`, { headers: { Origin: ALLOWED_ORIGIN } })
+    ).json();
+    assert.equal(statusInitial.ok, true);
+    assert.equal(statusInitial.paused, false);
+    assert.deepEqual(statusInitial.sheetSync, { configured: false, serviceAccountEmail: null });
+
+    const aliceToken = (await env.loginViaHttp('code_alice')).token;
+    const initialPayload = makeSampleSyncPayload({
+      catalogs: {
+        cd_hunt_osaka_cd_cover_a1b2c3d4: {
+          updatedAt: 1795138200000,
+          checklist: { 'cd-01': true },
+          viewMode: 'grid'
+        }
+      }
+    });
+    const seedRes = await fetch(`${env.workerBaseUrl}/api/state`, {
+      method: 'PUT',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(initialPayload)
+    });
+    assert.equal(seedRes.status, 200);
+    const seedJson = await seedRes.json();
+    assert.ok(seedJson.shareUrl);
+
+    env.workerEnv.PAUSE_SYNC = 'true';
+
+    const statusPaused = await (
+      await fetch(`${env.workerBaseUrl}/api/status`, { headers: { Origin: ALLOWED_ORIGIN } })
+    ).json();
+    assert.equal(statusPaused.ok, true);
+    assert.equal(statusPaused.paused, true);
+    assert.equal(statusPaused.reason, 'manual_pause_enabled');
+
+    const getPausedRes = await fetch(`${env.workerBaseUrl}/api/state`, {
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}` }
+    });
+    assert.equal(getPausedRes.status, 503);
+    assert.equal((await getPausedRes.json()).paused, true);
+
+    const putPausedRes = await fetch(`${env.workerBaseUrl}/api/state`, {
+      method: 'PUT',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(
+        makeSampleSyncPayload({
+          updatedAt: 1795138299999,
+          catalogs: {
+            cd_hunt_osaka_cd_cover_a1b2c3d4: {
+              updatedAt: 1795138299999,
+              checklist: { 'cd-01': false, 'cd-99': true },
+              viewMode: 'single'
+            }
+          }
+        })
+      )
+    });
+    assert.equal(putPausedRes.status, 503);
+    assert.equal((await putPausedRes.json()).paused, true);
+
+    const storedRows = env.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+    assert.equal(storedRows.length, 1);
+    const storedChecklist = JSON.parse(storedRows[0].state_json).catalogs.cd_hunt_osaka_cd_cover_a1b2c3d4.checklist;
+    assert.deepEqual(storedChecklist, { 'cd-01': true });
+
+    const sharePausedRes = await fetch(seedJson.shareUrl, { headers: { Origin: 'https://agent.example' } });
+    assert.equal(sharePausedRes.status, 503);
+    assert.equal(sharePausedRes.headers.get('access-control-allow-origin'), '*');
+    assert.equal((await sharePausedRes.json()).paused, true);
   });
 });

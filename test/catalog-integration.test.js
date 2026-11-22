@@ -2573,4 +2573,110 @@ describe('Google Sheet direct loading, JSON hybrid overlay, and Agent Link butto
     });
     assert.ok(appJson.elements.get('toast').textContent.includes('Warning: 1 duplicate catalog entry (KSCL-737)'));
   });
+
+  it('handles hybrid JSON + Google Sheet deduplication, offline cached duplicate Sheet reload, local duplicate JSON, and content-sniffed CSV upload', async () => {
+    const hybridJson = {
+      schemaVersion: 1,
+      meta: {
+        title: 'Hybrid Dup',
+        googleSheetUrl: 'https://docs.google.com/spreadsheets/d/hybridDup1/edit'
+      },
+      items: [
+        {
+          id: 'cur-akfg',
+          category: 'J-Rock',
+          artist: 'Asian Kung-Fu Generation',
+          title: 'Sol-fa',
+          regCatNo: 'KSCL-737',
+          catalog: 'KSCL-737',
+          kana: 'ア',
+          filing: 'Look under ア',
+          price: '¥500'
+        }
+      ]
+    };
+    const hybridSheetCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'FALSE,J-Rock,Asian Kung-Fu Generation,Sol-fa,KSCL-737,Look under ア,¥500,Medium,Book Off',
+      'FALSE,Game OST,Capcom,Breath of Fire III OST,CPCA-1004,Look under ブ,"¥3,000",,',
+      'TRUE,Game OST,Capcom,Breath of Fire III OST (Dup),CPCA-1004,Look under ブ,"¥3,500",High,Mandarake'
+    ].join('\n');
+
+    // 1) Hybrid JSON + meta.googleSheetUrl with duplicate Sheet rows
+    const appHybrid = await bootApp({
+      fetchImpl: async (url) => {
+        if (String(url) === 'https://cdn.example/hybrid-dup.json') {
+          return { ok: true, status: 200, async json() { return hybridJson; } };
+        }
+        if (String(url) === 'https://docs.google.com/spreadsheets/d/hybridDup1/export?format=csv') {
+          return { ok: true, status: 200, async text() { return hybridSheetCsv; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+    await appHybrid.inputText('catalogUrlInput', 'https://cdn.example/hybrid-dup.json');
+    await appHybrid.clickElement('loadCatalogUrlBtn');
+    assert.equal(appHybrid.elements.get('progressBadge').textContent, '1 / 2');
+    assert.ok(appHybrid.elements.get('toast').textContent.includes('Merged 1 duplicate row (CPCA-1004)'));
+    await appHybrid.clickElement('viewModeBtn');
+    const gridHtml = appHybrid.elements.get('albumGrid').innerHTML;
+    assert.ok(gridHtml.includes('Priority: High'));
+    assert.ok(gridHtml.includes('Mandarake'));
+
+    // 2) Offline cached Google Sheet reload with duplicates (app.js line 473)
+    const dupSheetCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'FALSE,Game OST,Capcom,Breath of Fire III OST,CPCA-1004,Look under ブ,"¥3,000",,',
+      'TRUE,Game OST,Capcom,Breath of Fire III OST (Dup),CPCA-1004,Look under ブ,"¥3,500",High,Mandarake',
+      'FALSE,J-Rock,Asian Kung-Fu Generation,Sol-fa,KSCL-737,Look under ア,¥500,Medium,Book Off'
+    ].join('\n');
+
+    const appOnline = await bootApp({
+      fetchImpl: async (url) => {
+        if (String(url) === 'https://docs.google.com/spreadsheets/d/dupCache99/export?format=csv') {
+          return { ok: true, status: 200, async text() { return dupSheetCsv; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+    await appOnline.inputText('catalogUrlInput', 'https://docs.google.com/spreadsheets/d/dupCache99/edit');
+    await appOnline.clickElement('loadCatalogUrlBtn');
+    assert.equal(appOnline.elements.get('progressBadge').textContent, '1 / 2');
+
+    const cachedSnapshot = Object.fromEntries(appOnline.localStorage._store.entries());
+    const appOffline = await bootApp({
+      initialStorage: cachedSnapshot,
+      fetchImpl: async (url) => {
+        if (String(url).includes('export?format=csv')) {
+          throw new Error('offline');
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+    const offlineToast = appOffline.elements.get('toast').textContent;
+    assert.ok(offlineToast.includes('Loaded cached Google Sheet (offline)'));
+    assert.ok(offlineToast.includes('Merged 1 duplicate row (CPCA-1004)'));
+    assert.equal(appOffline.elements.get('progressBadge').textContent, '1 / 2');
+
+    // 3) Local .json upload with duplicate regCatNo
+    const dupJsonCatalog = {
+      schemaVersion: 1,
+      meta: { title: 'Local Dup JSON' },
+      items: [
+        { id: 'j1', category: 'Rock', artist: 'AKFG', title: 'Sol-fa', regCatNo: 'KSCL-737', catalog: 'KSCL-737', kana: 'ア', filing: 'Look under ア', price: '¥500' },
+        { id: 'j2', category: 'Rock', artist: 'AKFG', title: 'Sol-fa Dup', regCatNo: 'KSCL-737', catalog: 'KSCL-737', kana: 'ア', filing: 'Look under ア', price: '¥500' }
+      ]
+    };
+    await appOffline.selectLocalFile('dup-local.json', JSON.stringify(dupJsonCatalog));
+    const localJsonToast = appOffline.elements.get('toast').textContent;
+    assert.ok(localJsonToast.includes('Loaded local file: dup-local.json'));
+    assert.ok(localJsonToast.includes('Warning: 1 duplicate catalog entry (KSCL-737)'));
+
+    // 4) Content-sniffed CSV upload with non-.csv extension
+    await appOffline.selectLocalFile('sheet-export.txt', dupSheetCsv);
+    assert.equal(appOffline.elements.get('progressBadge').textContent, '1 / 2');
+    const sniffToast = appOffline.elements.get('toast').textContent;
+    assert.ok(sniffToast.includes('Loaded local CSV: sheet-export.txt'));
+    assert.ok(sniffToast.includes('Merged 1 duplicate row (CPCA-1004)'));
+  });
 });

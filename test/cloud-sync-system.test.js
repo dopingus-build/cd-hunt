@@ -237,6 +237,7 @@ async function startFullSystem(envOverrides = {}) {
   return {
     db,
     workerBaseUrl,
+    workerEnv,
     metadataBaseUrl,
     sampleCatalogUrl,
     samplePrefix,
@@ -1169,5 +1170,415 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     await offlineClient.selectLocalFile('my-list.csv', sheetCsv);
     assert.equal(offlineClient.elements.get('toast').textContent, 'Loaded local CSV: my-list.csv');
     assert.equal(offlineClient.elements.get('progressBadge').textContent, '1 / 2');
+  });
+
+  it('auto-deduplicates duplicate Google Sheet rows end-to-end across UI, SQLite, multi-row Sheet write-back, /api/share, and offline cache', async (t) => {
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256'
+      },
+      true,
+      ['sign', 'verify']
+    );
+    const pkcs8B64 = Buffer.from(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey)).toString('base64');
+    const pem = `-----BEGIN PRIVATE KEY-----\n${pkcs8B64.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
+
+    const sheetRows = [
+      ['Got it?', 'Aisle / Category', 'Artist / Franchise', 'Title / Release Details', 'Catalog Number', 'Filing Location & Shelf Search Advice', 'Target Used Price', 'Priority', 'Recommended Shops'],
+      ['FALSE', 'Game OST', 'Capcom (カプコン)', 'Breath of Fire III OST', 'CPCA-1004', 'Look under ブ', '¥3,000', '', ''],
+      ['TRUE', 'Game OST', 'Capcom', 'Breath of Fire III Original Soundtrack', 'CPCA-1004', 'Look under ブ', '¥3,500', 'High', 'Mandarake Grandchaos'],
+      ['FALSE', 'J-Rock', 'Asian Kung-Fu Generation', 'Sol-fa', 'KSCL-737', 'Look under ア', '¥500', 'Medium', 'Book Off'],
+      ['FALSE', 'Digital-Only', 'Hanatan', '"gradation"', 'N/A (Digital Only)', 'Digital only', '', '', 'iTunes JP'],
+      ['TRUE', 'Digital-Only', 'Hanatan (花たん)', 'gradation (Digital Single)', 'N/A (Digital Only)', 'Digital only', '', 'Low', 'Mora']
+    ];
+    const batchUpdates = [];
+
+    const googleMockServer = http.createServer(async (req, res) => {
+      const reqUrl = new URL(req.url, 'http://127.0.0.1');
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const bodyStr = Buffer.concat(chunks).toString('utf8');
+
+      if (req.method === 'POST' && reqUrl.pathname === '/oauth/token') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ access_token: 'ya29.dup-sys-token', expires_in: 3600 }));
+        return;
+      }
+      if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/dupSys01/values/A1:I500') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ values: sheetRows }));
+        return;
+      }
+      if (req.method === 'POST' && reqUrl.pathname === '/v4/spreadsheets/dupSys01/values:batchUpdate') {
+        const updatePayload = JSON.parse(bodyStr);
+        batchUpdates.push(updatePayload);
+        for (const item of updatePayload.data || []) {
+          const m = String(item.range || '').match(/A(\d+)$/);
+          if (m) {
+            const rowIdx = Number(m[1]) - 1;
+            if (sheetRows[rowIdx]) {
+              sheetRows[rowIdx][0] = String(item.values[0][0]);
+            }
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ totalUpdatedCells: (updatePayload.data || []).length }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const googleMockUrl = await listenServer(googleMockServer);
+    t.after(() => closeServer(googleMockServer));
+
+    const sys = await startFullSystem({
+      GOOGLE_OAUTH_TOKEN_URL: `${googleMockUrl}/oauth/token`,
+      GOOGLE_SHEETS_API_BASE_URL: googleMockUrl,
+      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+        client_email: 'cd-hunt-dup@sys.iam.gserviceaccount.com',
+        private_key: pem,
+        token_uri: `${googleMockUrl}/oauth/token`
+      })
+    });
+    t.after(() => sys.close());
+
+    const dupSheetCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'FALSE,Game OST,Capcom (カプコン),Breath of Fire III OST,CPCA-1004,Look under ブ,"¥3,000",,',
+      'TRUE,Game OST,Capcom,Breath of Fire III Original Soundtrack,CPCA-1004,Look under ブ,"¥3,500",High,Mandarake Grandchaos',
+      'FALSE,J-Rock,Asian Kung-Fu Generation,Sol-fa,KSCL-737,Look under ア,¥500,Medium,Book Off',
+      'FALSE,Digital-Only,Hanatan,"""gradation""",N/A (Digital Only),Digital only,,,iTunes JP',
+      'TRUE,Digital-Only,Hanatan (花たん),gradation (Digital Single),N/A (Digital Only),Digital only,,Low,Mora'
+    ].join('\n');
+
+    const sheetEditUrl = 'https://docs.google.com/spreadsheets/d/dupSys01/edit';
+    const sheetCsvUrl = 'https://docs.google.com/spreadsheets/d/dupSys01/export?format=csv';
+    const hash = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      'code_alice'
+    );
+
+    const client = await bootSystemClient(sys, {
+      hash,
+      syncDebounceMs: 10,
+      coverMocks: async (url) => {
+        if (url === sheetCsvUrl) {
+          return new Response(dupSheetCsv, { status: 200, headers: { 'Content-Type': 'text/csv' } });
+        }
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+    });
+
+    // Load duplicate Sheet via UI -> collapses 5 rows into 2 physical + 1 digital card, shows merge warning toast
+    client.setInput('catalogUrlInput', sheetEditUrl);
+    await client.clickElement('loadCatalogUrlBtn');
+    assert.equal(client.elements.get('progressBadge').textContent, '1 / 2');
+    const loadToast = client.elements.get('toast').textContent;
+    assert.ok(loadToast.includes('Merged 2 duplicate rows'));
+    assert.ok(loadToast.includes('CPCA-1004'));
+
+    await client.clickElement('viewModeBtn');
+    const gridHtml = client.elements.get('albumGrid').innerHTML;
+    assert.ok(gridHtml.includes('Priority: High'));
+    assert.ok(gridHtml.includes('Mandarake Grandchaos'));
+
+    // Initial debounced load push reconciles inconsistent duplicate Sheet Row 2 (A2) to TRUE
+    await client.settle(120);
+    assert.equal(sheetRows[1][0], 'TRUE');
+    assert.equal(sheetRows[2][0], 'TRUE');
+
+    // Uncheck deduplicated CPCA-1004 -> batchUpdate flips BOTH duplicate rows (A2 & A3) to FALSE
+    const updatesBeforeUncheck = batchUpdates.length;
+    client.triggerDocumentClick('toggle-acq', { 'data-id': 'sheet-cpca-1004' });
+    await client.settle(120);
+    assert.equal(client.elements.get('progressBadge').textContent, '0 / 2');
+    assert.equal(batchUpdates.length, updatesBeforeUncheck + 1);
+    assert.deepEqual(batchUpdates[batchUpdates.length - 1].data, [
+      { range: 'A2', values: [['FALSE']] },
+      { range: 'A3', values: [['FALSE']] }
+    ]);
+    assert.equal(sheetRows[1][0], 'FALSE');
+    assert.equal(sheetRows[2][0], 'FALSE');
+
+    // Re-check deduplicated CPCA-1004 -> batchUpdate flips BOTH duplicate rows (A2 & A3) back to TRUE
+    const updatesBeforeRecheck = batchUpdates.length;
+    client.triggerDocumentClick('toggle-acq', { 'data-id': 'sheet-cpca-1004' });
+    await client.settle(120);
+    assert.equal(client.elements.get('progressBadge').textContent, '1 / 2');
+    assert.equal(batchUpdates.length, updatesBeforeRecheck + 1);
+    assert.deepEqual(batchUpdates[batchUpdates.length - 1].data, [
+      { range: 'A2', values: [['TRUE']] },
+      { range: 'A3', values: [['TRUE']] }
+    ]);
+
+    // /api/share JSON & Markdown expose only single canonical ID (no -2 duplicate IDs)
+    await client.clickElement('copyAgentLinkBtn');
+    const shareMdUrl = client.copiedTexts.find((txt) => txt.includes('/api/share/'));
+    assert.ok(shareMdUrl);
+    const mdText = await (await fetch(shareMdUrl)).text();
+    assert.ok(mdText.includes('`sheet-cpca-1004`'));
+    assert.equal(mdText.includes('sheet-cpca-1004-2'), false);
+    const shareJson = await (await fetch(shareMdUrl.replace('?format=markdown', ''))).json();
+    const shareCatalog = Object.values(shareJson.catalogs)[0];
+    assert.equal(shareCatalog.checklist['sheet-cpca-1004'], true);
+    assert.equal(shareCatalog.checklist['sheet-cpca-1004-2'], undefined);
+
+    // Uncheck CPCA-1004 again and confirm SQLite + offline cached CSV reload preserve both uncheck & combined toast
+    client.triggerDocumentClick('toggle-acq', { 'data-id': 'sheet-cpca-1004' });
+    await client.settle(120);
+    assert.deepEqual(batchUpdates[batchUpdates.length - 1].data, [
+      { range: 'A2', values: [['FALSE']] },
+      { range: 'A3', values: [['FALSE']] }
+    ]);
+    const dbRow = sys.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+    assert.equal(dbRow[0].state_json.includes('sheet-cpca-1004-2'), false);
+    const storedChecklist = Object.values(JSON.parse(dbRow[0].state_json).catalogs)[0].checklist;
+    assert.equal(Boolean(storedChecklist['sheet-cpca-1004']), false);
+
+    const offlineClient = await bootSystemClient(sys, {
+      initialStorage: client.localStorage.snapshot(),
+      syncDebounceMs: 10,
+      coverMocks: async (url) => {
+        if (url === sheetCsvUrl) throw new Error('Network offline');
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+    });
+    const offlineToast = offlineClient.elements.get('toast').textContent;
+    assert.ok(offlineToast.includes('Loaded cached Google Sheet (offline)'));
+    assert.ok(offlineToast.includes('Merged 2 duplicate rows'));
+    assert.equal(offlineClient.elements.get('progressBadge').textContent, '0 / 2');
+  });
+
+  it('syncs Backup & Restore modal imports (filtering out non-custom covers) to SQLite and restores across devices', async (t) => {
+    const sys = await startFullSystem();
+    t.after(() => sys.close());
+
+    const hashA = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      'code_alice'
+    );
+    const deviceA = await bootSystemClient(sys, {
+      hash: hashA,
+      syncDebounceMs: 10
+    });
+    deviceA.triggerDocumentClick('load-preset', { 'data-preset-url': sys.sampleCatalogUrl });
+    await deviceA.settle(80);
+
+    await deviceA.clickElement('backupBtn');
+    assert.equal(deviceA.elements.get('backupModal').classList.contains('open'), true);
+    const exportedJson = JSON.parse(deviceA.elements.get('backupTextarea').value);
+    assert.deepEqual(exportedJson.checklist, {});
+
+    deviceA.elements.get('backupTextarea').value = JSON.stringify({
+      checklist: { 'sample-01': true, 'dig-01': true },
+      viewMode: 'single',
+      covers: {
+        'sample-01': {
+          selectedIndex: 1,
+          variants: [
+            { url: 'https://coverartarchive.org/release/x/front-500.jpg', label: '通常盤 Regular', source: 'musicbrainz', isRegular: true },
+            { url: 'https://custom.example/restored-jacket.jpg', label: 'Custom Jacket', source: 'custom', isRegular: false }
+          ]
+        }
+      }
+    });
+    await deviceA.clickElement('importBackupBtn');
+    await deviceA.settle(100);
+
+    assert.equal(deviceA.elements.get('progressBadge').textContent, '1 / 1');
+    assert.equal(deviceA.elements.get('viewModeLabel').textContent, 'Grid View');
+
+    const rowsA = sys.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+    assert.equal(rowsA.length, 1);
+    const cloudCatalogA = JSON.parse(rowsA[0].state_json).catalogs[sys.samplePrefix];
+    assert.deepEqual(cloudCatalogA.checklist, { 'sample-01': true, 'dig-01': true });
+    assert.equal(cloudCatalogA.viewMode, 'single');
+    assert.equal(cloudCatalogA.customCovers['sample-01'].variants.length, 1);
+    assert.equal(cloudCatalogA.customCovers['sample-01'].variants[0].url, 'https://custom.example/restored-jacket.jpg');
+
+    // Fresh Device B signs in and automatically restores imported checklist, viewMode, and custom cover
+    const hashB = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      'code_alice'
+    );
+    const deviceB = await bootSystemClient(sys, {
+      hash: hashB,
+      syncDebounceMs: 10
+    });
+    assert.equal(deviceB.elements.get('progressBadge').textContent, '1 / 1');
+    assert.equal(deviceB.elements.get('viewModeLabel').textContent, 'Grid View');
+    assert.ok(deviceB.elements.get('albumGrid').innerHTML.includes('https://custom.example/restored-jacket.jpg'));
+  });
+
+  it('syncs digital banner dismiss/restore, keeps signed-out edits local until re-sign-in merge, and recovers from mid-session 401 session expiry', async (t) => {
+    const sys = await startFullSystem();
+    t.after(() => sys.close());
+
+    const hashA = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      'code_alice'
+    );
+    const deviceA = await bootSystemClient(sys, {
+      hash: hashA,
+      syncDebounceMs: 10
+    });
+    deviceA.triggerDocumentClick('load-preset', { 'data-preset-url': sys.sampleCatalogUrl });
+    await deviceA.settle(80);
+    deviceA.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    await deviceA.clickElement('dismissNoteBtn');
+    await deviceA.settle(100);
+
+    // Device B sees dismissed digital banner synced via SQLite, then restores it
+    const hashB = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      'code_alice'
+    );
+    const deviceB = await bootSystemClient(sys, {
+      hash: hashB,
+      syncDebounceMs: 10
+    });
+    assert.equal(deviceB.elements.get('digitalNoteBanner').classList.contains('hidden'), true);
+    assert.equal(deviceB.elements.get('compactCountBar').classList.contains('hidden'), false);
+    await deviceB.clickElement('restoreNoteBtn');
+    await deviceB.settle(100);
+
+    // Device A reloads with its old snapshot -> receives newer restored note state from SQLite
+    const deviceAReloaded = await bootSystemClient(sys, {
+      initialStorage: deviceA.localStorage.snapshot(),
+      syncDebounceMs: 10
+    });
+    assert.equal(deviceAReloaded.elements.get('digitalNoteBanner').classList.contains('hidden'), false);
+    assert.equal(deviceAReloaded.elements.get('compactCountBar').classList.contains('hidden'), true);
+
+    // Sign out keeps local progress and blocks cloud PUTs until signing back in
+    await deviceAReloaded.clickElement('githubSignOutBtn');
+    assert.equal(deviceAReloaded.elements.get('copyAgentLinkBtn').classList.contains('hidden'), true);
+    assert.equal(deviceAReloaded.elements.get('githubSignOutBtn').classList.contains('hidden'), true);
+    assert.equal(deviceAReloaded.elements.get('githubAuthBtn').classList.contains('hidden'), false);
+    assert.equal(deviceAReloaded.elements.get('progressBadge').textContent, '1 / 1');
+    assert.equal(deviceAReloaded.localStorage.getItem('cd_hunt_sync_token_v1'), null);
+
+    const putsWhileSignedIn = deviceAReloaded.requestLog.filter((r) => r.method === 'PUT').length;
+    deviceAReloaded.triggerDocumentClick('toggle-acq', { 'data-id': 'dig-01' });
+    await deviceAReloaded.settle(80);
+    assert.equal(deviceAReloaded.requestLog.filter((r) => r.method === 'PUT').length, putsWhileSignedIn);
+
+    // Re-sign-in backfills local signed-out dig-01 edit to SQLite
+    await deviceAReloaded.clickElement('githubAuthBtn');
+    assert.equal(deviceAReloaded.locationNavigations.length, 1);
+    const reAuthHash = await sys.completeOAuthRedirect(deviceAReloaded.locationNavigations[0], 'code_alice');
+    const deviceAReAuth = await bootSystemClient(sys, {
+      initialStorage: deviceAReloaded.localStorage.snapshot(),
+      hash: reAuthHash,
+      syncDebounceMs: 10
+    });
+    await deviceAReAuth.settle(100);
+
+    const dbRowsReAuth = sys.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+    assert.deepEqual(
+      JSON.parse(dbRowsReAuth[0].state_json).catalogs[sys.samplePrefix].checklist,
+      { 'sample-01': true, 'dig-01': true }
+    );
+
+    // Mid-session JWT secret rotation triggers 401 -> clears session gracefully while keeping local edit
+    sys.workerEnv.JWT_SECRET = 'rotated-secret-invalidates-active-session-jwt';
+    deviceAReAuth.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    await deviceAReAuth.settle(100);
+
+    assert.equal(deviceAReAuth.requestLog.some((r) => r.method === 'PUT' && r.status === 401), true);
+    assert.ok(deviceAReAuth.elements.get('syncStatusPill').textContent.includes('Session expired'));
+    assert.ok(deviceAReAuth.elements.get('toast').textContent.includes('GitHub sync session expired'));
+    assert.equal(deviceAReAuth.elements.get('copyAgentLinkBtn').classList.contains('hidden'), true);
+    assert.equal(deviceAReAuth.localStorage.getItem('cd_hunt_sync_token_v1'), null);
+    assert.equal(deviceAReAuth.elements.get('progressBadge').textContent, '0 / 1');
+  });
+
+  it('isolates multiple catalogs (JSON preset, standalone Google Sheet, and local file) across cloud sync and /api/share', async (t) => {
+    const sys = await startFullSystem();
+    t.after(() => sys.close());
+
+    const multiSheetEditUrl = 'https://docs.google.com/spreadsheets/d/multiCatSheet1/edit';
+    const multiSheetCsvUrl = 'https://docs.google.com/spreadsheets/d/multiCatSheet1/export?format=csv';
+    const multiSheetCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops',
+      'FALSE,Games,Capcom,Breath of Fire III OST,CPCA-1004,Look under ブ,¥3000,High,Mandarake',
+      'FALSE,J-Rock,Asian Kung-Fu Generation,Sol-fa,KSCL-737,Look under ア,¥500,Medium,Book Off'
+    ].join('\n');
+
+    const hashA = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      'code_alice'
+    );
+    const deviceA = await bootSystemClient(sys, {
+      hash: hashA,
+      syncDebounceMs: 10,
+      coverMocks: async (url) => {
+        if (url === multiSheetCsvUrl) {
+          return new Response(multiSheetCsv, { status: 200, headers: { 'Content-Type': 'text/csv' } });
+        }
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+    });
+
+    // Catalog 1: JSON preset with sample-01 checked
+    deviceA.triggerDocumentClick('load-preset', { 'data-preset-url': sys.sampleCatalogUrl });
+    await deviceA.settle(80);
+    deviceA.triggerDocumentClick('toggle-acq', { 'data-id': 'sample-01' });
+    await deviceA.settle(100);
+
+    // Switch to Catalog 2: standalone Google Sheet with sheet-cpca-1004 checked
+    await deviceA.clickElement('openCatalogLoaderBtn');
+    deviceA.setInput('catalogUrlInput', multiSheetEditUrl);
+    await deviceA.clickElement('loadCatalogUrlBtn');
+    assert.equal(deviceA.elements.get('progressBadge').textContent, '0 / 2');
+    deviceA.triggerDocumentClick('toggle-acq', { 'data-id': 'sheet-cpca-1004' });
+    await deviceA.settle(120);
+
+    const dbRows = sys.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+    const storedState = JSON.parse(dbRows[0].state_json);
+    assert.equal(storedState.activeCatalogUrl, multiSheetCsvUrl);
+    assert.equal(Object.keys(storedState.catalogs).length, 2);
+
+    // /api/share Markdown surfaces both isolated catalogs cleanly
+    await deviceA.clickElement('copyAgentLinkBtn');
+    const shareMdUrl = deviceA.copiedTexts.find((txt) => txt.includes('/api/share/'));
+    assert.ok(shareMdUrl);
+    const shareMd = await (await fetch(shareMdUrl)).text();
+    assert.ok(shareMd.includes('`sample-01`'));
+    assert.ok(shareMd.includes('`sheet-cpca-1004`'));
+
+    // Fresh Device B boots straight into active Catalog 2 (1 / 2), then switches back to Catalog 1 (1 / 1)
+    const hashB = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      'code_alice'
+    );
+    const deviceB = await bootSystemClient(sys, {
+      hash: hashB,
+      syncDebounceMs: 10,
+      coverMocks: async (url) => {
+        if (url === multiSheetCsvUrl) {
+          return new Response(multiSheetCsv, { status: 200, headers: { 'Content-Type': 'text/csv' } });
+        }
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+    });
+    assert.equal(deviceB.elements.get('progressBadge').textContent, '1 / 2');
+
+    await deviceB.clickElement('openCatalogLoaderBtn');
+    deviceB.setInput('catalogUrlInput', sys.sampleCatalogUrl);
+    await deviceB.clickElement('loadCatalogUrlBtn');
+    assert.equal(deviceB.elements.get('progressBadge').textContent, '1 / 1');
+
+    // Loading a local file clears active remote URL & hides Share Link while leaving both cloud catalogs intact in SQLite
+    await deviceB.selectLocalFile('offline-local.json', sys.sampleCatalog);
+    assert.equal(deviceB.localStorage.getItem('cd_hunt_catalog_url_v1'), null);
+    await deviceB.clickElement('openCatalogLoaderBtn');
+    assert.equal(deviceB.elements.get('copyShareLinkBtn').classList.contains('hidden'), true);
+
+    const dbRowsAfterLocal = sys.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+    assert.equal(Object.keys(JSON.parse(dbRowsAfterLocal[0].state_json).catalogs).length, 2);
   });
 });
