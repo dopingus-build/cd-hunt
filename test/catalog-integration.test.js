@@ -2398,7 +2398,7 @@ describe('Google Sheet direct loading, JSON hybrid overlay, and Agent Link butto
     assert.equal(agentBtn.classList.contains('hidden'), false);
     await app.clickElement('copyAgentLinkBtn');
     assert.ok(app.copiedTexts.includes(shareUrl + '?format=markdown'));
-    assert.equal(app.elements.get('toast').textContent, 'Copied semi-private Agent/Gemini status link');
+    assert.equal(app.elements.get('toast').textContent, 'Copied semi-private Agent status link');
 
     await app.clickElement('githubSignOutBtn');
     assert.equal(agentBtn.classList.contains('hidden'), true);

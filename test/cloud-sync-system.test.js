@@ -800,7 +800,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     assert.equal(sys.db.queryRaw('SELECT write_count FROM daily_usage')[0].write_count, baselineWrites + 1);
   });
 
-  it('serves live semi-private /api/share link for Gemini/LLM agents and syncs Got it? back to Google Sheets via Service Account', async (t) => {
+  it('serves live semi-private /api/share link for AI/LLM agents and syncs Got it? back to Google Sheets via Service Account', async (t) => {
     const keyPair = await crypto.subtle.generateKey(
       {
         name: 'RSASSA-PKCS1-v1_5',
@@ -903,8 +903,8 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     assert.equal(batchUpdates.length, 1);
     assert.deepEqual(batchUpdates[0].data, [{ range: 'A3', values: [['TRUE']] }]);
 
-    // External LLM agent (e.g. Gemini) reads the semi-private share link without GitHub credentials
-    const agentRes = await fetch(copiedShareMdUrl, { headers: { Origin: 'https://gemini.google.com' } });
+    // External AI/LLM agent reads the semi-private share link without GitHub credentials
+    const agentRes = await fetch(copiedShareMdUrl, { headers: { Origin: 'https://agent.example' } });
     assert.equal(agentRes.status, 200);
     assert.equal(agentRes.headers.get('access-control-allow-origin'), '*');
     const agentMd = await agentRes.text();

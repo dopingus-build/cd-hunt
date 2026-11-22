@@ -1720,7 +1720,7 @@
     if (copyAgentLinkBtn) {
       copyAgentLinkBtn.addEventListener('click', function () {
         if (!syncShareUrl) return;
-        copyText(syncShareUrl + '?format=markdown', 'Copied semi-private Agent/Gemini status link');
+        copyText(syncShareUrl + '?format=markdown', 'Copied semi-private Agent status link');
       });
     }
 

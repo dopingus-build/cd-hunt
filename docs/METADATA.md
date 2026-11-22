@@ -192,7 +192,7 @@ All cards render immediately using an offline SVG jewel-case + Japanese obi stri
 
 ### Canonical Google Sheet CSV Template (`docs/sample-catalog-sheet.csv`)
 
-For Gemini/LLM-curated Google Sheets, import [`sample-catalog-sheet.csv`](./sample-catalog-sheet.csv) (9 columns, strictly 1 release per row, including `Priority` and `Recommended Shops`) and point your Gemini Gem / LLM agent to [`docs/AGENT_CATALOG_GUIDE.md`](./AGENT_CATALOG_GUIDE.md).
+For AI / LLM-curated Google Sheets, import [`sample-catalog-sheet.csv`](./sample-catalog-sheet.csv) (9 columns, strictly 1 release per row, including `Priority` and `Recommended Shops`) and point your assistant or coding agent to [`docs/AGENT_CATALOG_GUIDE.md`](./AGENT_CATALOG_GUIDE.md).
 
 ### Minimal Catalog JSON Template (`docs/sample-catalog.json`)
 

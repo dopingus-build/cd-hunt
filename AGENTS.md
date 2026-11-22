@@ -1,4 +1,4 @@
-# GEMINI.md — CD Hunt Repository Rules
+# AGENTS.md — CD Hunt Repository Instructions
 
 **CD Hunt** (`cd-hunt`) is a zero-dependency, offline-first static web app for hunting physical music releases in stores, paired with external JSON catalogs (`cd-metadata`), canonical Google Sheets, and an optional Cloudflare Worker + D1 GitHub sync backend.
 

@@ -1,31 +1,30 @@
-# LLM & Gemini Guide: Creating and Maintaining CD Hunt Lists
+# Agent & LLM Guide: Creating and Maintaining CD Hunt Lists
 
-This is the **single self-contained reference file** for using **Gemini** (the consumer Gemini web/mobile app, **Gemini Gems**, Gemini CLI, or Antigravity) or any coding agent to research Japanese CDs, maintain a **Canonical Google Sheet**, edit **`schemaVersion: 1` JSON** catalogs (such as [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata)), and check secondhand store availability in Japan.
+This is the **single self-contained reference file** for using any AI assistant or coding agent to research Japanese CDs, maintain a **Canonical Google Sheet**, edit **`schemaVersion: 1` JSON** catalogs (such as [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata)), and check secondhand store availability in Japan.
 
-- **Single Canonical URL to Give Gemini:**
+- **Single Canonical URL to Give an Agent:**
   `https://raw.githubusercontent.com/dopingus-build/cd-hunt/main/docs/AGENT_CATALOG_GUIDE.md`
 
 > **Architecture Context:** Your **Google Sheet** works both as a standalone zero-JSON catalog (`Google-Sheet-Only` mode: paste the Sheet URL straight into `cd-hunt`, cached locally for offline basements, or import a local `.csv`) and as a live overlay (`meta.googleSheetUrl`) paired with a durable JSON snapshot in `cd-metadata`. **`cd-hunt`** (`https://dopingus-build.github.io/cd-hunt/`) + GitHub-authenticated Cloudflare D1 remain the authoritative store for your trip checklist (`Got it?`).
 
-### Giving Gemini / Agents Live Read Access Without GitHub Credentials
+### Giving AI / LLM Agents Live Read Access Without GitHub Credentials
 
-Because Gemini cannot sign in with your GitHub account, CD Hunt mints a **semi-private, read-only capability link** whenever you sign in:
+Because external AI assistants cannot sign in with your GitHub account, CD Hunt mints a **semi-private, read-only capability link** whenever you sign in:
 1. Click **Sign in** in CD Hunt's top bar, then click **Agent Link** to copy your personal read-only status URL (`https://cd-hunt-sync.tndo.workers.dev/api/share/<token>?format=markdown`, or omit `?format=markdown` for JSON).
-2. Paste that URL to Gemini alongside your Google Sheet or catalog URL so Gemini can immediately inspect which CDs are already acquired (`Got it? = TRUE`) vs. still hunting.
+2. Paste that URL to your AI assistant alongside your Google Sheet or catalog URL so it can immediately inspect which CDs are already acquired (`Got it? = TRUE`) vs. still hunting.
 3. **What is exposed:** Only non-sensitive public CD catalog IDs, checklists, view mode, and your public GitHub username (`login`). Zero GitHub access tokens, emails, or private repo data ever touch D1 or `/api/share/<token>`.
 4. **Two-Way Google Sheet Sync (Service Account):** `GOOGLE_SERVICE_ACCOUNT_JSON` is live on the Worker (`cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com`, also surfaced inside **Catalog → Copy Bot Email** and at `https://cd-hunt-sync.tndo.workers.dev/api/status`). Share your Google Sheet with `cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com` as **Editor**, and toggling `Got it?` in `cd-hunt` will automatically write `TRUE`/`FALSE` back to Column A (including multi-tab sheets with `#gid=`).
 
 ---
 
-## Quick-Start: Creating a Custom "Gemini Gem" (Gemini App)
+## Quick-Start: Setting Up a Reusable Custom Assistant (Custom Instructions / Project / Gem / GPT)
 
-In the consumer **Gemini web/mobile app**, Google's term for a reusable custom skill/workflow is a **Gem**. You can create one once and reuse it across any trip list or Google Sheet.
+In any AI web or mobile app that supports reusable custom instructions (Custom Instructions, Projects, Gems, or Custom GPTs), you can configure a dedicated curator assistant once and reuse it across any trip list or Google Sheet:
 
-### How to Set Up the Gem
-1. Open [gemini.google.com](https://gemini.google.com/) -> **Explore Gems** -> **New Gem**.
-2. **Name:** `CD Hunt Curator & Shop Scout`
-3. **Knowledge (Optional):** Upload or link your working Google Sheet and/or this raw guide file (`AGENT_CATALOG_GUIDE.md`).
-4. **Instructions (Paste the block below verbatim):**
+### Setup Steps
+1. Create a new custom assistant/project named `CD Hunt Curator & Shop Scout`.
+2. **Knowledge (Optional):** Upload or link your working Google Sheet and/or this raw guide file (`AGENT_CATALOG_GUIDE.md`).
+3. **Instructions (Paste the block below verbatim):**
 
 ```text
 You are CD Hunt Curator & Shop Scout, an expert assistant for researching physical Japanese CD releases and secondhand store availability across Japan (Osaka Nipponbashi/Namba/Umeda, Akihabara, Nakano, Shinjuku, Shibuya) using the CD Hunt canonical schemas.
@@ -54,7 +53,7 @@ When checking shop availability (Suruga-ya, Mandarake, Lashinbang, Book Off, Tow
 
 ## Part 1: Canonical Google Sheet Schema (`v1`)
 
-All CD Hunt Google Sheets follow a single **9-column, 1-release-per-row** schema so humans, Gemini, and future `cd-hunt` importers parse every sheet deterministically. See [`docs/sample-catalog-sheet.csv`](./sample-catalog-sheet.csv) for a ready-to-import template (`File -> Import` in Google Sheets).
+All CD Hunt Google Sheets follow a single **9-column, 1-release-per-row** schema so humans, AI assistants, and `cd-hunt` importers parse every sheet deterministically. See [`docs/sample-catalog-sheet.csv`](./sample-catalog-sheet.csv) for a ready-to-import template (`File -> Import` in Google Sheets).
 
 ### Non-Negotiable Sheet Rules
 1. **Strictly 1 Release Per Row:** Never group multiple singles or mini-albums into a single row. Each release gets its own row so it maps 1-to-1 to a cover card and `Got it?` checkbox.
@@ -83,7 +82,7 @@ All CD Hunt Google Sheets follow a single **9-column, 1-release-per-row** schema
    - Rows 3–5: KPI formulas (`TOTAL PHYSICAL TARGETS`, `ACQUIRED / BOUGHT`, `STILL HUNTING`, `PROGRESS`) and Digital-Only notice.
    - Row 7: 9-column header (`Got it?,Aisle / Category,...,Recommended Shops`).
    - Bottom section (optional): `Digital-Only Releases (Skip Physical Hunting)` banner row, repeated 9-column header, then `Digital-Only` rows (`digitalOnly: true`).
-2. **Flat Table Layout** (produced by Gemini's *"Export to Sheets"* button):
+2. **Flat Table Layout** (produced by LLM *"Export to Sheets"* flows):
    - Row 1: 9-column header directly, followed by rows in Columns A–I (`Aisle / Category = "Digital-Only"` marks non-physical rows).
 
 ### 1-Click Template Copy + Auto-Invite URL (For Collaborators & Forkers)
@@ -195,7 +194,7 @@ Use this guide when filling Priority & Recommended Shops (helpful both in stores
 | Major J-Pop / J-Rock studio albums & common singles | `Medium` / `Low` | `Book Off, Disk Union (J-Rock/Indie), Suruga-ya` |
 | Digital-only singles | `Low` | `Digital Storefronts (iTunes JP / Mora / OTOTOY)` |
 
-### Step 5: Store Stock & Price Scouting Prompts (Gemini Web / Search)
+### Step 5: Store Stock & Price Scouting Prompts (Web / Search)
 When checking shop availability before or during a trip:
 - **Search Targets:** `suruga-ya.jp` (supports exact catno search and store stock filters such as Nipponbashi / Akihabara), `order.mandarake.co.jp` (filter by shop location like Grandchaos), `shop.lashinbang.com`, `shopping.bookoff.co.jp`, and `tower.jp` (new/back-catalog retail availability).
 - Always query **both** the Regular Edition `regCatNo` and the Limited/Anime edition catalog numbers so you see price differences before walking into a store.

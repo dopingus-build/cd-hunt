@@ -1388,7 +1388,7 @@ describe('Cloud sync config and frontend sync module (js/config.js & js/sync.js)
     assert.ok(wranglerToml.includes('PAUSE_SYNC = "false"'));
   });
 
-  it('validates priority, recommendedShops, meta.googleSheetUrl, canonical Sheet template, and Gemini skill/rules files', () => {
+  it('validates priority, recommendedShops, meta.googleSheetUrl, canonical Sheet template, and vendor-neutral agent skill/rules files', () => {
     const validate = getValidator();
     const validCatalog = makeValidCatalog({
       meta: {
@@ -1421,9 +1421,10 @@ describe('Cloud sync config and frontend sync module (js/config.js & js/sync.js)
     assert.match(skillMd, /^---\r?\nname:\s*cd-hunt-catalog\r?\ndescription:/);
     assert.ok(skillMd.includes('AGENT_CATALOG_GUIDE.md'));
 
-    const geminiMd = fs.readFileSync(path.join(__dirname, '..', 'GEMINI.md'), 'utf8');
-    assert.ok(geminiMd.includes('docs/AGENT_CATALOG_GUIDE.md'));
-    assert.ok(geminiMd.includes('docs/sample-catalog-sheet.csv'));
+    assert.equal(fs.existsSync(path.join(__dirname, '..', 'GEMINI.md')), false, 'Vendor-specific GEMINI.md must be replaced by AGENTS.md');
+    const agentsMd = fs.readFileSync(path.join(__dirname, '..', 'AGENTS.md'), 'utf8');
+    assert.ok(agentsMd.includes('docs/AGENT_CATALOG_GUIDE.md'));
+    assert.ok(agentsMd.includes('docs/sample-catalog-sheet.csv'));
   });
 });
 

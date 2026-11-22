@@ -852,11 +852,11 @@ describe('Semi-private read-only share endpoint (/api/share) and Google Service 
     assert.ok(getJson.shareToken);
     assert.ok(getJson.shareUrl.startsWith('https://sync.example/api/share/'));
 
-    // Public OPTIONS preflight on /api/share accepts any Origin (e.g. Gemini)
+    // Public OPTIONS preflight on /api/share accepts any Origin (e.g. external AI/LLM agent)
     const preflight = await workerFetch(
       new Request('https://sync.example/api/share/' + getJson.shareToken, {
         method: 'OPTIONS',
-        headers: { Origin: 'https://gemini.google.com' }
+        headers: { Origin: 'https://agent.example' }
       }),
       env
     );
@@ -867,7 +867,7 @@ describe('Semi-private read-only share endpoint (/api/share) and Google Service 
     const postShare = await workerFetch(
       new Request('https://sync.example/api/share/' + getJson.shareToken, {
         method: 'POST',
-        headers: { Origin: 'https://gemini.google.com' }
+        headers: { Origin: 'https://agent.example' }
       }),
       env
     );
@@ -876,7 +876,7 @@ describe('Semi-private read-only share endpoint (/api/share) and Google Service 
     // Valid GET /api/share/<token> JSON from external origin strips customCovers
     const shareJsonRes = await workerFetch(
       new Request(getJson.shareUrl, {
-        headers: { Origin: 'https://gemini.google.com' }
+        headers: { Origin: 'https://agent.example' }
       }),
       env
     );

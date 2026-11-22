@@ -130,7 +130,7 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
 
   it('allows cross-origin GET /api/share/* from external origins and rejects invalid share tokens with 401', async () => {
     const res = await fetch(`${WORKER_URL}/api/share/invalid-token`, {
-      headers: { Origin: 'https://gemini.google.com' }
+      headers: { Origin: 'https://agent.example' }
     });
     assert.equal(res.status, 401);
     assert.equal(res.headers.get('access-control-allow-origin'), '*');
