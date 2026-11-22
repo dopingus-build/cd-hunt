@@ -1,0 +1,14 @@
+CD Hunt Physical & Digital Release Checklist,,,,,,,,
+"1 Release Per Row — Canonical Google Sheet Template for CD Hunt (Anime, Game OST, Seiyuu & J-Rock/J-Pop)",,,,,,,,
+TOTAL PHYSICAL TARGETS,,ACQUIRED / BOUGHT,,STILL HUNTING,,PROGRESS,,
+"=COUNTIFS(B8:B500, ""<>Digital-Only"", B8:B500, ""<>Aisle / Category"", C8:C500, ""<>"""")",,"=COUNTIFS(A8:A500, TRUE, B8:B500, ""<>Digital-Only"")",,=A4-C4,,"=IFERROR(C4/A4, 0)",,"1 release per row"
+"NOTE: Keep 1 CD release per row. Digital-only tracks belong in the Digital-Only Releases section below so physical store counts stay accurate.",,,,,,,,
+,,,,,,,,
+Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops
+FALSE,Video Game Soundtracks,Capcom (カプコン),"Breath of Fire III Original Soundtrack (2-CD Set, 1997)",CPCA-1004,"Look under ブ (Bu, for Breath of Fire / ブレス オブ ファイア) or Capcom (カプコン) in VGM/Retro Game aisles","¥3,000–¥6,000",High,"Mandarake Grandchaos, Suruga-ya (Game OST aisle), Disk Union"
+FALSE,Anime Themes & Character Songs,yama,"""slash"" (Gundam: The Witch from Mercury S2 OP)",SRCL-12539 (通常盤 Regular) / SRCL-12540~41 (期間生産限定) / SRCL-12536~38 (初回盤),"Look under ヤ (Ya, for yama), Y, or Gundam (ガンダム)","¥300–¥700 (Reg) / ¥800–¥1,400 (Ltd)",High,"Book Off, Suruga-ya (Anime/J-Pop aisle), Lashinbang"
+FALSE,J-Rock / J-Pop,Asian Kung-Fu Generation (ASIAN KUNG-FU GENERATION),"Sol-fa (ソルファ)",KSCL-737 (通常盤 Regular),"Look under ア (A, for AKFG) in J-Rock aisle","¥400–¥800",Medium,"Book Off, Suruga-ya, Disk Union"
+,,,,,,,,
+Digital-Only Releases (Skip Physical Hunting),,,,,,,,
+Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops
+FALSE,Digital-Only,Hanatan (花たん),"""gradation""",N/A (Digital Only),Digital-only release — no physical CD exists. Skip physical shelf hunting.,Digital Only,Low,Digital Storefronts (iTunes JP / Mora)

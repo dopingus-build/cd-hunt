@@ -1,169 +1,193 @@
-# LLM & Agent Guide: Creating and Modifying CD Hunt Catalogs
+# LLM & Gemini Guide: Creating and Maintaining CD Hunt Lists
 
-This guide gives coding agents and LLMs exact, repeatable instructions for creating new catalog JSON files and adding or updating entries in existing catalogs (such as [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata)) for the **CD Hunt** web application (`https://dopingus-build.github.io/cd-hunt/`).
+This is the **single self-contained reference file** for using **Gemini** (the consumer Gemini web/mobile app, **Gemini Gems**, Gemini CLI, or Antigravity) or any coding agent to research Japanese CDs, maintain a **Canonical Google Sheet**, edit **`schemaVersion: 1` JSON** catalogs (such as [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata)), and check secondhand store availability in Japan.
 
-Read this alongside:
-- [`docs/METADATA.md`](./METADATA.md) — Schema overview, loading modes, and cover-resolution pipeline
-- [`schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json) — JSON Schema (Draft 2020-12) for `schemaVersion: 1`
-- [`docs/sample-catalog.json`](./sample-catalog.json) — Minimal valid catalog template
-- [`js/validate.js`](../js/validate.js) — Runtime validator enforced on every loaded catalog
-- [`js/cover-resolver.js`](../js/cover-resolver.js) — Live cover lookup and jewel-case SVG fallback logic
+- **Single Canonical URL to Give Gemini:**
+  `https://raw.githubusercontent.com/dopingus-build/cd-hunt/main/docs/AGENT_CATALOG_GUIDE.md`
+
+> **Architecture Context:** Your **Google Sheet** is your primary LLM-friendly research and data-entry workspace; **JSON catalogs in `cd-metadata`** are your durable, Google-independent snapshots; and **`cd-hunt`** (`https://dopingus-build.github.io/cd-hunt/`) + GitHub-authenticated Cloudflare D1 hold your live trip acquisition checklist (`Got it?`).
 
 ---
 
-## 1. Non-Negotiable Rules
+## Quick-Start: Creating a Custom "Gemini Gem" (Gemini App)
 
-Before editing any existing catalog or creating a new one, follow every rule below:
+In the consumer **Gemini web/mobile app**, Google's term for a reusable custom skill/workflow is a **Gem**. You can create one once and reuse it across any trip list or Google Sheet.
 
-1. **Never rename, renumber, or reuse existing `item.id` values.**
-   - Users' browser progress (collected checkmarks, personal notes, active filters, and cached album art) is saved in `localStorage` under a derived catalog prefix (`cd_hunt_<slug>_<hash>_`) keyed directly by `item.id`.
-   - Renaming `cd-12` to `cd-13` breaks saved progress for every existing user of that catalog.
-   - IDs must match `/^[a-zA-Z0-9_-]+$/` and be strictly unique within `items`.
-   - When inserting an item next to an existing themed run, use a letter suffix (e.g., `cd-11b`) or append the next unused sequential ID (e.g., `cd-53`, `dig-03`).
+### How to Set Up the Gem
+1. Open [gemini.google.com](https://gemini.google.com/) -> **Explore Gems** -> **New Gem**.
+2. **Name:** `CD Hunt Curator & Shop Scout`
+3. **Knowledge (Optional):** Upload or link your working Google Sheet and/or this raw guide file (`AGENT_CATALOG_GUIDE.md`).
+4. **Instructions (Paste the block below verbatim):**
 
-2. **Include `schemaVersion: 1` (and `$schema` URI).**
-   - Every catalog JSON file MUST include `"schemaVersion": 1`, and should include `"$schema"`:
-     ```json
-     "$schema": "https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json",
-     "schemaVersion": 1
-     ```
-   - `js/validate.js` rejects missing, non-integer, or unsupported `schemaVersion` values. If `$schema` is present, it must be a non-empty string.
+```text
+You are CD Hunt Curator & Shop Scout, an expert assistant for researching physical Japanese CD releases and secondhand store availability across Japan (Osaka Nipponbashi/Namba/Umeda, Akihabara, Nakano, Shinjuku, Shibuya) using the CD Hunt canonical schemas.
 
-3. **Never add `meta.storagePrefix`.**
-   - Both `schemas/catalog.v1.schema.json` (`meta.additionalProperties: false`) and `js/validate.js` explicitly reject `meta.storagePrefix`.
-   - Storage isolation is handled automatically at runtime by `deriveStoragePrefix()` in `js/storage.js` from the catalog URL, local filename, or inline metadata so separate catalogs never collide.
+When working with the user's Google Sheet:
+1. ALWAYS keep strictly ONE CD release per row (never combine multiple singles or albums into a comma-separated bundle row).
+2. Always match the 9 canonical columns in exact order:
+   Got it? | Aisle / Category | Artist / Franchise | Title / Release Details | Catalog Number | Filing Location & Shelf Search Advice | Target Used Price | Priority | Recommended Shops
+3. Preserve existing rows verbatim—especially the value of "Got it?", existing Artist/Title wording, and Catalog Numbers—unless the user explicitly asks to update them.
+4. Distinguish physical CDs vs. digital-only tracks:
+   - Never assume a track has a CD pressing. Verify whether a standalone CD single, album/mini-album, or OST exists.
+   - Put streaming/download-only tracks under Aisle / Category = "Digital-Only", Catalog Number = "N/A (Digital Only)", Target Used Price = "Digital Only", Recommended Shops = "Digital Storefronts (iTunes JP / Mora)".
+5. Prioritize Regular Editions (通常盤): list the standard regular catalog number first with "(通常盤 Regular)" or "(Reg CD)", followed by Anime/Limited editions.
+6. Format "Filing Location & Shelf Search Advice" starting with clear Gojuon kana cues (e.g. "Look under ヤ (Ya, for yama), Y, or Gundam (ガンダム)") so shelf dividers are easy to find in stores.
+7. Format "Target Used Price" with the yen range FIRST before any parentheses (e.g. "¥300–¥700 (Reg) / ¥800–¥1,400 (Ltd)").
+8. Set "Priority" to High, Medium, or Low, and fill "Recommended Shops" with the best concrete Japanese chains/stores for that release (e.g., Book Off, Suruga-ya, Mandarake Grandchaos, Lashinbang, Disk Union, Tower Records, Animate, GAMERS).
+9. Never cite or recommend direct image links from vgmdb.net, wikia.nocookie.net, fandom.com, or cdjapan.co.jp.
 
-4. **Verify Physical CD vs. `digitalOnly: true`.**
-   - Never assume a track received a retail CD pressing. Confirm whether a physical single, EP, album, or OST CD exists.
-   - For streaming/download-only tracks, set `"digitalOnly": true`, `"catalog": "Digital Only"`, `"regCatNo": "DIGITAL"`, `"price": "¥0 (Digital / No physical CD)"`, and `"mbEditions": []`.
-   - For physical CDs, `"digitalOnly"` is optional (omit or set `"digitalOnly": false`).
-
-5. **Match `item.category` to `categories[].key`.**
-   - If the catalog defines a `categories` array, `"All"` MUST be present (usually first: `{ "key": "All", "label": "All Items", "dot": "#94a3b8" }`).
-   - Every item's `category` must match one of the declared category `key`s (assign specific sub-category keys such as `"anime"` or `"game"`, not `"All"`).
-
-6. **Zero prohibited / hotlinked cover domains.**
-   - `js/validate.js` recursively scans every string field in the catalog and rejects any URL or reference containing:
-     - `vgmdb.net`
-     - `wikia.nocookie.net`
-     - `fandom.com`
-     - `cdjapan.co.jp`
-   - Never hardcode external cover image URLs. The app resolves covers dynamically in the browser from MusicBrainz / Cover Art Archive (`mbEditions`) and the Apple iTunes Search API (`itunesQuery` + `requiredGroups`), with an instant SVG jewel-case fallback.
-
-7. **Prioritize Regular Editions (`通常盤`).**
-   - Used Regular Editions (`通常盤`) are the target for in-person bargain hunting in Japan (usually ¥110–¥1,200 vs. ¥3,000+ OOP limited boxes).
-   - Put the Regular Edition **first** in `mbEditions`, include `"通常"` in its `label` (for example `"通常盤 Regular"`), and set `regCatNo` to its exact catalog number. `js/cover-resolver.js` checks `ed.label.includes('通常') || ed.catno === item.regCatNo` when prioritizing cover art.
-
-8. **Respect `js/app.js` and SVG rendering formatting rules.**
-   - Grid cards render `item.price.split('(')[0].trim()`. Always place the yen price range **before** the first `(` (e.g., `"¥500–¥1,100 (Reg)"`).
-   - The SVG jewel-case fallback (`buildJewelCaseDataURI`) displays:
-     - Top obi right-side reading: `item.kana.split('/')[0].trim()` — keep the part before `/` short (1–6 characters, e.g., `"ヤ / Y"` or `"ア / A"`).
-     - Spine/obi catalog code: `(item.regCatNo || item.catalog || 'N/A').split(/[(/,]/)[0].trim()`.
-     - Artist/title text sliced at **22 chars** (`artistJa || artist`) and **24 chars** (`titleJa || title`).
+When checking shop availability (Suruga-ya, Mandarake, Lashinbang, Book Off, Tower Records):
+- Filter to entries where "Got it?" is FALSE (unless the user asks otherwise).
+- Search using exact catalog numbers (especially Regular Edition catno first) plus Japanese artist/title strings.
+- Clearly distinguish in-stock mail-order vs. in-store/branch pickup, edition (通常盤 vs. 初回盤), and current price vs. target used price.
+```
 
 ---
 
-## 2. Schema Field Reference (`schemaVersion: 1`)
+## Part 1: Canonical Google Sheet Schema (`v1`)
 
-### Top-Level Structure
+All CD Hunt Google Sheets follow a single **9-column, 1-release-per-row** schema so humans, Gemini, and future `cd-hunt` importers parse every sheet deterministically. See [`docs/sample-catalog-sheet.csv`](./sample-catalog-sheet.csv) for a ready-to-import template (`File -> Import` in Google Sheets).
 
-| Field | Required | Type | Notes |
+### Non-Negotiable Sheet Rules
+1. **Strictly 1 Release Per Row:** Never group multiple singles or mini-albums into a single row. Each release gets its own row so it maps 1-to-1 to a cover card and `Got it?` checkbox.
+2. **Never delete or renumber existing rows lightly:** Downstream sync identifies releases by primary catalog number (first `ABC-1234` token in Column E) or normalized artist + title for digital tracks. Keep catalog numbers accurate and stable.
+3. **Never embed hotlinked image URLs from `vgmdb.net`, `wikia.nocookie.net`, `fandom.com`, or `cdjapan.co.jp`.**
+
+### Canonical Columns (A–I Required)
+
+| Col | Canonical Header | Format & Convention | Example |
 | --- | --- | --- | --- |
-| `$schema` | Recommended (Optional) | `string` (non-empty if set) | `"https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json"` |
-| `schemaVersion` | Yes | `integer` (`1`) | Must equal `1` |
-| `meta` | Optional (Recommended) | `object` | Allowed keys only: `title`, `subtitle`, `documentTitle`, `searchPlaceholder`, `digitalSectionTitle`, `digitalSectionSubtitle`. **Do NOT include `storagePrefix`.** |
-| `categories` | Optional | `array` | Each entry: `{ "key": "...", "label": "...", "dot": "#hex" }`. When non-empty, `"key": "All"` is required. |
-| `items` | Yes | `array` | Array of item objects (at least 1 item). |
+| **A** | `Got it?` | Spreadsheet boolean checkbox (`TRUE` / `FALSE`). Defaults to `FALSE` on new rows. | `FALSE` |
+| **B** | `Aisle / Category` | Aisle/genre pill label. Use `Digital-Only` for non-physical tracks. | `Anime Themes & Character Songs` |
+| **C** | `Artist / Franchise` | `English Name (日本語名)` when bilingual, or canonical billing. | `Capcom (カプコン)` or `yama` |
+| **D** | `Title / Release Details` | `"Title" (Romaji / Tie-in & Notes)` (concise release/tie-in subtitle). | `"slash" (Gundam: The Witch from Mercury S2 OP)` |
+| **E** | `Catalog Number` | Put Regular Edition (`通常盤` / `Reg CD`) **first** (`CODE (通常盤 Regular) / CODE2 (初回盤 Ltd)`), or `N/A (Digital Only)`. | `SRCL-12539 (通常盤 Regular) / SRCL-12540~41 (期間生産限定)` |
+| **F** | `Filing Location & Shelf Search Advice` | Start with `"Look under <カナ> (<Romaji>), <Alpha>, or <Franchise>"` covering Book Off, Suruga-ya, Mandarake, Disk Union. | `Look under ヤ (Ya, for yama), Y, or Gundam (ガンダム)` |
+| **G** | `Target Used Price` | Yen range **before** any `(` (`¥300–¥700 (Reg) / ¥800–¥1,400 (Ltd)`), or `Digital Only`. | `¥300–¥700 (Reg) / ¥800–¥1,400 (Ltd)` |
+| **H** | `Priority` | `High`, `Medium`, or `Low` (hunting urgency / rarity / buy-on-sight flag). | `High` |
+| **I** | `Recommended Shops` | Comma-separated chains/stores best suited for this release. | `Book Off, Suruga-ya (Anime/J-Pop aisle), Lashinbang` |
 
-### Item Fields
+*(Optional columns J+ if desired: `ID`, `Kana`, `iTunes Query`, `Cover URL` — omitted by default since `cd-hunt` derives them automatically from Columns A–I.)*
+
+### Supported Sheet Layouts
+1. **Dashboard Layout** (recommended, shown in [`docs/sample-catalog-sheet.csv`](./sample-catalog-sheet.csv)):
+   - Rows 1–2: Checklist Title & Subtitle.
+   - Rows 3–5: KPI formulas (`TOTAL PHYSICAL TARGETS`, `ACQUIRED / BOUGHT`, `STILL HUNTING`, `PROGRESS`) and Digital-Only notice.
+   - Row 7: 9-column header (`Got it?,Aisle / Category,...,Recommended Shops`).
+   - Bottom section (optional): `Digital-Only Releases (Skip Physical Hunting)` banner row, repeated 9-column header, then `Digital-Only` rows (`digitalOnly: true`).
+2. **Flat Table Layout** (produced by Gemini's *"Export to Sheets"* button):
+   - Row 1: 9-column header directly, followed by rows in Columns A–I (`Aisle / Category = "Digital-Only"` marks non-physical rows).
+
+---
+
+## Part 2: Canonical JSON Catalog Schema (`schemaVersion: 1`)
+
+Static catalogs in `cd-metadata` (and imported/cached JSON files) conform to [`schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json) and are validated at runtime by [`js/validate.js`](../js/validate.js).
+
+### Non-Negotiable JSON Rules
+1. **Never rename, renumber, or reuse existing `item.id` values.**
+   - Browser `localStorage` and D1 cloud sync key checkmarks and custom covers directly by `item.id`. Match `/^[a-zA-Z0-9_-]+$/`, append the next unused sequential ID (`cd-53`, `dig-03`) or a suffix (`cd-11b`), and ensure strict uniqueness.
+2. **Include `schemaVersion: 1` (and `$schema` URI):**
+   ```json
+   "$schema": "https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json",
+   "schemaVersion": 1
+   ```
+3. **Never add `meta.storagePrefix`.**
+   - Storage isolation is computed automatically by [`js/storage.js`](../js/storage.js) (`deriveStoragePrefix`). Allowed `meta` keys only: `title`, `subtitle`, `documentTitle`, `searchPlaceholder`, `digitalSectionTitle`, `digitalSectionSubtitle`, `googleSheetUrl`.
+4. **Match `item.category` to `categories[].key`.**
+   - When `categories` is non-empty, `"All"` MUST be present (e.g. `{ "key": "All", "label": "All Releases", "dot": "#a1a1aa" }`) and every item's `category` must match one declared `key`.
+5. **No prohibited domains anywhere in any JSON string:**
+   - Reject list: `vgmdb.net`, `wikia.nocookie.net`, `fandom.com`, `cdjapan.co.jp`. Cover art is resolved dynamically from MusicBrainz/Cover Art Archive and Apple iTunes Search API.
+6. **Prioritize Regular Editions (`通常盤`) and keep UI string conventions clean:**
+   - Put the Regular Edition **first** in `mbEditions` with `"通常"` in its `label`, and set `regCatNo` to that exact catalog number.
+   - `price`: Keep the primary yen range **before** the first `(` (cards display `item.price.split('(')[0].trim()`).
+   - `kana`: Keep the segment before `/` concise (`1–6` characters, e.g., `"ヤ / Y"`) for the fallback SVG obi header; `buildJewelCaseDataURI` slices artist/title at 22 / 24 characters.
+
+### Field Reference (`schemaVersion: 1`)
 
 #### Required Item Fields
-- **`id`** (`string`): Unique identifier matching `/^[a-zA-Z0-9_-]+$/` (e.g., `"cd-01"`, `"cd-11b"`, `"dig-01"`).
-- **`category`** (`string`): Must match one of `categories[].key`. Inspect the target catalog's `categories` array first (e.g., `"Anime Themes & Chara"`, `"Games & OSTs"`, `"J-Pop / Rock"`).
-- **`artist`** (`string`): English / romanized artist name as commonly billed.
-- **`title`** (`string`): Track/album title with English tie-in context in parentheses, e.g., `"\"slash\" (Gundam: The Witch from Mercury S2 OP)"`.
-- **`catalog`** (`string`): Primary catalog number(s) + edition breakdown, e.g., `"SRCL-12539 (通常盤) / SRCL-12540~41 (期間) / SRCL-12536~38 (初回)"` or `"Digital Only"`.
-- **`price`** (`string`): Required string (recommended non-empty yen range **before** the first `(`, e.g., `"¥300–¥700 (Reg) / ¥800–¥1,400 (Ltd)"` or `"¥0 (Digital / No physical CD)"`).
-- **`kana`** (`string`): Japanese Gojūon row/reading + alphabetical divider, with a short token before `/` (e.g., `"ヤ / Y"`).
-- **`filing`** (`string`): Concise, practical in-store shelf lookup guide for Book Off, Suruga-ya, Mandarake, and Disk Union (e.g., `"ヤ (yama) / Y / ガンダム (Gundam)"`).
+- **`id`** (`string`): Unique `/^[a-zA-Z0-9_-]+$/` identifier (`"cd-01"`, `"dig-01"`).
+- **`category`** (`string`): Category matching `categories[].key`.
+- **`artist`** (`string`): Primary/English artist billing.
+- **`title`** (`string`): Track/album title with concise tie-in context.
+- **`catalog`** (`string`): Human-readable edition/catalog summary (`"SRCL-12539 (通常盤) / SRCL-12540~41 (期間)"` or `"Digital Only"`).
+- **`price`** (`string`): Yen price range before `(` (e.g. `"¥300–¥700 (Reg) / ¥800–¥1,400 (Ltd)"`).
+- **`kana`** (`string`): Concise shelf reading prefix before `/` (e.g. `"ヤ / Y"`).
+- **`filing`** (`string`): In-store shelf search guide across Japanese secondhand shops.
 
 #### Optional / Conditionally Required Item Fields
-- **`digitalOnly`** (`boolean`): Optional boolean; set `true` for streaming/digital-only releases, omit or set `false` for physical CDs.
-- **`artistJa`** (`string`): Japanese artist billing (kana/kanji), used in detail view and fallback SVG.
-- **`titleJa`** (`string`): Japanese title + `『作品名』` tie-in label, used in detail view and fallback SVG.
-- **`regCatNo`** (`string`): Exact single-disc Regular Edition catalog number (e.g., `"SRCL-12539"`, or `"DIGITAL"` for `digitalOnly: true`).
-- **`mbEditions`** (`array` of `{ "catno": string, "label": string }`): MusicBrainz catalog lookup list. Put Regular (`通常盤`) first! Keep `mbEditions: []` when `digitalOnly: true`.
-- **`itunesQuery`** (`string`): Clean iTunes search string (`Title Artist`). Keep free of parenthetical edition labels like `(Anime OP)` or `(通常盤)`.
-- **`requiredGroups`** (`string[][]`): **REQUIRED by `js/validate.js` whenever `itunesQuery` is non-empty!** AND-of-ORs substring match array checked case-insensitively against iTunes `trackName + ' ' + collectionName + ' ' + artistName`.
-- **`accent`** (`string`): Hex color for the jewel-case fallback obi & subtle UI accents (e.g., `"#e11d48"`).
+- **`digitalOnly`** (`boolean`): Set `true` for streaming/download-only tracks (`mbEditions: []`, `regCatNo: "DIGITAL"`).
+- **`artistJa`** (`string`): Japanese artist billing (kana/kanji).
+- **`titleJa`** (`string`): Japanese title + `『作品名』` tie-in.
+- **`regCatNo`** (`string`): Exact Regular Edition catalog number (e.g. `"SRCL-12539"`).
+- **`mbEditions`** (`Array<{ catno: string, label?: string }>`): MusicBrainz catalog lookup order (Regular first).
+- **`itunesQuery`** (`string`): Clean query (`Title Artist`) free of `(Anime OP)` / `(通常盤)` tags.
+- **`requiredGroups`** (`string[][]`): **REQUIRED whenever `itunesQuery` is non-empty.** AND-of-ORs case-insensitive token groups checked against `trackName + ' ' + collectionName + ' ' + artistName`.
+- **`priority`** (`string`): Hunting urgency (e.g., `"High"`, `"Medium"`, `"Low"`).
+- **`recommendedShops`** (`string`): Best shops to check for this release (e.g., `"Book Off, Suruga-ya, Lashinbang"`).
+- **`accent`** (`string`): Hex accent color for SVG obi fallback (`"#3b82f6"`).
+
+### Repository Index Format (`index.json`)
+Place catalogs flat at repository root (`dopingus-build/cd-metadata` or `<your-login>/cd-metadata`) and register presets in `index.json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "catalogs": [
+    {
+      "id": "2026-japan",
+      "title": "2026 Japan (Osaka) CD Hunt",
+      "subtitle": "53 physical CDs + 2 digital-only releases",
+      "file": "2026-japan.json"
+    }
+  ]
+}
+```
 
 ---
 
-## 3. Step-by-Step Research Playbook
+## Part 3: Step-by-Step Research Playbook & Shop Scouting
 
-Follow these six steps whenever researching a new entry from scratch (e.g., from a user prompt like *"Add Song X from Anime Y"*).
+Follow these steps whenever researching new entries (for either Google Sheets or JSON):
 
-### Step 1: Confirm the Official Release & Format
-1. Identify the exact official artist billing, Japanese title, English/romanized title, and tie-in (`OP`, `ED`, `Insert`, `Main Theme`, `OST`, `Character Song`).
-2. Check whether the song actually received a standalone **CD single**, appears on an **album / mini-album**, appears only on an **OST**, or is **digital-only** (`digitalOnly: true`).
-   - *Watch out for streaming-only singles!* Many recent anime/game insert songs and VTuber/indie tracks launch on Spotify/Apple Music without a single CD, or only gain a physical pressing months later on a full album.
-3. Choose the matching `category` key from the catalog's `categories` list (e.g., `"anime"`, `"game"`, `"jpop"`, `"vocaloid"`).
+### Step 1: Confirm Official Release & Format
+1. Confirm exact artist billing, Japanese title, English/romanized title, and tie-in (`OP`, `ED`, `Insert`, `Main Theme`, `OST`, `Character Song`).
+2. Confirm whether the track actually has a standalone **CD single**, lives on an **album/EP/OST**, or is strictly **digital-only**. (Never conflate digital singles with physical pressings.)
 
-### Step 2: Research Catalog Numbers & Editions (`regCatNo`, `catalog`, `mbEditions`)
-1. Look up the physical release on MusicBrainz (via the API command below) and official label discographies.
-2. Separate multi-edition singles/albums carefully:
-   - **`通常盤` (Regular Edition):** Lowest cost used, standard jewel case, primary target. Put this **first** in `mbEditions` with `"通常"` in `label`, and set `regCatNo` to this exact catalog number.
-   - **`期間生産限定盤` (Anime / Time-Limited Edition):** Often features anime key art on the cover; include it second in `mbEditions` as a fallback/alt cover for the cover carousel.
-   - **`初回生産限定盤` (First Press Limited Edition):** Often comes in digipak/Blu-ray bundles; include after Regular/Anime editions.
-3. Verify the **exact catalog string stored in MusicBrainz**:
-   - Multi-disc limited sets often list a hyphen range externally (e.g., `SRCL-12537~8` or `SRCL-12537/8`), whereas MusicBrainz may index either `SRCL-12537~8`, `SRCL-12537`, or `SRCL-12537-8`. Always run the MusicBrainz `curl` check in Step 5 to verify the exact `catno` that returns hits!
-4. Common Japanese record label prefixes (useful sanity check for authentic catalog numbers):
-   - **Sony Music Labels:** `SRCL` (Sony Records), `VVCL` (SACRA MUSIC), `SECL` (SME Records), `AICL` (Sony Music Associated), `ESCL` (Epic), `KSCL` (Ki/oon)
-   - **Bandai Namco Music Live / Lantis:** `LACM` (Singles), `LACA` (Albums/OSTs)
-   - **Victor Entertainment / FlyingDog:** `VICL` / `VIZL`, `VTCL` / `VTZL`
-   - **King Records:** `KICM` (Singles), `KICA` (Albums/Soundtracks)
-   - **Aniplex:** `SVWC`
-   - **Pony Canyon:** `PCCG` / `PCCA`
-   - **TOHO animation RECORDS:** `THCS` (Singles), `THCA` (Albums)
-   - **Capcom (Suleputer):** `CPCA`
-   - **Universal Music Japan:** `TYCT` / `UPCH` / `UMCK`
+### Step 2: Research Catalog Numbers & Editions (`regCatNo`, `mbEditions`)
+1. Look up the physical pressing on MusicBrainz and official label discographies.
+2. Put **`通常盤` (Regular Edition)** first (`"通常盤 Regular"`), followed by `期間生産限定盤` (Anime Edition) and `初回生産限定盤` (First Press Limited).
+3. Sanity-check label prefixes (`SRCL` Sony Records, `VVCL` SACRA MUSIC, `SECL` SME, `AICL` Sony Associated, `ESCL` Epic, `KSCL` Ki/oon, `LACM`/`LACA` Lantis, `VICL`/`VTCL` Victor/FlyingDog, `KICM`/`KICA` King Records, `SVWC` Aniplex, `PCCG`/`PCCA` Pony Canyon, `THCS`/`THCA` TOHO animation, `CPCA` Capcom, `TYCT`/`UPCH`/`UMCK` Universal).
+4. Note whether MusicBrainz indexes multi-disc sets as `CAT-1~2`, `CAT-1`, or `CAT-1-2` when running Step 6 verification.
 
-### Step 3: Determine Japanese Store Shelf-Filing (`kana` & `filing`)
-1. Compute the Japanese **Gojūon (五十音)** shelf row (`あ・か・さ・た・な・は・ま・や・ら・わ` / A-KA-SA-TA-NA-HA-MA-YA-RA-WA) based on reading:
-   - Keep the prefix before `/` concise (`1–6` kana, e.g., `"やま / や行"`, `"あいみょん / あ行"`, `"のうねいむ / な行"`) so the SVG obi header stays legible.
-2. Write practical, store-aware `filing` guidance covering where Japanese secondhand shops actually place the disc:
-   - **Artist-credited J-Pop / Anisong OP & ED singles** (e.g., yama, LiSA, Aimer, YOASOBI):
-     - *Book Off / Tsutaya:* Usually in **J-Pop Singles/Albums** OR **Anime** section under the **artist's Gojūon** (`や行` for yama). Mention both if stores split J-Pop artists with anime tie-ins.
-     - *Suruga-ya / Mandarake:* Often cross-filed under **Anime Franchise (`『作品名』`)** OR **Artist (J-Pop/Anisong)**.
-   - **Character Songs / Seiyuu / OSTs:**
-     - *Book Off:* OSTs go under **Anime Soundtrack / Game Music** by **work title kana** (`す` for Suisei no Majo, `ふ` for Fairy gone); solo seiyuu releases go by **seiyuu family name** (`は` for Hanazawa).
-     - *Mandarake / Suruga-ya:* Almost always filed by **Franchise / Work Title** first.
-   - **Game Music / Doujin / Vocaloid:**
-     - *Mandarake / Suruga-ya / Melonbooks / Disk Union:* Check **Game Music**, **Doujin/Vocaloid-P**, or **Electronic/Indie** racks; Disk Union often sorts English-script acts alphabetically (`K`, `Y`, `M`) alongside Gojūon dividers.
+### Step 3: Gojūon Shelf-Filing & Used Price Ranges
+1. Determine Japanese **Gojūon (`あ・か・さ・た・な・は・ま・や・ら・わ`)** filing row:
+   - Keep `kana` before `/` short (`"ヤ / Y"`, `"ア / A"`, `"ノ / No"`).
+   - **J-Pop / Anisong artists** (*yama*, *LiSA*, *EGOIST*, *ChouCho*): Book Off files by artist Gojūon under J-Pop or Anime; Suruga-ya / Mandarake also cross-file under Anime Franchise (`『作品名』`).
+   - **OSTs / Character Songs:** Book Off & Mandarake usually file under Anime Soundtrack / Game Music by **work title kana**.
+   - **Indie / Game / Doujin / Vocaloid-P:** Check Mandarake, Suruga-ya, Melonbooks, and Disk Union (Disk Union often files Latin names alphabetically alongside Gojūon dividers).
+2. Set realistic secondhand yen ranges (`¥250–¥600` common singles, `¥500–¥1,100` recent popular anime OP/EDs, `¥900–¥2,200` albums/2CD OSTs, `¥1,800–¥4,500+` OOP retro game OSTs/indie CDs).
 
-### Step 4: Estimate Used Retail Price Range (`price`)
-1. Set a realistic Japanese secondhand price range in yen (`¥...–¥...`) reflecting typical Book Off / Suruga-ya / Mandarake regular-edition pricing:
-   - Older/common regular J-Pop or anime CD singles: `¥250–¥600` or `¥500–¥900`
-   - Recent popular anime OP/ED regular singles: `¥500–¥1,100`
-   - Full studio albums & major 2CD OSTs: `¥900–¥2,200`
-   - OOP niche anime/game OSTs or doujin pressings: `¥1,800–¥4,500+`
-2. Always keep the yen range **before** the first `(` (e.g., `"¥500–¥1,100 (Reg) / ¥1,200–¥2,200 (Anime Ltd)"`), because compact album cards strip everything from `(` onward (`item.price.split('(')[0].trim()`).
+### Step 4: Set `Priority` & `Recommended Shops`
+Use this guide when filling Priority & Recommended Shops (helpful both in stores and for AI stock checks):
 
-### Step 5: Build & Live-Verify `mbEditions`, `itunesQuery`, and `requiredGroups`
+| Release Profile | Typical `Priority` | Typical `Recommended Shops` |
+| --- | --- | --- |
+| Rare / OOP 1990s–2000s Game OSTs, venue-only CDs, small-run indies | `High` (buy on sight) | `Mandarake (Grandchaos / Complex), Suruga-ya (Game OST / Doujin floor), Disk Union` |
+| Current/recent Anime OP/ED & Character singles (`通常盤` easy/cheap to find) | `Medium` (or `High` if trip centerpiece) | `Book Off (¥250–¥500 bins), Suruga-ya Anime aisle, Lashinbang, Tower Records / Animate (if new)` |
+| Major J-Pop / J-Rock studio albums & common singles | `Medium` / `Low` | `Book Off, Disk Union (J-Rock/Indie), Suruga-ya` |
+| Digital-only singles | `Low` | `Digital Storefronts (iTunes JP / Mora / OTOTOY)` |
 
-`js/cover-resolver.js` resolves covers in two stages in the browser:
-1. **Stage 1 — MusicBrainz + Cover Art Archive (`mbEditions`):**
-   - Calls `https://musicbrainz.org/ws/2/release/?query=catno:{catno}&fmt=json&limit=4` for each entry in `mbEditions`.
-   - Fetches `https://coverartarchive.org/release/{mbid}/front-500`.
-2. **Stage 2 — Apple iTunes Search API (`itunesQuery` + `requiredGroups`):**
-   - Calls `https://itunes.apple.com/search?term={itunesQuery}&country={jp|us}&entity={song|album}&limit=8`.
-   - Accepts a result **only if** EVERY inner group in `requiredGroups` has at least one substring match (case-insensitive) inside `trackName + ' ' + collectionName + ' ' + artistName`.
-   - Prefers results containing `通常盤` / `Regular` in `collectionName`, and falls back below `アニメ盤` / `初回` when not present.
+### Step 5: Store Stock & Price Scouting Prompts (Gemini Web / Search)
+When checking shop availability before or during a trip:
+- **Search Targets:** `suruga-ya.jp` (supports exact catno search and store stock filters such as Nipponbashi / Akihabara), `order.mandarake.co.jp` (filter by shop location like Grandchaos), `shop.lashinbang.com`, `shopping.bookoff.co.jp`, and `tower.jp` (new/back-catalog retail availability).
+- Always query **both** the Regular Edition `regCatNo` and the Limited/Anime edition catalog numbers so you see price differences before walking into a store.
 
-**Always verify both APIs live with `curl` before finalizing an entry:**
+### Step 6: Live API & JSON Schema Verification (For Git Commits)
+When updating a JSON catalog file directly (CLI/agent workflow), verify covers and validation before committing:
 
 ```bash
-# 1. Look up MusicBrainz release MBIDs by exact catalog number
+# 1. Verify MusicBrainz release MBID + Cover Art Archive front-500 status
 CATNO="SRCL-12539"
 MBID=$(curl -fsSL -A "cd-hunt-catalog-verifier/1.0 (https://github.com/dopingus-build/cd-hunt)" \
   "https://musicbrainz.org/ws/2/release/?query=catno:${CATNO}&fmt=json&limit=4" \
@@ -174,11 +198,9 @@ MBID=$(curl -fsSL -A "cd-hunt-catalog-verifier/1.0 (https://github.com/dopingus-
     }
     if (d.releases?.[0]?.id) process.stdout.write(d.releases[0].id);
   ')
-
-# 2. Confirm Cover Art Archive returns an HTTP 200 after redirects for front-500 (404 means no cover uploaded)
 [ -n "$MBID" ] && curl -sS -o /dev/null -w "CAA status: %{http_code}\n" -L "https://coverartarchive.org/release/${MBID}/front-500"
 
-# 3. Test Apple iTunes Search API (country=jp and country=us) + requiredGroups logic
+# 2. Verify Apple iTunes Search API + requiredGroups logic
 QUERY=$(node -e 'console.log(encodeURIComponent("slash yama"))')
 curl -fsSL "https://itunes.apple.com/search?term=${QUERY}&country=jp&entity=song&limit=8" \
   | node -e '
@@ -190,62 +212,20 @@ curl -fsSL "https://itunes.apple.com/search?term=${QUERY}&country=jp&entity=song
       console.log(ok ? "MATCH" : "SKIP ", "|", r.artistName, "|", r.trackName, "|", r.collectionName);
     }
   '
+
+# 3. Validate JSON catalog against js/validate.js and run full test suite
+node -e '
+  const fs = require("fs");
+  const { validateCatalog } = require("./js/validate.js");
+  const catalog = JSON.parse(fs.readFileSync("/path/to/catalog.json", "utf8"));
+  const res = validateCatalog(catalog);
+  if (!res.valid) { console.error("INVALID:", res.errors); process.exit(1); }
+  console.log("VALID:", catalog.items.length, "items");
+'
+node --test test/*.test.js
 ```
 
-> **Tip for `requiredGroups`:** Put kanji/kana and romanized/English variants inside the same inner array (`["機動戦士ガンダム", "Gundam", "水星の魔女"]`) OR match the clean bilingual song + artist tokens (`[["slash"], ["yama"]]`). Avoid overly strict full-album subtitles in `requiredGroups` because singles and albums use different `collectionName` suffixes on Apple Music.
-
-### Step 6: Validate Before Committing
-1. Run `validateCatalog()` from `js/validate.js` against your updated JSON file:
-   ```bash
-   node -e '
-     const fs = require("fs");
-     const { validateCatalog } = require("./js/validate.js");
-     const catalog = JSON.parse(fs.readFileSync("/path/to/catalog.json", "utf8"));
-     const res = validateCatalog(catalog);
-     if (!res.valid) {
-       console.error("INVALID:", res.errors);
-       process.exit(1);
-     }
-     console.log("VALID:", catalog.items.length, "items");
-   '
-   ```
-2. If you added a **new catalog file** in `cd-metadata/`:
-   - Place the `.json` file at the **root** of `dopingus-build/cd-metadata` (keep the repo flat).
-   - Register it in `cd-metadata/index.json` under `catalogs` (with `id`, `title`, `subtitle`, and `file`, plus optional `url`) so it appears automatically in the app's **Preset Catalogs** list and whenever someone pastes `https://github.com/<owner>/<repo>` into CD Hunt:
-     ```json
-     {
-       "schemaVersion": 1,
-       "catalogs": [
-         {
-           "id": "2026-japan",
-           "title": "2026 Japan (Osaka) CD Hunt",
-           "subtitle": "53 physical CDs + 2 digital-only releases",
-           "file": "2026-japan.json"
-         }
-       ]
-     }
-     ```
-3. Run the `cd-hunt` test suite (`node --test test/*.test.js`). Note that when `../cd-metadata` exists locally, `test/catalog-integration.test.js` automatically validates all metadata JSON files and `index.json`.
-
----
-
-## 4. Annotated Walkthrough: Adding an Entry
-
-**Prompt:** *"Add `'slash'` by `yama` (Gundam: The Witch from Mercury S2 OP) to `2026-japan.json`."*
-
-### Step-by-Step Decisions
-1. **Pick a safe `id`:** Inspect `2026-japan.json`'s existing items and categories first — never renumber existing IDs! Append the next unused sequential ID (in `2026-japan.json`, this live entry is `"id": "cd-39"`, `"category": "Anime Themes & Chara"`).
-2. **Physical editions (`通常盤` first):**
-   - Regular Edition (`通常盤`): `SRCL-12539` -> put in `regCatNo` and first in `mbEditions` (verified live on MusicBrainz -> CAA `front-500` HTTP `200`).
-   - Anime Limited Edition (`期間生産限定`): `SRCL-12540~41` -> MusicBrainz indexes the primary disc catno `SRCL-12540` (CAA `front-500` HTTP `200`).
-   - First Press Limited Edition (`初回盤`): `SRCL-12536~38` -> MusicBrainz indexes `SRCL-12536` (CAA `front-500` HTTP `404`, so having `SRCL-12539` and `SRCL-12540` ahead of it ensures instant cover fallback!).
-3. **Gojūon & Filing:**
-   - Keep `kana` concise before `/`: `"ヤ / Y"`.
-   - Give clean store-divider clues in `filing`: `"ヤ (yama) / Y / ガンダム (Gundam)"`.
-4. **Price:** Put the regular-edition used range first before `(`: `"¥300–¥700 (Reg) / ¥800–¥1,400 (Ltd)"`.
-5. **Cover Verification:** `itunesQuery: "slash yama"`, `requiredGroups: [["slash"], ["yama"]]` — verified against iTunes `country=jp` (`yama | slash | slash - Single`).
-
-### Resulting Validated Entry (`cd-39` in `2026-japan.json`)
+### Annotated JSON Example (`cd-39` with `priority` & `recommendedShops`)
 
 ```json
 {
@@ -270,6 +250,8 @@ curl -fsSL "https://itunes.apple.com/search?term=${QUERY}&country=jp&entity=song
     ["slash"],
     ["yama"]
   ],
-  "accent": "#3b82f6"
+  "accent": "#3b82f6",
+  "priority": "High",
+  "recommendedShops": "Book Off, Suruga-ya (Anime/J-Pop aisle), Lashinbang"
 }
 ```

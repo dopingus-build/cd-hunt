@@ -2180,3 +2180,83 @@ describe('GitHub Cloud Sync integration', () => {
     assert.ok(evilUrls.includes('https://cd-hunt-sync.tndo.workers.dev/api/state'));
   });
 });
+
+describe('Priority and Recommended Shops rendering', () => {
+  it('renders priority badge and recommended shops in 1-Col view and Crate Flip lightbox when provided, and hides them when omitted', async () => {
+    const customCatalog = {
+      schemaVersion: 1,
+      meta: {
+        title: 'Shops & Priority Test',
+        googleSheetUrl: 'https://docs.google.com/spreadsheets/d/example123/edit'
+      },
+      categories: [
+        { key: 'All', label: 'All', dot: '#a1a1aa' },
+        { key: 'Game', label: 'Game', dot: '#f59e0b' }
+      ],
+      items: [
+        {
+          id: 'prio-01',
+          category: 'Game',
+          artist: 'Capcom',
+          title: 'Breath of Fire III OST',
+          regCatNo: 'CPCA-1004',
+          catalog: 'CPCA-1004 (通常盤)',
+          kana: 'フ / B',
+          filing: 'ブ (Breath of Fire)',
+          price: '¥3,000–¥6,000',
+          priority: 'High',
+          recommendedShops: 'Mandarake Grandchaos, Suruga-ya'
+        },
+        {
+          id: 'prio-02',
+          category: 'Game',
+          artist: 'Generic Artist',
+          title: 'Plain Album',
+          regCatNo: 'ABCD-0001',
+          catalog: 'ABCD-0001',
+          kana: 'シ / G',
+          filing: 'シ (Generic)',
+          price: '¥500–¥900'
+        },
+        {
+          id: 'prio-03',
+          category: 'Game',
+          artist: 'Low Artist',
+          title: 'Low Prio Album',
+          regCatNo: 'LOW-0001',
+          catalog: 'LOW-0001',
+          kana: 'ロ / L',
+          filing: 'ロ (Low)',
+          price: '¥200–¥400',
+          priority: 'Low',
+          recommendedShops: 'Book Off'
+        }
+      ]
+    };
+
+    const app = await bootApp({ catalogObject: customCatalog });
+
+    // Switch to 1-Col view and verify inline priority badge + recommended shops render cleanly
+    await app.clickElement('viewModeBtn');
+    const gridHtml = app.elements.get('albumGrid').innerHTML;
+    assert.ok(gridHtml.includes('Priority: High'));
+    assert.ok(gridHtml.includes('priority-high'));
+    assert.ok(gridHtml.includes('Priority: Low'));
+    assert.ok(gridHtml.includes('priority-low'));
+    assert.ok(gridHtml.includes('Mandarake Grandchaos, Suruga-ya'));
+
+    // Lightbox item 0 (has priority + recommendedShops)
+    app.triggerDocumentClick('open-lb', { 'data-lb-idx': '0' });
+    assert.equal(app.elements.get('lbPriorityBadge').classList.contains('hidden'), false);
+    assert.equal(app.elements.get('lbPriorityBadge').textContent, 'Priority: High');
+    assert.equal(app.elements.get('lbShopsRow').classList.contains('hidden'), false);
+    assert.equal(app.elements.get('lbShops').textContent, 'Mandarake Grandchaos, Suruga-ya');
+
+    // Lightbox item 1 (omits both priority + recommendedShops -> cleanly hidden)
+    app.triggerDocumentClick('open-lb', { 'data-lb-idx': '1' });
+    assert.equal(app.elements.get('lbPriorityBadge').classList.contains('hidden'), true);
+    assert.equal(app.elements.get('lbPriorityBadge').textContent, '');
+    assert.equal(app.elements.get('lbShopsRow').classList.contains('hidden'), true);
+    assert.equal(app.elements.get('lbShops').textContent, '');
+  });
+});

@@ -26,7 +26,8 @@
         "documentTitle": { "type": "string" },
         "searchPlaceholder": { "type": "string" },
         "digitalSectionTitle": { "type": "string" },
-        "digitalSectionSubtitle": { "type": "string" }
+        "digitalSectionSubtitle": { "type": "string" },
+        "googleSheetUrl": { "type": "string" }
       }
     },
     "categories": {
@@ -98,7 +99,9 @@
               }
             }
           },
-          "accent": { "type": "string" }
+          "accent": { "type": "string" },
+          "priority": { "type": "string" },
+          "recommendedShops": { "type": "string" }
         }
       }
     }

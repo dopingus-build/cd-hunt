@@ -899,6 +899,19 @@
     }).join('');
   }
 
+  function getPriorityToneClass(priority) {
+    if (!priority) return '';
+    const text = String(priority);
+    if (/high|must|★★★|\bp1\b|\b1\b/i.test(text)) return 'priority-high';
+    if (/low|bargain|★\b|\bp3\b|\b3\b/i.test(text)) return 'priority-low';
+    return 'priority-med';
+  }
+
+  function buildPriorityBadgeHTML(priority) {
+    if (!priority) return '';
+    return '<span class="priority-badge ' + getPriorityToneClass(priority) + '">Priority: ' + escapeHTML(priority) + '</span>';
+  }
+
   function buildCardHTML(item, lightboxIdx) {
     const isAcquired = !!state.acquiredMap[item.id];
     const isDigital = !!item.digitalOnly;
@@ -906,6 +919,9 @@
     const cardClasses = 'cd-card' + (isAcquired ? ' acquired' : '') + (isDigital ? ' digital' : '');
 
     if (state.viewMode === 'single') {
+      const shopsHTML = item.recommendedShops
+        ? '<div class="shops-row"><strong>Recommended Shops:</strong> ' + escapeHTML(item.recommendedShops) + '</div>'
+        : '';
       return (
         '<article class="' + cardClasses + '" data-album-id="' + item.id + '" data-action="open-lb" data-lb-idx="' + lightboxIdx + '">' +
           '<div class="cover-box">' +
@@ -922,7 +938,10 @@
                 '<div class="single-artist">' + escapeHTML(item.artist) + '</div>' +
                 '<div class="single-artist-ja">' + escapeHTML(item.artistJa) + '</div>' +
               '</div>' +
-              '<span class="price-badge">' + escapeHTML(item.price) + '</span>' +
+              '<div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end;">' +
+                buildPriorityBadgeHTML(item.priority) +
+                '<span class="price-badge">' + escapeHTML(item.price) + '</span>' +
+              '</div>' +
             '</div>' +
             '<div>' +
               '<h2 class="single-title">' + escapeHTML(item.title) + '</h2>' +
@@ -938,7 +957,8 @@
               '</button>' +
             '</div>' +
             '<div class="filing-box">' +
-              '<strong>' + (isDigital ? 'Note:' : 'どこで探す:') + '</strong> ' + escapeHTML(item.filing) +
+              '<div><strong>' + (isDigital ? 'Note:' : 'どこで探す:') + '</strong> ' + escapeHTML(item.filing) + '</div>' +
+              shopsHTML +
             '</div>' +
             '<button type="button" class="acquire-full-btn ' + (isAcquired ? 'is-acquired' : '') + '" data-action="toggle-acq" data-id="' + item.id + '">' +
               (isDigital
@@ -1071,6 +1091,16 @@
 
     document.getElementById('lbCounter').textContent = (state.lightboxIndex + 1) + ' / ' + filtered.length;
     document.getElementById('lbCategoryBadge').textContent = item.category;
+    const priorityBadge = document.getElementById('lbPriorityBadge');
+    if (priorityBadge) {
+      if (item.priority) {
+        priorityBadge.textContent = 'Priority: ' + item.priority;
+        priorityBadge.className = 'priority-badge ' + getPriorityToneClass(item.priority);
+      } else {
+        priorityBadge.textContent = '';
+        priorityBadge.className = 'priority-badge hidden';
+      }
+    }
     document.getElementById('lbArtist').textContent = item.artist;
     document.getElementById('lbArtistJa').textContent = item.artistJa;
     document.getElementById('lbTitle').textContent = item.title;
@@ -1078,6 +1108,17 @@
     document.getElementById('lbCatalogText').textContent = '📋 ' + item.catalog;
     document.getElementById('lbPrice').textContent = item.price;
     document.getElementById('lbFiling').textContent = item.filing;
+    const shopsRow = document.getElementById('lbShopsRow');
+    const shopsEl = document.getElementById('lbShops');
+    if (shopsRow && shopsEl) {
+      if (item.recommendedShops) {
+        shopsEl.textContent = item.recommendedShops;
+        shopsRow.classList.remove('hidden');
+      } else {
+        shopsEl.textContent = '';
+        shopsRow.classList.add('hidden');
+      }
+    }
 
     const artBox = document.getElementById('lbArtBox');
     artBox.innerHTML = buildCoverInnerHTML(item);

@@ -13,7 +13,8 @@
     'documentTitle',
     'searchPlaceholder',
     'digitalSectionTitle',
-    'digitalSectionSubtitle'
+    'digitalSectionSubtitle',
+    'googleSheetUrl'
   ];
 
   const ITEM_REQUIRED_STRINGS = [
@@ -31,7 +32,9 @@
     'titleJa',
     'regCatNo',
     'itunesQuery',
-    'accent'
+    'accent',
+    'priority',
+    'recommendedShops'
   ];
 
   const PROHIBITED_DOMAINS = [

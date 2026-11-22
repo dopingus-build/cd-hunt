@@ -30,7 +30,9 @@
       "price": "¥400–¥800",
       "itunesQuery": "Sol-fa ASIAN KUNG-FU GENERATION",
       "requiredGroups": [["sol-fa"], ["asian kung-fu"]],
-      "accent": "#38bdf8"
+      "accent": "#38bdf8",
+      "priority": "High",
+      "recommendedShops": "Book Off, Suruga-ya, Disk Union"
     },
     {
       "id": "dig-01",
@@ -48,7 +50,9 @@
       "price": "Digital Only",
       "itunesQuery": "Sample Digital Single",
       "requiredGroups": [["sample"], ["single"]],
-      "accent": "#0ea5e9"
+      "accent": "#0ea5e9",
+      "priority": "Medium",
+      "recommendedShops": "Digital Storefronts (iTunes JP / Mora / OTOTOY)"
     }
   ]
 }

@@ -89,6 +89,7 @@ All `meta` fields are optional strings; if omitted, the HTML defaults apply. (`m
 | `searchPlaceholder` | `string` | HTML placeholder | Placeholder text for `#searchInput`. |
 | `digitalSectionTitle` | `string` | `"Digital-Only Releases (Skip Physical Hunting)"` | Heading for `#digitalOnlySection`. |
 | `digitalSectionSubtitle` | `string` | `"No physical CD exists in stores — excluded from the physical hunting counter."` | Subtitle for `#digitalOnlySection`. |
+| `googleSheetUrl` | `string` | `""` | Optional source Google Sheet URL linking the catalog to its companion 9-column Google Sheet checklist. |
 
 ### `localStorage` Namespacing
 
@@ -142,6 +143,8 @@ Each entry in `items` represents one release card:
 | `price` | `string` | **Required** | Grid & 1-Col price badge, lightbox, SVG footer | Expected used-CD price range (e.g. `"¥300–¥700 (Reg) / ¥800–¥1,400 (Ltd)"` or `"Digital Only"`). Must be a string (use `""` if unknown); grid cards display the portion before the first `(`. |
 | `itunesQuery` | `string` | Optional | Stage 2 cover lookup (Apple iTunes Search API) | Clean search terms for iTunes (`country=jp` then `country=us`). Keep concise (title + artist); omit edition clutter. |
 | `requiredGroups` | `Array<Array<string>>` | Required if `itunesQuery` is set | Stage 2 cover verification | **AND-of-ORs** keyword filter preventing false-positive cover matches. See Section 4. |
+| `priority` | `string` | Optional | 1-Col view, Crate Flip badge | Hunting urgency (`"High"`, `"Medium"`, `"Low"`). Rendered when non-empty. |
+| `recommendedShops` | `string` | Optional | 1-Col view, Crate Flip filing box | Recommended stores/chains for finding the release (`"Book Off, Suruga-ya, Disk Union"`). |
 | `accent` | `string` | Optional (`"#e11d48"`) | Offline SVG jewel-case obi & glow | Hex color for the generated placeholder cover art. |
 
 ---
@@ -186,6 +189,10 @@ All cards render immediately using an offline SVG jewel-case + Japanese obi stri
 ---
 
 ## 6. Templates
+
+### Canonical Google Sheet CSV Template (`docs/sample-catalog-sheet.csv`)
+
+For Gemini/LLM-curated Google Sheets, import [`sample-catalog-sheet.csv`](./sample-catalog-sheet.csv) (9 columns, strictly 1 release per row, including `Priority` and `Recommended Shops`) and point your Gemini Gem / LLM agent to [`docs/AGENT_CATALOG_GUIDE.md`](./AGENT_CATALOG_GUIDE.md).
 
 ### Minimal Catalog JSON Template (`docs/sample-catalog.json`)
 

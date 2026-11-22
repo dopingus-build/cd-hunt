@@ -751,6 +751,49 @@ button {
   color: #bae6fd;
 }
 
+.priority-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 7px;
+  font-size: 10.5px;
+  font-weight: 700;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.priority-high {
+  background: rgba(244, 63, 94, 0.16);
+  border-color: rgba(244, 63, 94, 0.4);
+  color: #fda4af;
+}
+
+.priority-med {
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #fcd34d;
+}
+
+.priority-low {
+  background: rgba(161, 161, 170, 0.12);
+  border-color: rgba(161, 161, 170, 0.3);
+  color: #d4d4d8;
+}
+
+.shops-row {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px dashed rgba(245, 158, 11, 0.25);
+  font-size: 11.5px;
+  color: #fef3c7;
+}
+
+.cd-card.digital .shops-row {
+  border-top-color: rgba(14, 165, 233, 0.28);
+  color: #e0f2fe;
+}
+
 .variant-pills-row {
   display: flex;
   flex-wrap: wrap;

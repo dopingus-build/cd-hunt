@@ -324,7 +324,8 @@ describe('meta object validation', () => {
     'documentTitle',
     'searchPlaceholder',
     'digitalSectionTitle',
-    'digitalSectionSubtitle'
+    'digitalSectionSubtitle',
+    'googleSheetUrl'
   ]) {
     it(`rejects non-string meta.${field}`, () => {
       const validate = getValidator();
@@ -1380,5 +1381,43 @@ describe('Cloud sync config and frontend sync module (js/config.js & js/sync.js)
     assert.equal(/GITHUB_CLIENT_SECRET|JWT_SECRET/.test(wranglerToml), false, 'Secrets must never live in wrangler.toml');
     assert.ok(wranglerToml.includes('ALLOWED_ORIGINS = "https://dopingus-build.github.io"'));
     assert.ok(wranglerToml.includes('PAUSE_SYNC = "false"'));
+  });
+
+  it('validates priority, recommendedShops, meta.googleSheetUrl, canonical Sheet template, and Gemini skill/rules files', () => {
+    const validate = getValidator();
+    const validCatalog = makeValidCatalog({
+      meta: {
+        title: 'Sheet Linked Catalog',
+        googleSheetUrl: 'https://docs.google.com/spreadsheets/d/1fVOtXaNniW62Ze0iZcQxGXRLaCbDlUBHjGZNRkO9u6A/edit'
+      },
+      items: [
+        makeValidItem({
+          priority: 'High',
+          recommendedShops: 'Mandarake Grandchaos, Suruga-ya'
+        })
+      ]
+    });
+    assert.deepEqual(validate(validCatalog), { valid: true, errors: [] });
+
+    for (const field of ['priority', 'recommendedShops']) {
+      const bad = makeValidCatalog({ items: [makeValidItem({ [field]: 42 })] });
+      const res = validate(bad);
+      assert.equal(res.valid, false);
+      assert.ok(res.errors.some((e) => e.includes(field)));
+    }
+
+    const expectedHeader =
+      'Got it?,Aisle / Category,Artist / Franchise,Title / Release Details,Catalog Number,Filing Location & Shelf Search Advice,Target Used Price,Priority,Recommended Shops';
+    const csv = fs.readFileSync(path.join(__dirname, '..', 'docs', 'sample-catalog-sheet.csv'), 'utf8');
+    const lines = csv.trim().split(/\r?\n/);
+    assert.ok(lines.includes(expectedHeader), 'sample-catalog-sheet.csv must include canonical 9-column header row');
+
+    const skillMd = fs.readFileSync(path.join(__dirname, '..', '.agents', 'skills', 'cd-hunt-catalog', 'SKILL.md'), 'utf8');
+    assert.match(skillMd, /^---\r?\nname:\s*cd-hunt-catalog\r?\ndescription:/);
+    assert.ok(skillMd.includes('AGENT_CATALOG_GUIDE.md'));
+
+    const geminiMd = fs.readFileSync(path.join(__dirname, '..', 'GEMINI.md'), 'utf8');
+    assert.ok(geminiMd.includes('docs/AGENT_CATALOG_GUIDE.md'));
+    assert.ok(geminiMd.includes('docs/sample-catalog-sheet.csv'));
   });
 });

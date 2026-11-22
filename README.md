@@ -16,12 +16,15 @@ Catalog metadata lives externally (such as the companion flat repository [`dopin
 
 ```text
 cd-hunt/
+├── .agents/skills/
+│   └── cd-hunt-catalog/SKILL.md   # Antigravity / Gemini workspace skill for catalog & sheet curation
 ├── .github/workflows/
 │   ├── test.yml                   # CI running unit, integration, & system tests
 │   ├── e2e-browser.yml            # CI running headless Chromium browser E2E suite
 │   └── smoke-live.yml             # Post-deploy / scheduled smoke checks against live Pages + Worker
 ├── .gitignore
 ├── .nojekyll                      # Bypass Jekyll on GitHub Pages
+├── GEMINI.md                      # Workspace rules referencing single-file Gemini guide & architecture
 ├── README.md
 ├── index.html                     # Main app HTML shell & Catalog Loader screen
 ├── css/
@@ -38,8 +41,9 @@ cd-hunt/
 ├── docs/
 │   ├── HANDOVER.md                # Project context & architectural rules
 │   ├── METADATA.md                # Catalog & repository index specification
-│   ├── AGENT_CATALOG_GUIDE.md     # Guide for LLMs/agents creating & editing catalogs
+│   ├── AGENT_CATALOG_GUIDE.md     # Single-file Gemini / Gem guide for Google Sheets & JSON catalogs
 │   ├── CLOUD_SYNC_ARCHITECTURE.md # Architecture design for Cloudflare Worker + D1 GitHub sync
+│   ├── sample-catalog-sheet.csv   # Canonical 9-column, 1-release-per-row Google Sheet template
 │   └── sample-catalog.json        # Sample schemaVersion: 1 catalog JSON template
 ├── scripts/
 │   ├── smoke-live.mjs             # Live GitHub Pages + Cloudflare Worker HTTP/CORS/OAuth smoke tests
@@ -64,12 +68,13 @@ Optional per-user cloud sync is deployed live using the architecture in [`docs/C
 
 ## Using Your Own Metadata
 
-1. Create a catalog JSON file with `"schemaVersion": 1` following [`docs/METADATA.md`](./docs/METADATA.md) and [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json) (see [`docs/sample-catalog.json`](./docs/sample-catalog.json) as a template; if using an LLM or coding agent, point it to [`docs/AGENT_CATALOG_GUIDE.md`](./docs/AGENT_CATALOG_GUIDE.md)).
-2. Open the app ([live site](https://dopingus-build.github.io/cd-hunt/) or `index.html`), and load metadata via any of:
+1. **Curating via Gemini / Google Sheets:** Point Gemini (or create a reusable **Gemini Gem**) at the single self-contained guide [`docs/AGENT_CATALOG_GUIDE.md`](./docs/AGENT_CATALOG_GUIDE.md) and start from the 9-column, 1-release-per-row template [`docs/sample-catalog-sheet.csv`](./docs/sample-catalog-sheet.csv) (or use the Antigravity workspace skill [`.agents/skills/cd-hunt-catalog/SKILL.md`](./.agents/skills/cd-hunt-catalog/SKILL.md) + [`GEMINI.md`](./GEMINI.md)).
+2. **Creating JSON Catalogs (`schemaVersion: 1`):** Follow [`docs/METADATA.md`](./docs/METADATA.md) and [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json) (see [`docs/sample-catalog.json`](./docs/sample-catalog.json) as a template).
+3. Open the app ([live site](https://dopingus-build.github.io/cd-hunt/) or `index.html`), and load metadata via any of:
    - **Direct File URL:** `https://github.com/<owner>/<repo>/blob/main/<catalog>.json` or `https://raw.githubusercontent.com/...`
    - **GitHub Metadata Repository URL:** `https://github.com/<owner>/<repo>` (or `.../tree/<branch>`) containing a root `index.json`
    - **Local JSON File:** Upload directly from your device via **Load Local JSON File**
-3. For URL-loaded catalogs, your active catalog URL is saved in `localStorage` (`cd_hunt_catalog_url_v1`), synced to `?catalog=`, and shareable via **Copy Share Link**.
+4. For URL-loaded catalogs, your active catalog URL is saved in `localStorage` (`cd_hunt_catalog_url_v1`), synced to `?catalog=`, and shareable via **Copy Share Link**.
 
 ## Running Tests
 
