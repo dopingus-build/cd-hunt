@@ -1,10 +1,10 @@
 {
-  "$schema": "https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json",
+  "$schema": "https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json",
   "schemaVersion": 1,
   "meta": {
-    "title": "Sample CD Hunt",
+    "title": "Sample Disk Crate Catalog",
     "subtitle": "Custom Catalog Template (通常盤 Priority)",
-    "documentTitle": "Sample CD Hunt Checklist",
+    "documentTitle": "Sample Disk Crate Checklist",
     "searchPlaceholder": "Search artist, title, or catalog #..."
   },
   "categories": [

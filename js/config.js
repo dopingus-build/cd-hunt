@@ -1,6 +1,6 @@
 /**
- * @fileoverview Static deployment configuration for CD Hunt optional cloud sync.
- * Attaches configuration to window.CDHunt.config and exports via CommonJS for Node tests.
+ * @fileoverview Static deployment configuration for Disk Crate optional cloud sync.
+ * Attaches configuration to window.DiskCrate.config (legacy alias window.CDHunt.config) and exports via CommonJS for Node tests.
  */
 (function (root) {
   'use strict';
@@ -10,8 +10,9 @@
   };
 
   if (root) {
-    root.CDHunt = root.CDHunt || {};
-    root.CDHunt.config = config;
+    root.DiskCrate = root.DiskCrate || root.CDHunt || {};
+    root.DiskCrate.config = config;
+    root.CDHunt = root.DiskCrate;
   }
 
   if (typeof module !== 'undefined' && module.exports) {

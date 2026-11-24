@@ -1,3 +1,4 @@
+# Worker hostname intentionally kept stable during Disk Crate rename; see docs/plans/OVERVIEW.md Section 6 for future rename runbook.
 name = "cd-hunt-sync"
 main = "index.mjs"
 compatibility_date = "2025-01-01"
@@ -5,7 +6,7 @@ compatibility_date = "2025-01-01"
 [vars]
 # Comma-separated list of allowed CORS & OAuth redirect origins (override via `wrangler deploy --var ALLOWED_ORIGINS:...`)
 ALLOWED_ORIGINS = "https://dopingus-build.github.io"
-APP_REDIRECT_URL = "https://dopingus-build.github.io/cd-hunt/"
+APP_REDIRECT_URL = "https://dopingus-build.github.io/disk-crate/"
 GITHUB_CLIENT_ID = "Ov23liJMYOGioIFPGvzK"
 DAILY_REQ_LIMIT = "80000"
 DAILY_WRITE_LIMIT = "80000"

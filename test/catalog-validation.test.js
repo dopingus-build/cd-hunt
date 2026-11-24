@@ -70,7 +70,7 @@ function makeValidItem(overrides = {}) {
 function makeValidCatalog(overrides = {}) {
   return Object.assign(
     {
-      $schema: 'https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json',
+      $schema: 'https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json',
       schemaVersion: 1,
       meta: {
         title: 'Test CD Cover Album',
@@ -102,7 +102,7 @@ describe('Versioned JSON Schema (schemas/catalog.v1.schema.json)', () => {
   it('exists, parses cleanly, and enforces schemaVersion: 1 and no storagePrefix', () => {
     const schemaPath = path.join(__dirname, '..', 'schemas', 'catalog.v1.schema.json');
     const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
-    assert.equal(schema.$id, 'https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json');
+    assert.equal(schema.$id, 'https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json');
     assert.deepEqual(schema.required, ['schemaVersion', 'items']);
     assert.equal(schema.properties.schemaVersion.const, 1);
     assert.equal(schema.properties.meta.additionalProperties, false);
@@ -116,7 +116,7 @@ describe('Sample catalog (docs/sample-catalog.json)', () => {
     const samplePath = path.join(__dirname, '..', 'docs', 'sample-catalog.json');
     const data = JSON.parse(fs.readFileSync(samplePath, 'utf8'));
     assert.equal(data.schemaVersion, 1);
-    assert.equal(data.$schema, 'https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json');
+    assert.equal(data.$schema, 'https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json');
     assert.equal(data.meta.storagePrefix, undefined);
     assert.deepEqual(validate(data), { valid: true, errors: [] });
   });
@@ -131,7 +131,7 @@ describe('External metadata repository (cd-metadata)', () => {
 
     const data = JSON.parse(fs.readFileSync(osakaPath, 'utf8'));
     assert.equal(data.schemaVersion, 1);
-    assert.equal(data.$schema, 'https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json');
+    assert.equal(data.$schema, 'https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json');
     assert.equal(data.meta.storagePrefix, undefined);
     assert.deepEqual(validate(data), { valid: true, errors: [] });
     assert.equal(data.items.filter((i) => !i.digitalOnly).length, 53);
@@ -1169,14 +1169,14 @@ describe('Cloud sync config and frontend sync module (js/config.js & js/sync.js)
       safeRemoveItem: (k) => store.delete(k)
     };
     const historyCalls = [];
-    const loc = { hash: `#auth_token=${validJwt}`, pathname: '/cd-hunt/', search: '?catalog=x', origin: 'https://dopingus-build.github.io' };
+    const loc = { hash: `#auth_token=${validJwt}`, pathname: '/disk-crate/', search: '?catalog=x', origin: 'https://dopingus-build.github.io' };
     const hist = {
       replaceState: (_s, _t, u) => historyCalls.push(u)
     };
 
     const captured = syncModule.captureAuthTokenFromHash(loc, hist, mockStorage, nowMs);
     assert.equal(captured.user.login, 'alice');
-    assert.equal(historyCalls[0], '/cd-hunt/?catalog=x');
+    assert.equal(historyCalls[0], '/disk-crate/?catalog=x');
     assert.equal(loc.hash, '');
     assert.equal(syncModule.getAuthSession(mockStorage, nowMs).token, validJwt);
 
@@ -1190,7 +1190,7 @@ describe('Cloud sync config and frontend sync module (js/config.js & js/sync.js)
 
     assert.equal(
       syncModule.buildLoginUrl('https://cd-hunt-sync.tndo.workers.dev/', loc),
-      'https://cd-hunt-sync.tndo.workers.dev/auth/login?redirect=' + encodeURIComponent('https://dopingus-build.github.io/cd-hunt/?catalog=x')
+      'https://cd-hunt-sync.tndo.workers.dev/auth/login?redirect=' + encodeURIComponent('https://dopingus-build.github.io/disk-crate/?catalog=x')
     );
     assert.equal(syncModule.buildLoginUrl('', loc), '');
   });
@@ -1417,8 +1417,9 @@ describe('Cloud sync config and frontend sync module (js/config.js & js/sync.js)
     const lines = csv.trim().split(/\r?\n/);
     assert.ok(lines.includes(expectedHeader), 'sample-catalog-sheet.csv must include canonical 9-column header row');
 
-    const skillMd = fs.readFileSync(path.join(__dirname, '..', '.agents', 'skills', 'cd-hunt-catalog', 'SKILL.md'), 'utf8');
-    assert.match(skillMd, /^---\r?\nname:\s*cd-hunt-catalog\r?\ndescription:/);
+    const skillMd = fs.readFileSync(path.join(__dirname, '..', '.agents', 'skills', 'disk-crate-catalog', 'SKILL.md'), 'utf8');
+    assert.match(skillMd, /^---\r?\nname:\s*disk-crate-catalog\r?\ndescription:/);
+    assert.equal(fs.existsSync(path.join(__dirname, '..', '.agents', 'skills', 'cd-hunt-catalog')), false);
     assert.ok(skillMd.includes('AGENT_CATALOG_GUIDE.md'));
 
     assert.equal(fs.existsSync(path.join(__dirname, '..', 'GEMINI.md')), false, 'Vendor-specific GEMINI.md must be replaced by AGENTS.md');
@@ -1477,7 +1478,7 @@ describe('Google Sheet URL normalization & sheet-adapter CSV parsing/merging (js
     });
 
     assert.deepEqual(validate(parsed.catalog), { valid: true, errors: [] });
-    assert.equal(parsed.catalog.meta.title, 'CD Hunt Physical & Digital Release Checklist');
+    assert.equal(parsed.catalog.meta.title, 'Disk Crate Physical & Digital Release Checklist');
     assert.ok(parsed.catalog.meta.subtitle.includes('Canonical Google Sheet Template'));
     assert.equal(parsed.catalog.items.length, 4);
 
@@ -1586,11 +1587,14 @@ describe('Google Sheet URL normalization & sheet-adapter CSV parsing/merging (js
     assert.equal(sheetAdapterModule.isGoogleSheetCsvUrl('https://docs.google.com/spreadsheets/d/abc/edit'), true);
     assert.equal(sheetAdapterModule.isGoogleSheetCsvUrl('https://example.com/catalog.json'), false);
 
-    // Browser global attachment check
-    const sandbox = { CDHunt: { extractGoogleSheetId } };
+    // Browser global attachment check (DiskCrate namespace + legacy CDHunt shared alias)
+    const sandbox = { DiskCrate: { extractGoogleSheetId } };
+    sandbox.CDHunt = sandbox.DiskCrate;
     sandbox.window = sandbox;
     sandbox.globalThis = sandbox;
     vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'js', 'sheet-adapter.js'), 'utf8'), sandbox);
+    assert.equal(sandbox.window.DiskCrate, sandbox.window.CDHunt);
+    assert.equal(typeof sandbox.window.DiskCrate.sheetAdapter.parseGoogleSheetCsv, 'function');
     assert.equal(typeof sandbox.window.CDHunt.sheetAdapter.parseGoogleSheetCsv, 'function');
   });
 

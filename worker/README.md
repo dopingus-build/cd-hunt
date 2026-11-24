@@ -1,11 +1,11 @@
-# CD Hunt Sync Worker (`cd-hunt/worker/`)
+# Disk Crate Sync Worker (`disk-crate/worker/`)
 
-Cloudflare Worker + Cloudflare D1 backend for optional per-user cloud sync in [**CD Hunt**](https://dopingus-build.github.io/cd-hunt/) ([`docs/CLOUD_SYNC_ARCHITECTURE.md`](../docs/CLOUD_SYNC_ARCHITECTURE.md)).
+Cloudflare Worker + Cloudflare D1 backend for optional per-user cloud sync in [**Disk Crate**](https://dopingus-build.github.io/disk-crate/) ([`docs/CLOUD_SYNC_ARCHITECTURE.md`](../docs/CLOUD_SYNC_ARCHITECTURE.md)). *(Worker name `cd-hunt-sync` and hostname `cd-hunt-sync.tndo.workers.dev` are intentionally kept stable for now; see [`docs/plans/OVERVIEW.md`](../docs/plans/OVERVIEW.md) for the future rename runbook.)*
 
 ## 1. Overview & Zero-Scope Security Model
 
 - **Zero-Scope GitHub OAuth (`scope=""`):** `/auth/login` omits `scope`, so GitHub only grants public profile identity (`{ id, login, avatar_url }`) with **zero access** to Gists, private repositories, or repository writes.
-- **Immediate Token Discard:** `/auth/callback` reads `/user` once, discards GitHub's `access_token` without persisting it, and issues a CD Hunt-only HMAC-SHA256 session JWT (`30d` expiry) back via `#auth_token=<jwt>`.
+- **Immediate Token Discard:** `/auth/callback` reads `/user` once, discards GitHub's `access_token` without persisting it, and issues a Disk Crate-only HMAC-SHA256 session JWT (`30d` expiry) back via `#auth_token=<jwt>`.
 - **D1 Persistence & Quota Protection:** User state JSON (`<= 128 KB`) is stored in Cloudflare D1 (`user_state` table) alongside per-user hourly write limits (`hour_window` / `hour_writes`) and global UTC daily free-tier counters (`daily_usage` table).
 
 ## 2. Endpoints & Status Codes
@@ -27,7 +27,7 @@ Cloudflare Worker + Cloudflare D1 backend for optional per-user cloud sync in [*
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ALLOWED_ORIGINS` | `"https://dopingus-build.github.io"` | Comma-separated list of allowed CORS & OAuth redirect origins (legacy single `ALLOWED_ORIGIN` also supported; override with `wrangler deploy --var ALLOWED_ORIGINS:...`) |
-| `APP_REDIRECT_URL` | `"https://dopingus-build.github.io/cd-hunt/"` | Default frontend redirect target receiving `#auth_token=<jwt>` when `?redirect=` is omitted |
+| `APP_REDIRECT_URL` | `"https://dopingus-build.github.io/disk-crate/"` | Default frontend redirect target receiving `#auth_token=<jwt>` when `?redirect=` is omitted |
 | `GITHUB_CLIENT_ID` | `"Ov23liJMYOGioIFPGvzK"` (in `wrangler.toml`) | Public GitHub OAuth App Client ID (safe to commit) |
 | `DAILY_REQ_LIMIT` | `"80000"` | Daily global UTC request circuit-breaker threshold (80% of 100k free tier) |
 | `DAILY_WRITE_LIMIT` | `"80000"` | Daily global UTC write circuit-breaker threshold (80% of 100k D1 free tier) |
@@ -63,7 +63,7 @@ wrangler d1 execute cd-hunt-db --remote --file=./schema.sql
 wrangler deploy
 
 # 4. Create the GitHub OAuth App (e.g. under dopingus-build -> Settings -> Developer settings -> OAuth Apps):
-#    - Homepage URL:               https://dopingus-build.github.io/cd-hunt/
+#    - Homepage URL:               https://dopingus-build.github.io/disk-crate/
 #    - Authorization callback URL: https://cd-hunt-sync.<subdomain>.workers.dev/auth/callback
 #    Set GITHUB_CLIENT_ID in worker/wrangler.toml and redeploy, then upload encrypted secrets:
 wrangler secret put GITHUB_CLIENT_SECRET
@@ -72,17 +72,18 @@ wrangler secret put JWT_SECRET
 
 ## 5. Configuring the Worker URL in GitHub Pages
 
-Because CD Hunt is a zero-build static site hosted on GitHub Pages, the frontend's sync endpoint is configured via a small committed static module ([`js/config.js`](../js/config.js), loaded before `js/sync.js` / `js/app.js` and wired to `https://cd-hunt-sync.tndo.workers.dev` in production):
+Because Disk Crate is a zero-build static site hosted on GitHub Pages, the frontend's sync endpoint is configured via a small committed static module ([`js/config.js`](../js/config.js), loaded before `js/sync.js` / `js/app.js` and wired to `https://cd-hunt-sync.tndo.workers.dev` in production):
 
 ```js
-window.CDHunt = window.CDHunt || {};
-window.CDHunt.config = {
+window.DiskCrate = window.DiskCrate || window.CDHunt || {};
+window.DiskCrate.config = {
   syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev'
 };
+window.CDHunt = window.DiskCrate;
 ```
 
 - **Opt-In / Fork Safe Default (`""`):** Setting `syncApiUrl: ''` cleanly disables the cloud-sync / GitHub sign-in controls so forks or offline local bundles work purely with `localStorage` and show zero broken UI.
-- **Local Dev Override (`?syncApi=` / `cd_hunt_sync_api_url_v1`):** For testing against `wrangler dev` (`http://127.0.0.1:8787`), a `?syncApi=` query param or `localStorage` override can redirect `syncApiUrl` only when pointing at explicit loopback URLs (otherwise pinned to `window.CDHunt.config.syncApiUrl` to avoid untrusted token exfiltration).
+- **Local Dev Override (`?syncApi=` / `cd_hunt_sync_api_url_v1`):** For testing against `wrangler dev` (`http://127.0.0.1:8787`), a `?syncApi=` query param or `localStorage` override can redirect `syncApiUrl` only when pointing at explicit loopback URLs (otherwise pinned to `window.DiskCrate.config.syncApiUrl` to avoid untrusted token exfiltration).
 - **Optional Multi-Environment CI Injection:** If separate staging/production deployments are ever needed, `.github/workflows/` (custom Pages deploy) can generate `js/config.js` at deploy time from a GitHub repository variable (`vars.SYNC_API_URL`) instead of committing a hardcoded URL.
 
 ## 6. Emergency Pause & Local Verification

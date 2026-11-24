@@ -1,4 +1,4 @@
--- Per-user synced CD Hunt state + hourly write rate-limit tracking
+-- Per-user synced Disk Crate state + hourly write rate-limit tracking
 CREATE TABLE IF NOT EXISTS user_state (
   github_id    TEXT PRIMARY KEY,
   github_login TEXT NOT NULL,

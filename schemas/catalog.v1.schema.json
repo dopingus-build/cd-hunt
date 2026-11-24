@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json",
-  "title": "CD Hunt Catalog Schema v1",
-  "description": "Schema for external JSON catalog files loaded by CD Hunt.",
+  "$id": "https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json",
+  "title": "Disk Crate Catalog Schema v1",
+  "description": "Schema for external JSON catalog files loaded by Disk Crate.",
   "type": "object",
   "required": ["schemaVersion", "items"],
   "additionalProperties": false,

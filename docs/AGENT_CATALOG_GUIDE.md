@@ -1,19 +1,19 @@
-# Agent & LLM Guide: Creating and Maintaining CD Hunt Lists
+# Agent & LLM Guide: Creating and Maintaining Disk Crate Lists
 
 This is the **single self-contained reference file** for using any AI assistant or coding agent to research Japanese CDs, maintain a **Canonical Google Sheet**, edit **`schemaVersion: 1` JSON** catalogs (such as [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata)), and check secondhand store availability in Japan.
 
 - **Single Canonical URL to Give an Agent:**
-  `https://raw.githubusercontent.com/dopingus-build/cd-hunt/main/docs/AGENT_CATALOG_GUIDE.md`
+  `https://raw.githubusercontent.com/dopingus-build/disk-crate/main/docs/AGENT_CATALOG_GUIDE.md`
 
-> **Architecture Context:** Your **Google Sheet** works both as a standalone zero-JSON catalog (`Google-Sheet-Only` mode: paste the Sheet URL straight into `cd-hunt`, cached locally for offline basements, or import a local `.csv`) and as a live overlay (`meta.googleSheetUrl`) paired with a durable JSON snapshot in `cd-metadata`. **`cd-hunt`** (`https://dopingus-build.github.io/cd-hunt/`) + GitHub-authenticated Cloudflare D1 remain the authoritative store for your trip checklist (`Got it?`).
+> **Architecture Context:** Your **Google Sheet** works both as a standalone zero-JSON catalog (`Google-Sheet-Only` mode: paste the Sheet URL straight into `disk-crate` / Disk Crate, cached locally for offline basements, or import a local `.csv`) and as a live overlay (`meta.googleSheetUrl`) paired with a durable JSON snapshot in `cd-metadata`. **Disk Crate** (`https://dopingus-build.github.io/disk-crate/`, formerly `cd-hunt`) + GitHub-authenticated Cloudflare D1 remain the authoritative store for your trip checklist (`Got it?`).
 
 ### Giving AI / LLM Agents Live Read Access Without GitHub Credentials
 
-Because external AI assistants cannot sign in with your GitHub account, CD Hunt mints a **semi-private, read-only capability link** whenever you sign in:
-1. Click **Sign in** in CD Hunt's top bar, then click **Agent Link** to copy your personal read-only status URL (`https://cd-hunt-sync.tndo.workers.dev/api/share/<token>?format=markdown`, or omit `?format=markdown` for JSON).
+Because external AI assistants cannot sign in with your GitHub account, Disk Crate mints a **semi-private, read-only capability link** whenever you sign in:
+1. Click **Sign in** in Disk Crate's top bar, then click **Agent Link** to copy your personal read-only status URL (`https://cd-hunt-sync.tndo.workers.dev/api/share/<token>?format=markdown`, or omit `?format=markdown` for JSON).
 2. Paste that URL to your AI assistant alongside your Google Sheet or catalog URL so it can immediately inspect which CDs are already acquired (`Got it? = TRUE`) vs. still hunting.
 3. **What is exposed:** Only non-sensitive public CD catalog IDs, checklists, view mode, and your public GitHub username (`login`). Zero GitHub access tokens, emails, or private repo data ever touch D1 or `/api/share/<token>`.
-4. **Two-Way Google Sheet Sync (Service Account):** `GOOGLE_SERVICE_ACCOUNT_JSON` is live on the Worker (`cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com`, also surfaced inside **Catalog → Copy Bot Email** and at `https://cd-hunt-sync.tndo.workers.dev/api/status`). Share your Google Sheet with `cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com` as **Editor**, and toggling `Got it?` in `cd-hunt` will automatically write `TRUE`/`FALSE` back to Column A (including multi-tab sheets with `#gid=`).
+4. **Two-Way Google Sheet Sync (Service Account):** `GOOGLE_SERVICE_ACCOUNT_JSON` is live on the Worker (`cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com`, also surfaced inside **Catalog → Copy Bot Email** and at `https://cd-hunt-sync.tndo.workers.dev/api/status`). Share your Google Sheet with `cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com` as **Editor**, and toggling `Got it?` in Disk Crate will automatically write `TRUE`/`FALSE` back to Column A (including multi-tab sheets with `#gid=`).
 
 ---
 
@@ -22,12 +22,12 @@ Because external AI assistants cannot sign in with your GitHub account, CD Hunt 
 In any AI web or mobile app that supports reusable custom instructions (Custom Instructions, Projects, Gems, or Custom GPTs), you can configure a dedicated curator assistant once and reuse it across any trip list or Google Sheet:
 
 ### Setup Steps
-1. Create a new custom assistant/project named `CD Hunt Curator & Shop Scout`.
+1. Create a new custom assistant/project named `Disk Crate Curator & Shop Scout`.
 2. **Knowledge (Optional):** Upload or link your working Google Sheet and/or this raw guide file (`AGENT_CATALOG_GUIDE.md`).
 3. **Instructions (Paste the block below verbatim):**
 
 ```text
-You are CD Hunt Curator & Shop Scout, an expert assistant for researching physical Japanese CD releases and secondhand store availability across Japan (Osaka Nipponbashi/Namba/Umeda, Akihabara, Nakano, Shinjuku, Shibuya) using the CD Hunt canonical schemas.
+You are Disk Crate Curator & Shop Scout, an expert assistant for researching physical Japanese CD releases and secondhand store availability across Japan (Osaka Nipponbashi/Namba/Umeda, Akihabara, Nakano, Shinjuku, Shibuya) using the Disk Crate canonical schemas.
 
 When working with the user's Google Sheet:
 1. ALWAYS keep strictly ONE CD release per row (never combine multiple singles or albums into a comma-separated bundle row).
@@ -54,12 +54,12 @@ When checking shop availability (Suruga-ya, Mandarake, Lashinbang, Book Off, Tow
 
 ## Part 1: Canonical Google Sheet Schema (`v1`)
 
-All CD Hunt Google Sheets follow a single **9-column, 1-release-per-row** schema so humans, AI assistants, and `cd-hunt` importers parse every sheet deterministically. See [`docs/sample-catalog-sheet.csv`](./sample-catalog-sheet.csv) for a ready-to-import template (`File -> Import` in Google Sheets).
+All Disk Crate Google Sheets follow a single **9-column, 1-release-per-row** schema so humans, AI assistants, and `disk-crate` importers parse every sheet deterministically. See [`docs/sample-catalog-sheet.csv`](./sample-catalog-sheet.csv) for a ready-to-import template (`File -> Import` in Google Sheets).
 
 ### Non-Negotiable Sheet Rules
 1. **Strictly 1 Release Per Row:** Never group multiple singles or mini-albums into a single row. Each release gets its own row so it maps 1-to-1 to a cover card and `Got it?` checkbox.
 2. **Never delete or renumber existing rows lightly:** Downstream sync identifies releases by primary catalog number (first `ABC-1234` token in Column E) or normalized artist + title for digital tracks. Keep catalog numbers accurate and stable.
-3. **Avoid Duplicate Releases:** Always check existing Catalog Numbers (Column E) and normalized Artist + Title (including checking single vs. album overlap) before inserting a new row. (`cd-hunt` automatically deduplicates matching catalog numbers/titles on load and shows a non-blocking warning toast; in Google Sheets you can also apply conditional formatting with `=COUNTIF($E$8:$E$500, E8)>1` on Column E to highlight duplicate catalog codes red.)
+3. **Avoid Duplicate Releases:** Always check existing Catalog Numbers (Column E) and normalized Artist + Title (including checking single vs. album overlap) before inserting a new row. (`disk-crate` automatically deduplicates matching catalog numbers/titles on load and shows a non-blocking warning toast; in Google Sheets you can also apply conditional formatting with `=COUNTIF($E$8:$E$500, E8)>1` on Column E to highlight duplicate catalog codes red.)
 4. **Never embed hotlinked image URLs from `vgmdb.net`, `wikia.nocookie.net`, `fandom.com`, or `cdjapan.co.jp`.**
 
 ### Canonical Columns (A–I Required)
@@ -76,7 +76,7 @@ All CD Hunt Google Sheets follow a single **9-column, 1-release-per-row** schema
 | **H** | `Priority` | `High`, `Medium`, or `Low` (hunting urgency / rarity / buy-on-sight flag). | `High` |
 | **I** | `Recommended Shops` | Comma-separated chains/stores best suited for this release. | `Book Off, Suruga-ya (Anime/J-Pop aisle), Lashinbang` |
 
-*(Optional columns J+ if desired: `ID`, `Kana`, `iTunes Query`, `Cover URL` — omitted by default since `cd-hunt` derives them automatically from Columns A–I.)*
+*(Optional columns J+ if desired: `ID`, `Kana`, `iTunes Query`, `Cover URL` — omitted by default since `disk-crate` derives them automatically from Columns A–I.)*
 
 ### Supported Sheet Layouts
 1. **Dashboard Layout** (recommended, shown in [`docs/sample-catalog-sheet.csv`](./sample-catalog-sheet.csv)):
@@ -91,10 +91,10 @@ All CD Hunt Google Sheets follow a single **9-column, 1-release-per-row** schema
 When sharing a public template Google Sheet (for example, one imported from [`docs/sample-catalog-sheet.csv`](./sample-catalog-sheet.csv)), you can replace `/edit` with `/copy?title=...&userstoinvite=...` so clicking the link prompts the user to copy the template into their own Google Drive **and automatically invites the sync Service Account bot email** on confirmation:
 
 ```text
-https://docs.google.com/spreadsheets/d/<TEMPLATE_SHEET_ID>/copy?title=My+CD+Hunt+Checklist&userstoinvite=cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com
+https://docs.google.com/spreadsheets/d/<TEMPLATE_SHEET_ID>/copy?title=My+Disk+Crate+Checklist&userstoinvite=cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com
 ```
 
-*(Note: Google requires `/copy` links for `userstoinvite`; for already-existing sheets, use **Catalog -> Copy Bot Email** in `cd-hunt` or `GET /api/status` and add the bot as **Editor** under **Share**.)*
+*(Note: Google requires `/copy` links for `userstoinvite`; for already-existing sheets, use **Catalog -> Copy Bot Email** in Disk Crate or `GET /api/status` and add the bot as **Editor** under **Share**.)*
 
 ---
 
@@ -107,7 +107,7 @@ Static catalogs in `cd-metadata` (and imported/cached JSON files) conform to [`s
    - Browser `localStorage` and D1 cloud sync key checkmarks and custom covers directly by `item.id`. Match `/^[a-zA-Z0-9_-]+$/`, append the next unused sequential ID (`cd-53`, `dig-03`) or a suffix (`cd-11b`), and ensure strict uniqueness.
 2. **Include `schemaVersion: 1` (and `$schema` URI):**
    ```json
-   "$schema": "https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json",
+   "$schema": "https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json",
    "schemaVersion": 1
    ```
 3. **Never add `meta.storagePrefix`.**
@@ -207,7 +207,7 @@ When updating a JSON catalog file directly (CLI/agent workflow), verify covers a
 ```bash
 # 1. Verify MusicBrainz release MBID + Cover Art Archive front-500 status
 CATNO="SRCL-12539"
-MBID=$(curl -fsSL -A "cd-hunt-catalog-verifier/1.0 (https://github.com/dopingus-build/cd-hunt)" \
+MBID=$(curl -fsSL -A "disk-crate-catalog-verifier/1.0 (https://github.com/dopingus-build/disk-crate)" \
   "https://musicbrainz.org/ws/2/release/?query=catno:${CATNO}&fmt=json&limit=4" \
   | node -e '
     const d = JSON.parse(require("fs").readFileSync(0, "utf8"));

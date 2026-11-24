@@ -1,13 +1,14 @@
-# AGENTS.md — CD Hunt Repository Instructions
+# AGENTS.md — Disk Crate Repository Instructions
 
-**CD Hunt** (`cd-hunt`) is a zero-dependency, offline-first static web app for hunting physical music releases in stores, paired with external JSON catalogs (`cd-metadata`), canonical Google Sheets, and an optional Cloudflare Worker + D1 GitHub sync backend.
+**Disk Crate** (`disk-crate`, formerly `cd-hunt`) is a zero-dependency, offline-first static web app for hunting physical music releases in stores, paired with external JSON catalogs (`cd-metadata`), canonical Google Sheets, and an optional Cloudflare Worker + D1 GitHub sync backend.
 
 ## Essential Documentation
-- **Catalog & Google Sheet Authoring (Single Reference):** [`docs/AGENT_CATALOG_GUIDE.md`](./docs/AGENT_CATALOG_GUIDE.md) (also exposed as workspace skill [`.agents/skills/cd-hunt-catalog/SKILL.md`](./.agents/skills/cd-hunt-catalog/SKILL.md))
+- **Catalog & Google Sheet Authoring (Single Reference):** [`docs/AGENT_CATALOG_GUIDE.md`](./docs/AGENT_CATALOG_GUIDE.md) (also exposed as workspace skill [`.agents/skills/disk-crate-catalog/SKILL.md`](./.agents/skills/disk-crate-catalog/SKILL.md))
 - **Canonical Google Sheet Template:** [`docs/sample-catalog-sheet.csv`](./docs/sample-catalog-sheet.csv)
 - **Project Handover & Constraints:** [`docs/HANDOVER.md`](./docs/HANDOVER.md)
 - **Catalog Schema & Validator Rules:** [`docs/METADATA.md`](./docs/METADATA.md) and [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json)
 - **Cloud Sync Architecture:** [`docs/CLOUD_SYNC_ARCHITECTURE.md`](./docs/CLOUD_SYNC_ARCHITECTURE.md) and [`worker/README.md`](./worker/README.md)
+- **Planned Architecture Roadmap (Not Yet Implemented):** [`docs/plans/OVERVIEW.md`](./docs/plans/OVERVIEW.md)
 
 ## Architectural Non-Negotiables
 1. Keep the frontend strictly zero-dependency (no npm runtime packages, no CDN scripts/CSS frameworks).

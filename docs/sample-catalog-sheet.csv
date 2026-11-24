@@ -1,5 +1,5 @@
-CD Hunt Physical & Digital Release Checklist,,,,,,,,
-"1 Release Per Row — Canonical Google Sheet Template for CD Hunt (Anime, Game OST, Seiyuu & J-Rock/J-Pop)",,,,,,,,
+Disk Crate Physical & Digital Release Checklist,,,,,,,,
+"1 Release Per Row — Canonical Google Sheet Template for Disk Crate (Anime, Game OST, Seiyuu & J-Rock/J-Pop)",,,,,,,,
 TOTAL PHYSICAL TARGETS,,ACQUIRED / BOUGHT,,STILL HUNTING,,PROGRESS,,
 "=COUNTIFS(B8:B500, ""<>Digital-Only"", B8:B500, ""<>Aisle / Category"", C8:C500, ""<>"""")",,"=COUNTIFS(A8:A500, TRUE, B8:B500, ""<>Digital-Only"")",,=A4-C4,,"=IFERROR(C4/A4, 0)",,"1 release per row"
 "NOTE: Keep 1 CD release per row. Digital-only tracks belong in the Digital-Only Releases section below so physical store counts stay accurate.",,,,,,,,

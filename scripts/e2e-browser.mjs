@@ -627,7 +627,7 @@ async function main() {
       assert.equal(shareMdRes.status, 200);
       assert.equal(shareMdRes.headers.get('access-control-allow-origin'), '*');
       const shareMd = await shareMdRes.text();
-      assert.ok(shareMd.includes('# CD Hunt Live Status (@bob)'));
+      assert.ok(shareMd.includes('# Disk Crate Live Status (@bob)'));
       assert.ok(shareMd.includes('`sheet-cpca-1004`'));
 
       // Search, clear, category pills, hunting-only toggle, and empty state reset

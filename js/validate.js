@@ -1,6 +1,7 @@
 /**
  * @fileoverview Client-side schemaVersion: 1 catalog validator and GitHub URL normalizer.
- * Attaches validateCatalog and normalizeCatalogUrl to window / window.CDHunt and exports via CommonJS for Node tests.
+ * Attaches validateCatalog and normalizeCatalogUrl to window / window.DiskCrate (legacy alias window.CDHunt)
+ * and exports via CommonJS for Node tests.
  */
 (function (root) {
   'use strict';
@@ -347,10 +348,11 @@
     root.validateCatalog = validateCatalog;
     root.normalizeCatalogUrl = normalizeCatalogUrl;
     root.extractGoogleSheetId = extractGoogleSheetId;
-    root.CDHunt = root.CDHunt || {};
-    root.CDHunt.validateCatalog = validateCatalog;
-    root.CDHunt.normalizeCatalogUrl = normalizeCatalogUrl;
-    root.CDHunt.extractGoogleSheetId = extractGoogleSheetId;
+    root.DiskCrate = root.DiskCrate || root.CDHunt || {};
+    root.DiskCrate.validateCatalog = validateCatalog;
+    root.DiskCrate.normalizeCatalogUrl = normalizeCatalogUrl;
+    root.DiskCrate.extractGoogleSheetId = extractGoogleSheetId;
+    root.CDHunt = root.DiskCrate;
   }
 
   if (typeof module !== 'undefined' && module.exports) {

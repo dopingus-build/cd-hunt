@@ -9,7 +9,7 @@ const { DatabaseSync } = require('node:sqlite');
 
 const SCHEMA_PATH = path.join(__dirname, '..', 'worker', 'schema.sql');
 const ALLOWED_ORIGIN = 'https://dopingus-build.github.io';
-const APP_REDIRECT_URL = 'https://dopingus-build.github.io/cd-hunt/';
+const APP_REDIRECT_URL = 'https://dopingus-build.github.io/disk-crate/';
 
 function createSqliteD1Database() {
   const db = new DatabaseSync(':memory:');
@@ -452,7 +452,7 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
 
   it('supports comma-separated ALLOWED_ORIGINS for CORS preflight, API calls, and custom OAuth redirect targets', async (t) => {
     const customOrigin = 'https://custom.example';
-    const customAppUrl = `${customOrigin}/cd-hunt/`;
+    const customAppUrl = `${customOrigin}/disk-crate/`;
     const env = await startIntegrationServers({
       ALLOWED_ORIGINS: `${ALLOWED_ORIGIN}, ${customOrigin}`
     });
@@ -469,7 +469,7 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
 
     // Disallowed ?redirect= origin returns 400 on /auth/login
     const badLogin = await fetch(
-      `${env.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://rogue.example/cd-hunt/')}`,
+      `${env.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://rogue.example/disk-crate/')}`,
       { redirect: 'manual' }
     );
     assert.equal(badLogin.status, 400);
@@ -589,13 +589,13 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
     assert.equal(mdRes.status, 200);
     assert.ok(mdRes.headers.get('content-type').includes('text/markdown'));
     const mdText = await mdRes.text();
-    assert.ok(mdText.includes('# CD Hunt Live Status (@alice)'));
+    assert.ok(mdText.includes('# Disk Crate Live Status (@alice)'));
     assert.ok(mdText.includes('`cd-01`'));
     assert.equal(mdText.includes('cd-02'), false);
 
     const acceptMdRes = await fetch(putAlice.shareUrl, { headers: { Accept: 'text/markdown' } });
     assert.equal(acceptMdRes.status, 200);
-    assert.ok((await acceptMdRes.text()).includes('# CD Hunt Live Status (@alice)'));
+    assert.ok((await acceptMdRes.text()).includes('# Disk Crate Live Status (@alice)'));
 
     // Guards: POST -> 405, invalid/session tokens -> 401
     assert.equal((await fetch(putAlice.shareUrl, { method: 'POST' })).status, 405);

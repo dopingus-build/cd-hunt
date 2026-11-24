@@ -186,7 +186,7 @@ async function startFullSystem(envOverrides = {}) {
     {
       DB: db,
       ALLOWED_ORIGINS: 'https://dopingus-build.github.io',
-      APP_REDIRECT_URL: 'https://dopingus-build.github.io/cd-hunt/',
+      APP_REDIRECT_URL: 'https://dopingus-build.github.io/disk-crate/',
       GITHUB_CLIENT_ID: 'gh-sys-client',
       GITHUB_CLIENT_SECRET: 'gh-sys-secret',
       JWT_SECRET: 'system-test-jwt-secret-0123456789abcdef',
@@ -390,7 +390,7 @@ function createStorageInstance(seedObj = {}) {
 
 async function bootSystemClient(sys, {
   origin = 'https://dopingus-build.github.io',
-  pathname = '/cd-hunt/',
+  pathname = '/disk-crate/',
   search = '',
   hash = '',
   initialStorage = {},
@@ -684,7 +684,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
 
     // Part B: Bob already has dig-01 in SQLite; Device C works offline with sample-01 + custom cover then logs in
     const bobHash1 = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_bob'
     );
     const bobCloudDevice = await bootSystemClient(sys, {
@@ -711,7 +711,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     await bobOfflineDevice.clickElement('saveCustomCoverBtn');
 
     const bobHash2 = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_bob'
     );
     const bobMerged = await bootSystemClient(sys, {
@@ -734,7 +734,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     const sys429 = await startFullSystem({ USER_HOURLY_WRITE_LIMIT: '1' });
     t.after(() => sys429.close());
     const hash429 = await sys429.completeOAuthRedirect(
-      `${sys429.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys429.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
     const app429 = await bootSystemClient(sys429, { hash: hash429, syncDebounceMs: 10 });
@@ -749,7 +749,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     const sys503 = await startFullSystem({ DAILY_WRITE_LIMIT: '1' });
     t.after(() => sys503.close());
     const hash503 = await sys503.completeOAuthRedirect(
-      `${sys503.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys503.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
     const app503 = await bootSystemClient(sys503, { hash: hash503, syncDebounceMs: 10 });
@@ -767,7 +767,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     const sys413 = await startFullSystem({ MAX_PAYLOAD_BYTES: '180' });
     t.after(() => sys413.close());
     const hash413 = await sys413.completeOAuthRedirect(
-      `${sys413.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys413.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
     const app413 = await bootSystemClient(sys413, { hash: hash413, syncDebounceMs: 10 });
@@ -800,7 +800,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     }
 
     const hash = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
     const app = await bootSystemClient(sys, {
@@ -915,7 +915,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     const sheetCatalogUrl = 'https://docs.google.com/spreadsheets/d/sheetSys99/edit';
     const sheetCsvExportUrl = 'https://docs.google.com/spreadsheets/d/sheetSys99/export?format=csv';
     const hash = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
 
@@ -954,7 +954,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     assert.equal(agentRes.status, 200);
     assert.equal(agentRes.headers.get('access-control-allow-origin'), '*');
     const agentMd = await agentRes.text();
-    assert.ok(agentMd.includes('# CD Hunt Live Status (@alice)'));
+    assert.ok(agentMd.includes('# Disk Crate Live Status (@alice)'));
     assert.ok(agentMd.includes('`sheet-cpca-1004`'));
 
     // JSON variant also works cleanly and strips transient/cover data
@@ -1056,7 +1056,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     ].join('\n');
 
     const hash = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
 
@@ -1090,7 +1090,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     // unchecks sys-cur-akfg -> persists uncheck even if Sheets API returns 403
     const deviceB = await bootSystemClient(sys, {
       hash: await sys.completeOAuthRedirect(
-        `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+        `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
         'code_alice'
       ),
       syncDebounceMs: 10,
@@ -1257,7 +1257,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     const sheetEditUrl = 'https://docs.google.com/spreadsheets/d/dupSys01/edit';
     const sheetCsvUrl = 'https://docs.google.com/spreadsheets/d/dupSys01/export?format=csv';
     const hash = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
 
@@ -1357,7 +1357,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     t.after(() => sys.close());
 
     const hashA = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
     const deviceA = await bootSystemClient(sys, {
@@ -1401,7 +1401,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
 
     // Fresh Device B signs in and automatically restores imported checklist, viewMode, and custom cover
     const hashB = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
     const deviceB = await bootSystemClient(sys, {
@@ -1418,7 +1418,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     t.after(() => sys.close());
 
     const hashA = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
     const deviceA = await bootSystemClient(sys, {
@@ -1433,7 +1433,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
 
     // Device B sees dismissed digital banner synced via SQLite, then restores it
     const hashB = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
     const deviceB = await bootSystemClient(sys, {
@@ -1509,7 +1509,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     ].join('\n');
 
     const hashA = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
     const deviceA = await bootSystemClient(sys, {
@@ -1552,7 +1552,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
 
     // Fresh Device B boots straight into active Catalog 2 (1 / 2), then switches back to Catalog 1 (1 / 1)
     const hashB = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
     const deviceB = await bootSystemClient(sys, {
@@ -1663,7 +1663,7 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     const sheetCsvUrl = 'https://docs.google.com/spreadsheets/d/realCoverSys1/export?format=csv';
 
     const hash = await sys.completeOAuthRedirect(
-      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/cd-hunt/')}`,
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
       'code_alice'
     );
     const client = await bootSystemClient(sys, {

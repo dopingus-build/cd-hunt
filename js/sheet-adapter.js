@@ -1,9 +1,9 @@
 /**
- * @fileoverview Client-side Google Sheets CSV adapter and hybrid JSON overlay for CD Hunt.
+ * @fileoverview Client-side Google Sheets CSV adapter and hybrid JSON overlay for Disk Crate.
  * Supports both Dashboard Layout and Flat Table Layout across the 9 canonical columns,
  * parses releases into schemaVersion 1 catalog objects, merges updates/new rows onto a
  * curated JSON catalog, and extracts catalog-number checklists for Sheet write-back.
- * Attaches to window.CDHunt.sheetAdapter and exports via CommonJS for Node tests.
+ * Attaches to window.DiskCrate.sheetAdapter (legacy alias window.CDHunt.sheetAdapter) and exports via CommonJS for Node tests.
  */
 (function (root) {
   'use strict';
@@ -11,7 +11,7 @@
   const validateMod =
     typeof module !== 'undefined' && typeof require === 'function'
       ? require('./validate.js')
-      : (root && root.CDHunt) || root || {};
+      : (root && (root.DiskCrate || root.CDHunt)) || root || {};
 
   const extractGoogleSheetId =
     validateMod.extractGoogleSheetId ||
@@ -533,7 +533,7 @@
     const meta = {};
     if (headerIdx >= 1 && rows[0] && String(rows[0][0] || '').trim()) {
       meta.title = String(rows[0][0]).trim();
-      meta.documentTitle = meta.title + ' — CD Hunt';
+      meta.documentTitle = meta.title + ' — Disk Crate';
     }
     if (headerIdx >= 2 && rows[1] && String(rows[1][0] || '').trim()) {
       const subText = String(rows[1][0]).trim();
@@ -991,8 +991,9 @@
   };
 
   if (root) {
-    root.CDHunt = root.CDHunt || {};
-    root.CDHunt.sheetAdapter = sheetAdapterApi;
+    root.DiskCrate = root.DiskCrate || root.CDHunt || {};
+    root.DiskCrate.sheetAdapter = sheetAdapterApi;
+    root.CDHunt = root.DiskCrate;
   }
 
   if (typeof module !== 'undefined' && module.exports) {

@@ -39,7 +39,7 @@ function getPresetTestFixtures() {
       ]
     },
     catalogJson: sampleJson,
-    expectedTitle: 'Sample CD Hunt',
+    expectedTitle: 'Sample Disk Crate Catalog',
     expectedPhysical: 1,
     expectedDigital: 1
   };
@@ -186,7 +186,7 @@ async function bootApp({
   search = '',
   hash = '',
   origin = 'https://dopingus-build.github.io',
-  pathname = '/cd-hunt/',
+  pathname = '/disk-crate/',
   syncApiUrl = '',
   syncDebounceMs = 10,
   fetchImpl,
@@ -428,8 +428,8 @@ async function bootApp({
   vm.runInContext(storageSource, context, { filename: STORAGE_PATH });
   vm.runInContext(coverResolverSource, context, { filename: COVER_RESOLVER_PATH });
   vm.runInContext(configSource, context, { filename: CONFIG_PATH });
-  context.CDHunt.config.syncApiUrl = syncApiUrl;
-  context.CDHunt.config.syncDebounceMs = syncDebounceMs;
+  (context.DiskCrate || context.CDHunt).config.syncApiUrl = syncApiUrl;
+  (context.DiskCrate || context.CDHunt).config.syncDebounceMs = syncDebounceMs;
   vm.runInContext(syncSource, context, { filename: SYNC_PATH });
   vm.runInContext(sheetAdapterSource, context, { filename: SHEET_ADAPTER_PATH });
   vm.runInContext(appScript, context, { filename: APP_PATH });
@@ -548,7 +548,7 @@ async function bootApp({
 
 function makeValidRemoteCatalog() {
   return {
-    $schema: 'https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json',
+    $schema: 'https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json',
     schemaVersion: 1,
     meta: {
       title: 'Tokyo Vinyl & CD Hunt',
@@ -583,7 +583,7 @@ describe('HTML entrypoint generalization & script wiring', () => {
     assert.equal(fs.existsSync(LEGACY_HTML_PATH), false, 'osaka_cd_cover_album.html should be removed');
     const html = readAppHtml();
     assert.ok(fs.existsSync(CSS_PATH), 'css/styles.css must exist');
-    assert.ok(html.includes('<title>CD Hunt'), 'index.html should use generic CD Hunt default title');
+    assert.ok(html.includes('<title>Disk Crate'), 'index.html should use generic Disk Crate default title');
     assert.ok(
       html.includes('<link rel="stylesheet" href="./css/styles.css" />'),
       'Expected <link rel="stylesheet" href="./css/styles.css" /> in index.html'
@@ -628,10 +628,31 @@ describe('Browser and Node dual export for js/validate.js', () => {
 
     assert.equal(typeof sandbox.window.validateCatalog, 'function');
     assert.equal(typeof sandbox.window.normalizeCatalogUrl, 'function');
+    assert.equal(sandbox.window.DiskCrate, sandbox.window.CDHunt);
+    assert.equal(typeof sandbox.window.DiskCrate.validateCatalog, 'function');
+    assert.equal(typeof sandbox.window.DiskCrate.normalizeCatalogUrl, 'function');
     assert.equal(typeof sandbox.window.CDHunt.validateCatalog, 'function');
     assert.equal(typeof sandbox.window.CDHunt.normalizeCatalogUrl, 'function');
     const result = sandbox.window.validateCatalog(makeValidRemoteCatalog());
     assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true, errors: [] });
+  });
+
+  it('attaches all runtime modules to window.DiskCrate with strict window.CDHunt alias parity', async () => {
+    const app = await bootApp();
+    assert.equal(app.window.DiskCrate, app.window.CDHunt);
+    for (const key of [
+      'validateCatalog',
+      'normalizeCatalogUrl',
+      'extractGoogleSheetId',
+      'storage',
+      'coverResolver',
+      'config',
+      'sync',
+      'sheetAdapter'
+    ]) {
+      assert.ok(app.window.DiskCrate[key], `Expected window.DiskCrate.${key} to be defined`);
+      assert.equal(app.window.CDHunt[key], app.window.DiskCrate[key]);
+    }
   });
 });
 
@@ -727,7 +748,7 @@ describe('Catalog Loader screen, dynamic presets, local file picker, and share l
     await app.clickElement('copyShareLinkBtn');
     assert.equal(
       app.copiedTexts[0],
-      'https://dopingus-build.github.io/cd-hunt/?catalog=' + encodeURIComponent(expectedRaw)
+      'https://dopingus-build.github.io/disk-crate/?catalog=' + encodeURIComponent(expectedRaw)
     );
   });
 
@@ -1053,7 +1074,7 @@ function makeRichTestCatalog({ includeDigital = true } = {}) {
     });
   }
   return {
-    $schema: 'https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json',
+    $schema: 'https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json',
     schemaVersion: 1,
     meta: {
       title: 'Rich Test Hunt',
@@ -2420,9 +2441,17 @@ describe('Google Sheet direct loading, JSON hybrid overlay, and Agent Link butto
     assert.equal(app.elements.get('toast').textContent, 'Loaded local CSV: trip-sheet.csv');
     assert.equal(app.elements.get('copyShareLinkBtn').classList.contains('hidden'), true);
 
-    // Also handles CSV content even if filename lacks .csv extension
+    // Also handles CSV content even if filename lacks .csv extension (both Disk Crate and legacy CD Hunt headers)
     await app.selectLocalFile('exported-sheet.txt', csvText);
     assert.equal(app.elements.get('toast').textContent, 'Loaded local CSV: exported-sheet.txt');
+
+    const legacyPrefixCsvText = csvText.replace(
+      'Disk Crate Physical & Digital Release Checklist',
+      'CD Hunt Physical & Digital Release Checklist'
+    );
+    await app.selectLocalFile('legacy-exported-sheet.txt', legacyPrefixCsvText);
+    assert.equal(app.elements.get('toast').textContent, 'Loaded local CSV: legacy-exported-sheet.txt');
+    assert.equal(app.elements.get('progressBadge').textContent, '1 / 3');
   });
 
   it('caches Google Sheet CSV offline and preserves explicit local unchecks across Sheet reloads', async () => {

@@ -1,20 +1,20 @@
 ---
-name: cd-hunt-catalog
+name: disk-crate-catalog
 description: >-
   Use this skill whenever the user asks to research Japanese CDs/music releases,
-  add or update rows in a CD Hunt Google Sheet or schemaVersion: 1 JSON catalog,
+  add or update rows in a Disk Crate (or legacy CD Hunt) Google Sheet or schemaVersion: 1 JSON catalog,
   check Japanese secondhand shop availability (Suruga-ya, Mandarake, Book Off,
   Lashinbang, Disk Union, Tower Records), or convert between Google Sheets and
-  CD Hunt catalog JSON.
+  Disk Crate catalog JSON.
 ---
 
-# CD Hunt Catalog & Sheet Curation Skill
+# Disk Crate Catalog & Sheet Curation Skill
 
 Use [`docs/AGENT_CATALOG_GUIDE.md`](../../../docs/AGENT_CATALOG_GUIDE.md) as the single authoritative reference for both the **Canonical Google Sheet (`v1`)** format and **`schemaVersion: 1` JSON** catalogs.
 
 ## Core Workflows
 
-### 1. Adding or Updating Rows in a CD Hunt Google Sheet
+### 1. Adding or Updating Rows in a Disk Crate Google Sheet
 1. Enforce **strictly 1 release per row** across the 9 canonical columns:
    `Got it? | Aisle / Category | Artist / Franchise | Title / Release Details | Catalog Number | Filing Location & Shelf Search Advice | Target Used Price | Priority | Recommended Shops`
 2. Refer to [`docs/sample-catalog-sheet.csv`](../../../docs/sample-catalog-sheet.csv) for exact formatting and summary KPI formulas.

@@ -1,13 +1,15 @@
-# CD Hunt — Cover Album & Checklist (`cd-hunt`)
+# Disk Crate — Cover Album & Checklist (`disk-crate`)
 
-A mobile-first, zero-dependency web application for hunting physical CDs/music releases across stores and tracking crate checklists, hosted as a static site on GitHub Pages (`https://dopingus-build.github.io/cd-hunt/`).
+A mobile-first, zero-dependency web application (formerly **CD Hunt**) for hunting physical CDs/music releases across stores and tracking crate checklists, hosted as a static site on GitHub Pages (`https://dopingus-build.github.io/disk-crate/`).
 
 Catalog metadata lives externally (such as the companion flat repository [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata), which hosts `index.json` and `2026-japan.json`). Users can pick a built-in preset, paste a direct JSON file URL or bare GitHub metadata repository URL, or load a local `.json` file from their device.
 
+> **Planned Roadmap:** Architecture specifications for upcoming Track Lists, Owned Releases Collection, and Opt-In Camera Scanner features live in [`docs/plans/OVERVIEW.md`](./docs/plans/OVERVIEW.md) (not yet implemented).
+
 ## Key Features
 
-- **Google-Sheet-Only Mode (Zero-JSON UX) + Hybrid Overlay:** Paste any public Google Sheet URL directly into CD Hunt (or upload a local `.csv` file) without creating a JSON file or GitHub metadata repository. `cd-hunt` parses the Sheet client-side via [`js/sheet-adapter.js`](./js/sheet-adapter.js), caches the CSV locally for offline shop visits, and preserves your local/D1 checkmarks and unchecks on subsequent reloads. You can also keep a durable JSON snapshot in `cd-metadata` paired with `meta.googleSheetUrl` for live overlay + new row merging.
-- **Pluggable Metadata Loader (Google Sheets, JSON & GitHub):** Paste a public Google Sheet URL (auto-converted from `/edit` to `/export?format=csv`), pick presets from `cd-metadata/index.json`, paste a direct catalog JSON URL (GitHub `blob`/`raw` URLs auto-convert to `raw.githubusercontent.com`), paste a bare GitHub repository or `/tree/<branch>` URL to load its `index.json` presets, or load a local `.json`/`.csv` file. Once the Worker Service Account is configured, CD Hunt's Catalog Loader displays the bot email (`sheetSync.serviceAccountEmail`) with a **Copy Bot Email** button for one-click **Editor** sharing.
+- **Google-Sheet-Only Mode (Zero-JSON UX) + Hybrid Overlay:** Paste any public Google Sheet URL directly into Disk Crate (or upload a local `.csv` file) without creating a JSON file or GitHub metadata repository. `disk-crate` parses the Sheet client-side via [`js/sheet-adapter.js`](./js/sheet-adapter.js), caches the CSV locally for offline shop visits, and preserves your local/D1 checkmarks and unchecks on subsequent reloads. You can also keep a durable JSON snapshot in `cd-metadata` paired with `meta.googleSheetUrl` for live overlay + new row merging.
+- **Pluggable Metadata Loader (Google Sheets, JSON & GitHub):** Paste a public Google Sheet URL (auto-converted from `/edit` to `/export?format=csv`), pick presets from `cd-metadata/index.json`, paste a direct catalog JSON URL (GitHub `blob`/`raw` URLs auto-convert to `raw.githubusercontent.com`), paste a bare GitHub repository or `/tree/<branch>` URL to load its `index.json` presets, or load a local `.json`/`.csv` file. Once the Worker Service Account is configured, Disk Crate's Catalog Loader displays the bot email (`sheetSync.serviceAccountEmail`) with a **Copy Bot Email** button for one-click **Editor** sharing.
 - **Deep Links, Agent Status Link & Auto-Restore:** URL-loaded catalogs sync to `?catalog=<url>`, persist in `localStorage` (`cd_hunt_catalog_url_v1`), and include **Copy Share Link**, **Backup** JSON export/import, plus **Agent Link** (when signed in) to copy a semi-private read-only `/api/share/<token>?format=markdown` URL for AI / LLM agents without sharing GitHub credentials.
 - **Isolated Storage per Catalog:** Progress, cover caches, view mode, and banner dismissal are automatically namespaced (`deriveStoragePrefix`) so separate catalogs never collide in `localStorage`.
 - **Schema Validation (`schemaVersion: 1`):** Loaded catalogs are validated client-side by `js/validate.js` against [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json).
@@ -16,9 +18,9 @@ Catalog metadata lives externally (such as the companion flat repository [`dopin
 ## Project Structure
 
 ```text
-cd-hunt/
+disk-crate/
 ├── .agents/skills/
-│   └── cd-hunt-catalog/SKILL.md   # Vendor-neutral agent skill for catalog & sheet curation
+│   └── disk-crate-catalog/SKILL.md # Vendor-neutral agent skill for catalog & sheet curation
 ├── .github/workflows/
 │   ├── test.yml                   # CI running unit, integration, & system tests
 │   ├── e2e-browser.yml            # CI running headless Chromium browser E2E suite
@@ -34,7 +36,7 @@ cd-hunt/
 │   ├── validate.js                # Versioned schema validator, GitHub & Google Sheets URL normalizer
 │   ├── storage.js                 # Sandbox-safe localStorage wrapper & derived key prefixing
 │   ├── cover-resolver.js          # Offline SVG obi generator + MusicBrainz/iTunes lookup
-│   ├── config.js                  # Static frontend sync endpoint config (window.CDHunt.config)
+│   ├── config.js                  # Static frontend sync endpoint config (window.DiskCrate.config)
 │   ├── sync.js                    # GitHub session JWT handling, state merge, & cloud sync client
 │   ├── sheet-adapter.js           # Canonical 9-column Google Sheet CSV parser & hybrid overlay merger
 │   └── app.js                     # App state, catalog loader, rendering, modals, & sync wiring
@@ -45,6 +47,7 @@ cd-hunt/
 │   ├── METADATA.md                # Catalog & repository index specification
 │   ├── AGENT_CATALOG_GUIDE.md     # Single-file AI / LLM agent guide for Google Sheets & JSON catalogs
 │   ├── CLOUD_SYNC_ARCHITECTURE.md # Architecture design for Cloudflare Worker + D1 GitHub sync
+│   ├── plans/                     # Planned architecture & phased feature specs
 │   ├── sample-catalog-sheet.csv   # Canonical 9-column, 1-release-per-row Google Sheet template
 │   └── sample-catalog.json        # Sample schemaVersion: 1 catalog JSON template
 ├── scripts/
@@ -66,13 +69,13 @@ cd-hunt/
 
 ## Optional Cloud Sync (Cloudflare Worker + D1)
 
-Optional per-user cloud sync is deployed live using the architecture in [`docs/CLOUD_SYNC_ARCHITECTURE.md`](./docs/CLOUD_SYNC_ARCHITECTURE.md), backed by the Cloudflare Worker + D1 instance at `https://cd-hunt-sync.tndo.workers.dev` and wired via [`js/config.js`](./js/config.js) and [`js/sync.js`](./js/sync.js). Signing in uses zero-scope GitHub OAuth (`Sign in`), auto-discovers `<login>/cd-metadata/main/index.json` when no catalog is loaded, and syncs checklists plus compact custom-cover variants with debounced pushes and `visibilitychange`/`pagehide` `keepalive` flushes on mobile while keeping offline `localStorage` as the primary source of truth. See [`worker/README.md`](./worker/README.md) for endpoint details, zero-scope GitHub OAuth guarantees, D1 deployment steps, self-pausing free-tier limits, and Worker URL configuration.
+Optional per-user cloud sync is deployed live using the architecture in [`docs/CLOUD_SYNC_ARCHITECTURE.md`](./docs/CLOUD_SYNC_ARCHITECTURE.md), backed by the Cloudflare Worker + D1 instance at `https://cd-hunt-sync.tndo.workers.dev` *(Worker hostname intentionally kept stable during the Disk Crate rename; see [`docs/plans/OVERVIEW.md`](./docs/plans/OVERVIEW.md))* and wired via [`js/config.js`](./js/config.js) and [`js/sync.js`](./js/sync.js). Signing in uses zero-scope GitHub OAuth (`Sign in`), auto-discovers `<login>/cd-metadata/main/index.json` when no catalog is loaded, and syncs checklists plus compact custom-cover variants with debounced pushes and `visibilitychange`/`pagehide` `keepalive` flushes on mobile while keeping offline `localStorage` as the primary source of truth. See [`worker/README.md`](./worker/README.md) for endpoint details, zero-scope GitHub OAuth guarantees, D1 deployment steps, self-pausing free-tier limits, and Worker URL configuration.
 
 ## Using Your Own Metadata
 
-1. **Curating via AI Assistants / Google Sheets:** Point any AI assistant (or configure a reusable custom assistant) at the single self-contained guide [`docs/AGENT_CATALOG_GUIDE.md`](./docs/AGENT_CATALOG_GUIDE.md) and start from the 9-column, 1-release-per-row template [`docs/sample-catalog-sheet.csv`](./docs/sample-catalog-sheet.csv) (or use the agent workspace skill [`.agents/skills/cd-hunt-catalog/SKILL.md`](./.agents/skills/cd-hunt-catalog/SKILL.md) + [`AGENTS.md`](./AGENTS.md)). For two-way Column A (`Got it?`) sync back to your Google Sheet, share your Sheet as **Editor** with `cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com` (also shown via **Copy Bot Email** inside the Catalog Loader). When sharing a public template Google Sheet with others, replacing `/edit` with `/copy?title=My+CD+Hunt+Checklist&userstoinvite=cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com` gives them a 1-click confirmation prompt that duplicates the sheet and invites the sync Service Account automatically.
+1. **Curating via AI Assistants / Google Sheets:** Point any AI assistant (or configure a reusable custom assistant) at the single self-contained guide [`docs/AGENT_CATALOG_GUIDE.md`](./docs/AGENT_CATALOG_GUIDE.md) and start from the 9-column, 1-release-per-row template [`docs/sample-catalog-sheet.csv`](./docs/sample-catalog-sheet.csv) (or use the agent workspace skill [`.agents/skills/disk-crate-catalog/SKILL.md`](./.agents/skills/disk-crate-catalog/SKILL.md) + [`AGENTS.md`](./AGENTS.md)). For two-way Column A (`Got it?`) sync back to your Google Sheet, share your Sheet as **Editor** with `cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com` (also shown via **Copy Bot Email** inside the Catalog Loader). When sharing a public template Google Sheet with others, replacing `/edit` with `/copy?title=My+Disk+Crate+Checklist&userstoinvite=cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com` gives them a 1-click confirmation prompt that duplicates the sheet and invites the sync Service Account automatically.
 2. **Creating JSON Catalogs (`schemaVersion: 1`):** Follow [`docs/METADATA.md`](./docs/METADATA.md) and [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json) (see [`docs/sample-catalog.json`](./docs/sample-catalog.json) as a template).
-3. Open the app ([live site](https://dopingus-build.github.io/cd-hunt/) or `index.html`), and load metadata via any of:
+3. Open the app ([live site](https://dopingus-build.github.io/disk-crate/) or `index.html`), and load metadata via any of:
    - **Public Google Sheet URL:** `https://docs.google.com/spreadsheets/d/<id>/edit` (auto-converted to `/export?format=csv` by [`js/sheet-adapter.js`](./js/sheet-adapter.js) and cached locally for offline use)
    - **Direct File URL:** `https://github.com/<owner>/<repo>/blob/main/<catalog>.json` or `https://raw.githubusercontent.com/...`
    - **GitHub Metadata Repository URL:** `https://github.com/<owner>/<repo>` (or `.../tree/<branch>`) containing a root `index.json`

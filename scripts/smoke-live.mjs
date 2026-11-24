@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-const SITE_URL = process.env.SITE_URL || 'https://dopingus-build.github.io/cd-hunt/';
+const SITE_URL = process.env.SITE_URL || 'https://dopingus-build.github.io/disk-crate/';
 const WORKER_URL = (process.env.WORKER_URL || 'https://cd-hunt-sync.tndo.workers.dev').replace(/\/+$/, '');
 const SITE_ORIGIN = new URL(SITE_URL).origin;
 

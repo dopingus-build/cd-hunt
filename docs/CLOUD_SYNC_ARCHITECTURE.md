@@ -1,6 +1,6 @@
 # Architecture Design: GitHub Cloud Sync (Cloudflare Worker + D1)
 
-This document describes the as-built architecture, deployment topology, API contract, storage schema, conflict-merge and quota-conservation rules, security model, and verification layers for optional per-user cloud sync in **CD Hunt** (`cd-hunt`).
+This document describes the as-built architecture, deployment topology, API contract, storage schema, conflict-merge and quota-conservation rules, security model, and verification layers for optional per-user cloud sync in **Disk Crate** (`disk-crate`, formerly `cd-hunt`).
 
 ---
 
@@ -8,8 +8,8 @@ This document describes the as-built architecture, deployment topology, API cont
 
 - **Local-First & Offline-Safe:** `localStorage` remains the immediate primary store so `index.html` renders instantaneously and continues working in basement shops with no cellular reception. Cloud sync runs asynchronously in the background.
 - **Zero-Scope GitHub OAuth (`scope=""`):** `/auth/login` omits the `scope` parameter completely, requesting read-only public profile identity only (zero access to Gists, private repositories, or repository writes).
-- **Immediate GitHub Token Discard:** `/auth/callback` exchanges the OAuth `code`, calls `GET https://api.github.com/user` once to read `{ id, login, avatar_url }`, and **immediately discards GitHub's `access_token`**. The Worker issues its own HMAC-SHA256 session JWT (`30d` TTL) scoped solely to CD Hunt's Worker API, so no GitHub credential is persisted anywhere.
-- **Personal Metadata Auto-Discovery:** When signed in as `<login>` with no active catalog loaded, CD Hunt checks `https://raw.githubusercontent.com/<login>/cd-metadata/main/index.json` first and surfaces that user's personal presets, falling back cleanly to `dopingus-build/cd-metadata` on `404` or error.
+- **Immediate GitHub Token Discard:** `/auth/callback` exchanges the OAuth `code`, calls `GET https://api.github.com/user` once to read `{ id, login, avatar_url }`, and **immediately discards GitHub's `access_token`**. The Worker issues its own HMAC-SHA256 session JWT (`30d` TTL) scoped solely to Disk Crate's Worker API, so no GitHub credential is persisted anywhere.
+- **Personal Metadata Auto-Discovery:** When signed in as `<login>` with no active catalog loaded, Disk Crate checks `https://raw.githubusercontent.com/<login>/cd-metadata/main/index.json` first and surfaces that user's personal presets, falling back cleanly to `dopingus-build/cd-metadata` on `404` or error.
 - **Self-Pausing Free-Tier Circuit Breaker:** Per-user hourly write caps, payload size guards, and an 80% global UTC daily threshold keep usage safely inside Cloudflare's free tier and surface structured degraded statuses instead of hard platform failures.
 
 ---
@@ -18,15 +18,15 @@ This document describes the as-built architecture, deployment topology, API cont
 
 | Component | Location / Live Coordinate | Role |
 | --- | --- | --- |
-| **Static Web App** | [`https://dopingus-build.github.io/cd-hunt/`](https://dopingus-build.github.io/cd-hunt/) ([`index.html`](../index.html), [`css/styles.css`](../css/styles.css)) | Zero-build UI shell hosting toolbar sync controls (`#syncStatusPill`, `#githubAuthBtn`, `#copyAgentLinkBtn`, `#githubSignOutBtn`). |
-| **Frontend Config** | [`js/config.js`](../js/config.js) | Exposes `window.CDHunt.config.syncApiUrl = 'https://cd-hunt-sync.tndo.workers.dev'` (setting `''` disables cloud sync cleanly for forks or local standalone bundles). |
+| **Static Web App** | [`https://dopingus-build.github.io/disk-crate/`](https://dopingus-build.github.io/disk-crate/) ([`index.html`](../index.html), [`css/styles.css`](../css/styles.css)) | Zero-build UI shell hosting toolbar sync controls (`#syncStatusPill`, `#githubAuthBtn`, `#copyAgentLinkBtn`, `#githubSignOutBtn`). |
+| **Frontend Config** | [`js/config.js`](../js/config.js) | Exposes `window.DiskCrate.config.syncApiUrl = 'https://cd-hunt-sync.tndo.workers.dev'` (with legacy alias `window.CDHunt.config`; setting `''` disables cloud sync cleanly for forks or local standalone bundles). *(Worker hostname intentionally kept stable for now; see [`plans/OVERVIEW.md`](./plans/OVERVIEW.md).)* |
 | **Frontend Sync Client** | [`js/sync.js`](../js/sync.js) | Session JWT capture (`#auth_token=`) & validation, loopback-only `?syncApi=` override resolution (`cd_hunt_sync_api_url_v1`), custom-cover extraction, state merge, and `/api/state` HTTP calls. |
 | **Google Sheet CSV Adapter** | [`js/sheet-adapter.js`](../js/sheet-adapter.js) | RFC-4180 CSV parser supporting both Dashboard and Flat Table canonical 9-column Google Sheets, hybrid JSON overlay merging (`meta.googleSheetUrl`), and catalog-number checklist mapping for write-back. |
 | **App Controller** | [`js/app.js`](../js/app.js) | Startup pull/merge/backfill, `<login>/cd-metadata` discovery, Google Sheet & hybrid JSON loading, 2.5s debounced explicit-mutation push (including optional `sheetSync` payload), mobile `visibilitychange`/`pagehide` `keepalive` flush, **Agent Link** clipboard copy, and pill status transitions. |
 | **Cloudflare Worker** | `cd-hunt-sync` (`https://cd-hunt-sync.tndo.workers.dev`, [`worker/index.mjs`](../worker/index.mjs) -> [`worker/index.js`](../worker/index.js)) | Stateless OAuth handler, CORS origin checker, HMAC-SHA256 JWT signer/verifier (`session` + `read_share`), semi-private `/api/share/<token>` JSON/Markdown reader, RS256 Google Service Account Sheets API v4 Column A write-back, payload validator, rate limiter, and daily circuit breaker. |
 | **Cloudflare D1** | `cd-hunt-db` (UUID `d09adf93-b9ba-4198-896a-5faa1bfcda08`, [`worker/schema.sql`](../worker/schema.sql)) | SQLite storage for per-user synced state JSON, hourly per-user write counters, and global daily UTC usage counters. |
 
-- **Wrangler Configuration ([`worker/wrangler.toml`](../worker/wrangler.toml)):** Pins public `GITHUB_CLIENT_ID = "Ov23liJMYOGioIFPGvzK"`, comma-separated `ALLOWED_ORIGINS = "https://dopingus-build.github.io"`, `APP_REDIRECT_URL = "https://dopingus-build.github.io/cd-hunt/"`, `DAILY_REQ_LIMIT = "80000"`, `DAILY_WRITE_LIMIT = "80000"`, `USER_HOURLY_WRITE_LIMIT = "60"`, `MAX_PAYLOAD_BYTES = "131072"`, and `PAUSE_SYNC = "false"`.
+- **Wrangler Configuration ([`worker/wrangler.toml`](../worker/wrangler.toml)):** Pins public `GITHUB_CLIENT_ID = "Ov23liJMYOGioIFPGvzK"`, comma-separated `ALLOWED_ORIGINS = "https://dopingus-build.github.io"`, `APP_REDIRECT_URL = "https://dopingus-build.github.io/disk-crate/"`, `DAILY_REQ_LIMIT = "80000"`, `DAILY_WRITE_LIMIT = "80000"`, `USER_HOURLY_WRITE_LIMIT = "60"`, `MAX_PAYLOAD_BYTES = "131072"`, and `PAUSE_SYNC = "false"`.
 
 ---
 
@@ -35,7 +35,7 @@ This document describes the as-built architecture, deployment topology, API cont
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Browser as Browser (cd-hunt)
+    participant Browser as Browser (disk-crate)
     participant Worker as Cloudflare Worker
     participant GitHub as GitHub OAuth & API
     participant D1 as Cloudflare D1
@@ -107,9 +107,9 @@ CREATE TABLE IF NOT EXISTS daily_usage (
 
 ### Browser `localStorage` Cloud Sync Keys
 
-Alongside derived per-catalog keys (`<prefix>_checklist_v2`, `<prefix>_cover_cache_v6`, `<prefix>_view_mode_v1`, `<prefix>_note_dismissed_v1`) and `cd_hunt_catalog_url_v1`, [`js/sync.js`](../js/sync.js) manages:
+Alongside derived per-catalog keys (`<prefix>_checklist_v2`, `<prefix>_cover_cache_v6`, `<prefix>_view_mode_v1`, `<prefix>_note_dismissed_v1`, `<prefix>_sheet_csv_v1`) and `cd_hunt_catalog_url_v1` (preserving legacy `cd_hunt_*` names intentionally for backwards compatibility), [`js/sync.js`](../js/sync.js) manages:
 
-- `cd_hunt_sync_token_v1`: Signed CD Hunt session JWT (`sub`, `login`, `avatarUrl`, `exp`).
+- `cd_hunt_sync_token_v1`: Signed Disk Crate session JWT (`sub`, `login`, `avatarUrl`, `exp`).
 - `cd_hunt_sync_api_url_v1`: Explicit loopback dev override (`http://localhost:*` / `http://127.0.0.1:*`) set via `?syncApi=`; cleared via `?syncApi=off|reset|""`. Non-loopback query overrides are ignored to prevent token exfiltration.
 - `cd_hunt_sync_meta_v1`: Local sync baseline metadata (`{ updatedAt, activeCatalogUrl, catalogs: { [prefix]: updatedAt } }`).
 
@@ -168,7 +168,7 @@ Alongside derived per-catalog keys (`<prefix>_checklist_v2`, `<prefix>_cover_cac
 3. **Explicit-Mutation Debounce + Mobile `keepalive` Flush:**
    - `scheduleCloudPush()` runs **only** on explicit user actions (acquired toggle, edition selection/deletion/custom cover save, `1-Col`/`Grid` toggle, digital note banner dismiss/restore, backup import, interactive catalog URL load).
    - Background cover auto-resolution (`resolveCoverForAlbum`) writes strictly to local cache and **never** calls `scheduleCloudPush()`. It also re-reads `source === 'custom'` entries after awaiting MusicBrainz/iTunes fetches so in-flight background lookups never clobber concurrently saved custom covers.
-   - Rapid edits coalesce under a `2500ms` debounce (`CDHunt.config.syncDebounceMs` configurable in tests). When switching or closing mobile tabs, `visibilitychange` (`hidden`) and `pagehide` immediately call `flushPendingCloudPush({ keepalive: true })`, forwarding `keepalive: true` on `fetch` and clearing `syncPushTimer = null` so each edit flushes at most once.
+   - Rapid edits coalesce under a `2500ms` debounce (`DiskCrate.config.syncDebounceMs` / legacy `CDHunt.config.syncDebounceMs`, configurable in tests). When switching or closing mobile tabs, `visibilitychange` (`hidden`) and `pagehide` immediately call `flushPendingCloudPush({ keepalive: true })`, forwarding `keepalive: true` on `fetch` and clearing `syncPushTimer = null` so each edit flushes at most once.
 
 ---
 
@@ -195,7 +195,7 @@ Paused `503` payload format:
 
 ### Frontend `#syncStatusPill` State Matrix
 
-When `CDHunt.config.syncApiUrl === ''`, `#syncStatusPill`, `#githubAuthBtn`, and `#githubSignOutBtn` all remain hidden with zero network calls. When enabled and signed in:
+When `(window.DiskCrate || window.CDHunt).config.syncApiUrl === ''`, `#syncStatusPill`, `#githubAuthBtn`, and `#githubSignOutBtn` all remain hidden with zero network calls. When enabled and signed in:
 
 | Condition | `#syncStatusPill` Text | Behavior |
 | --- | --- | --- |
@@ -212,7 +212,7 @@ When `CDHunt.config.syncApiUrl === ''`, `#syncStatusPill`, `#githubAuthBtn`, and
 
 ## 7. Security Model
 
-- **Publicly Committed Files (`cd-hunt/worker/`):** [`worker/index.js`](../worker/index.js), [`worker/index.mjs`](../worker/index.mjs), [`worker/schema.sql`](../worker/schema.sql), [`worker/wrangler.toml`](../worker/wrangler.toml) (public `GITHUB_CLIENT_ID`, D1 UUID, non-secret `[vars]`).
+- **Publicly Committed Files (`disk-crate/worker/`):** [`worker/index.js`](../worker/index.js), [`worker/index.mjs`](../worker/index.mjs), [`worker/schema.sql`](../worker/schema.sql), [`worker/wrangler.toml`](../worker/wrangler.toml) (public `GITHUB_CLIENT_ID`, D1 UUID, non-secret `[vars]`).
 - **Encrypted Cloudflare Secrets (`wrangler secret put`):** `GITHUB_CLIENT_SECRET`, `JWT_SECRET`, and optional `GOOGLE_SERVICE_ACCOUNT_JSON` for two-way Column A Google Sheet checkoff sync (never committed; local `.dev.vars` and `.wrangler/` are gitignored).
 - **Origin & Token Controls:**
   - CORS and OAuth `?redirect=` validate strictly against comma-separated `ALLOWED_ORIGINS` (plus localhost/127.0.0.1 only when `ALLOW_LOCALHOST = "true"`).

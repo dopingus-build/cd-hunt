@@ -1,6 +1,6 @@
 /**
  * @fileoverview Frontend GitHub OAuth session handling, local-first state extraction/merge,
- * and Cloudflare Worker cloud sync helpers (window.CDHunt.sync / CommonJS).
+ * and Cloudflare Worker cloud sync helpers (window.DiskCrate.sync / legacy alias window.CDHunt.sync / CommonJS).
  */
 (function (root) {
   'use strict';
@@ -106,7 +106,7 @@
   }
 
   /**
-   * Decode and validate claims of a CD Hunt session JWT on the client (non-cryptographic UX check).
+   * Decode and validate claims of a Disk Crate session JWT on the client (non-cryptographic UX check).
    */
   function parseJwtPayload(token, nowMs) {
     if (!token || typeof token !== 'string') return null;
@@ -682,8 +682,9 @@
   };
 
   if (root) {
-    root.CDHunt = root.CDHunt || {};
-    root.CDHunt.sync = syncApi;
+    root.DiskCrate = root.DiskCrate || root.CDHunt || {};
+    root.DiskCrate.sync = syncApi;
+    root.CDHunt = root.DiskCrate;
   }
 
   if (typeof module !== 'undefined' && module.exports) {

@@ -1,6 +1,6 @@
 /**
  * @fileoverview Offline SVG jewel-case + obi generator and two-stage cover art resolver
- * (MusicBrainz/Cover Art Archive followed by Apple iTunes Search API; attaches to window.CDHunt.coverResolver).
+ * (MusicBrainz/Cover Art Archive followed by Apple iTunes Search API; attaches to window.DiskCrate.coverResolver and legacy alias window.CDHunt.coverResolver).
  */
 (function (root) {
   'use strict';
@@ -367,8 +367,9 @@
   };
 
   if (root) {
-    root.CDHunt = root.CDHunt || {};
-    root.CDHunt.coverResolver = coverResolverApi;
+    root.DiskCrate = root.DiskCrate || root.CDHunt || {};
+    root.DiskCrate.coverResolver = coverResolverApi;
+    root.CDHunt = root.DiskCrate;
   }
 
   if (typeof module !== 'undefined' && module.exports) {

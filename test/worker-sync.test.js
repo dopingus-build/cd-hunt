@@ -17,7 +17,7 @@ const {
 } = require('../worker/index.js');
 
 const DEFAULT_ORIGIN = 'https://dopingus-build.github.io';
-const DEFAULT_REDIRECT = 'https://dopingus-build.github.io/cd-hunt/';
+const DEFAULT_REDIRECT = 'https://dopingus-build.github.io/disk-crate/';
 const TEST_JWT_SECRET = 'test-hmac-secret-at-least-32-bytes-long-012345';
 
 function createMockD1() {
@@ -347,13 +347,13 @@ describe('Zero-Scope GitHub OAuth flow (/auth/login & /auth/callback)', () => {
 
     // Valid custom redirect from ALLOWED_ORIGINS embeds sanitized URL (without hash) in state
     const customLogin = await workerFetch(
-      new Request('https://sync.example/auth/login?redirect=' + encodeURIComponent('https://mirror.example/cd-hunt/?catalog=foo#old')),
+      new Request('https://sync.example/auth/login?redirect=' + encodeURIComponent('https://mirror.example/disk-crate/?catalog=foo#old')),
       env
     );
     assert.equal(customLogin.status, 302);
     const customState = new URL(customLogin.headers.get('Location')).searchParams.get('state');
     const customClaims = await verifyToken(customState, TEST_JWT_SECRET);
-    assert.equal(customClaims.redirectUrl, 'https://mirror.example/cd-hunt/?catalog=foo');
+    assert.equal(customClaims.redirectUrl, 'https://mirror.example/disk-crate/?catalog=foo');
 
     // Disallowed, non-http(s), or invalid ?redirect= values return 400
     assert.equal(
@@ -896,7 +896,7 @@ describe('Semi-private read-only share endpoint (/api/share) and Google Service 
     assert.equal(shareMdRes.status, 200);
     assert.ok(shareMdRes.headers.get('content-type').includes('text/markdown'));
     const mdText = await shareMdRes.text();
-    assert.ok(mdText.includes('# CD Hunt Live Status (@dopingus)'));
+    assert.ok(mdText.includes('# Disk Crate Live Status (@dopingus)'));
     assert.ok(mdText.includes('`bof3-ost`'));
     assert.equal(mdText.includes('slash-op'), false);
 

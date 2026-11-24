@@ -1,22 +1,22 @@
 /**
- * @fileoverview Main CD Hunt application controller: catalog/repository loading,
+ * @fileoverview Main Disk Crate application controller: catalog/repository loading,
  * filtering, state persistence, lazy cover queueing, modals, and Crate Flip lightbox.
  */
 (function () {
   'use strict';
 
-  const CDHunt = window.CDHunt || {};
-  const storage = CDHunt.storage;
-  const coverResolver = CDHunt.coverResolver;
-  const sync = CDHunt.sync || null;
-  const sheetAdapter = CDHunt.sheetAdapter || null;
-  const validateCatalog = window.validateCatalog || CDHunt.validateCatalog;
-  const normalizeCatalogUrl = window.normalizeCatalogUrl || CDHunt.normalizeCatalogUrl || function (u) {
+  const DiskCrate = window.DiskCrate || window.CDHunt || {};
+  const storage = DiskCrate.storage;
+  const coverResolver = DiskCrate.coverResolver;
+  const sync = DiskCrate.sync || null;
+  const sheetAdapter = DiskCrate.sheetAdapter || null;
+  const validateCatalog = window.validateCatalog || DiskCrate.validateCatalog;
+  const normalizeCatalogUrl = window.normalizeCatalogUrl || DiskCrate.normalizeCatalogUrl || function (u) {
     return String(u || '').trim();
   };
 
   if (!storage || !coverResolver) {
-    throw new Error('Required CDHunt modules (storage, coverResolver) are not loaded.');
+    throw new Error('Required DiskCrate modules (storage, coverResolver) are not loaded.');
   }
 
   const METADATA_RAW_BASE_URL = 'https://raw.githubusercontent.com/dopingus-build/cd-metadata/main/';
@@ -364,7 +364,7 @@
     loadStateFromStorage();
 
     // Only seed Got it? = TRUE from a Sheet when no local/synced checklist baseline exists yet
-    // so user unchecks in cd-hunt or cloud D1 stay authoritative across Sheet reloads.
+    // so user unchecks in Disk Crate or cloud D1 stay authoritative across Sheet reloads.
     if (!hadExistingChecklist && opts.sheetChecklist && typeof opts.sheetChecklist === 'object') {
       let addedFromSheet = false;
       Object.keys(opts.sheetChecklist).forEach(function (id) {
@@ -534,7 +534,8 @@
   }
 
   function getSyncDebounceMs() {
-    const cfg = (window.CDHunt && window.CDHunt.config) || {};
+    const ns = window.DiskCrate || window.CDHunt || {};
+    const cfg = ns.config || {};
     return typeof cfg.syncDebounceMs === 'number' && cfg.syncDebounceMs >= 0 ? cfg.syncDebounceMs : 2500;
   }
 
@@ -1725,7 +1726,7 @@
             try {
               parsed = JSON.parse(text);
             } catch (jsonErr) {
-              if (sheetAdapter && /^\s*(?:Got it\?|Aisle|Category|CD Hunt)/i.test(text.replace(/^\uFEFF/, ''))) {
+              if (sheetAdapter && /^\s*(?:Got it\?|Aisle|Category|Disk Crate|CD Hunt)/i.test(text.replace(/^\uFEFF/, ''))) {
                 applyLocalCsv(text);
                 return;
               }
@@ -1816,7 +1817,8 @@
     setupIntersectionObserver();
     bindEvents();
 
-    const cfg = (window.CDHunt && window.CDHunt.config) || {};
+    const ns = window.DiskCrate || window.CDHunt || {};
+    const cfg = ns.config || {};
     syncApiUrl = sync ? sync.resolveSyncApiUrl(window.location, storage, cfg) : '';
     if (sync && syncApiUrl) {
       const captured = sync.captureAuthTokenFromHash(window.location, window.history, storage);

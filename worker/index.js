@@ -1,12 +1,12 @@
 /**
- * @fileoverview Cloudflare Worker for CD Hunt user-specific cloud sync.
+ * @fileoverview Cloudflare Worker for Disk Crate user-specific cloud sync.
  * Provides Zero-Scope GitHub OAuth login, HMAC-SHA256 session JWTs, D1 state persistence,
  * per-user hourly write limits, and a daily free-tier self-pausing circuit breaker.
  */
 'use strict';
 
 const DEFAULT_ALLOWED_ORIGIN = 'https://dopingus-build.github.io';
-const DEFAULT_APP_REDIRECT_URL = 'https://dopingus-build.github.io/cd-hunt/';
+const DEFAULT_APP_REDIRECT_URL = 'https://dopingus-build.github.io/disk-crate/';
 const DEFAULT_DAILY_REQ_LIMIT = 80000;
 const DEFAULT_DAILY_WRITE_LIMIT = 80000;
 const DEFAULT_USER_HOURLY_WRITE_LIMIT = 60;
@@ -667,7 +667,7 @@ function sanitizeShareState(parsedState, rowUpdatedAt) {
 function formatShareMarkdown(login, updatedAt, sanitizedState) {
   const updatedStr = updatedAt ? new Date(updatedAt).toISOString() : 'Not yet synced';
   const lines = [
-    '# CD Hunt Live Status (@' + String(login || 'user') + ')',
+    '# Disk Crate Live Status (@' + String(login || 'user') + ')',
     '',
     '- Last Synced: `' + updatedStr + '`',
     '- Active Catalog URL: ' + (sanitizedState.activeCatalogUrl ? sanitizedState.activeCatalogUrl : '_None_'),
@@ -807,7 +807,7 @@ async function handleAuthCallback(url, env, nowMs) {
     headers: {
       Authorization: 'Bearer ' + ghAccessToken,
       Accept: 'application/vnd.github+json',
-      'User-Agent': 'cd-hunt-sync-worker'
+      'User-Agent': 'disk-crate-sync-worker'
     }
   });
   if (!userRes.ok) {

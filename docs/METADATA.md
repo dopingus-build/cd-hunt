@@ -27,7 +27,7 @@ This document specifies the versioned schema, loading rules, and cover-resolutio
 
 ## Repository Index Format (`index.json`)
 
-A flat metadata repository (like [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata)) exposes a root `index.json` so CD Hunt can populate presets dynamically when pointed at a repository URL:
+A flat metadata repository (like [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata)) exposes a root `index.json` so Disk Crate can populate presets dynamically when pointed at a repository URL:
 
 ```json
 {
@@ -59,7 +59,7 @@ A flat metadata repository (like [`dopingus-build/cd-metadata`](https://github.c
 
 ```json
 {
-  "$schema": "https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json",
+  "$schema": "https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json",
   "schemaVersion": 1,
   "meta": { },
   "categories": [ ],
@@ -69,7 +69,7 @@ A flat metadata repository (like [`dopingus-build/cd-metadata`](https://github.c
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `$schema` | `string` | Optional (recommended) | URI pointing to [`https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json) for editor autocomplete & validation. |
+| `$schema` | `string` | Optional (recommended) | URI pointing to [`https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json`](../schemas/catalog.v1.schema.json) for editor autocomplete & validation. |
 | `schemaVersion` | `integer` | **Required** | Version marker for the catalog format. Must be `1`. |
 | `meta` | `Object` | Optional (recommended) | App branding and UI labels. |
 | `categories` | `Array<Object>` | Optional | Ordered list of filter pills shown in the header. Auto-derived from `items[].category` if omitted or empty. |
@@ -83,9 +83,9 @@ All `meta` fields are optional strings; if omitted, the HTML defaults apply. (`m
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `title` | `string` | `"CD Hunt"` | Main `<h1>` header title (`#brandTitle`). |
+| `title` | `string` | `"Disk Crate"` | Main `<h1>` header title (`#brandTitle`). |
 | `subtitle` | `string` | `"Cover Album & Crate Checklist (通常盤 Priority)"` | Subtitle displayed beneath the header title (`#brandSub`). |
-| `documentTitle` | `string` | `"CD Hunt — Cover Album & Checklist"` | Browser tab `<title>`. |
+| `documentTitle` | `string` | `"Disk Crate — Cover Album & Checklist"` | Browser tab `<title>`. |
 | `searchPlaceholder` | `string` | HTML placeholder | Placeholder text for `#searchInput`. |
 | `digitalSectionTitle` | `string` | `"Digital-Only Releases (Skip Physical Hunting)"` | Heading for `#digitalOnlySection`. |
 | `digitalSectionSubtitle` | `string` | `"No physical CD exists in stores — excluded from the physical hunting counter."` | Subtitle for `#digitalOnlySection`. |
@@ -93,7 +93,7 @@ All `meta` fields are optional strings; if omitted, the HTML defaults apply. (`m
 
 ### `localStorage` Namespacing
 
-`js/storage.js` (`deriveStoragePrefix`) automatically derives a unique, deterministic `<prefix>` (`cd_hunt_<slug>_<fnv1aHex>`) from the catalog's source URL, local file name, or title + item IDs so separate catalogs never collide:
+`js/storage.js` (`deriveStoragePrefix`) automatically derives a unique, deterministic `<prefix>` (preserving legacy `cd_hunt_<slug>_<fnv1aHex>` keys for zero-loss backwards compatibility) from the catalog's source URL, local file name, or title + item IDs so separate catalogs never collide:
 
 - `<prefix>_checklist_v2` — Map of `{ [item.id]: boolean }` tracking acquired/saved items.
 - `<prefix>_cover_cache_v6` — Map of `{ [item.id]: { variants, selectedIndex } }` storing resolved cover art variants.
@@ -200,7 +200,7 @@ See [`sample-catalog.json`](./sample-catalog.json) for a ready-to-use JSON file,
 
 ```json
 {
-  "$schema": "https://dopingus-build.github.io/cd-hunt/schemas/catalog.v1.schema.json",
+  "$schema": "https://dopingus-build.github.io/disk-crate/schemas/catalog.v1.schema.json",
   "schemaVersion": 1,
   "meta": {
     "title": "Tokyo Vinyl & CD Hunt",

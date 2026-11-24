@@ -1,6 +1,6 @@
 /**
  * @fileoverview Sandbox-safe localStorage wrapper, active catalog URL persistence,
- * and deterministic per-catalog storage prefix derivation (window.CDHunt.storage / CommonJS).
+ * and deterministic per-catalog storage prefix derivation (window.DiskCrate.storage / legacy alias window.CDHunt.storage / CommonJS).
  */
 (function (root) {
   'use strict';
@@ -164,8 +164,9 @@
   };
 
   if (root) {
-    root.CDHunt = root.CDHunt || {};
-    root.CDHunt.storage = storageApi;
+    root.DiskCrate = root.DiskCrate || root.CDHunt || {};
+    root.DiskCrate.storage = storageApi;
+    root.CDHunt = root.DiskCrate;
   }
 
   if (typeof module !== 'undefined' && module.exports) {
