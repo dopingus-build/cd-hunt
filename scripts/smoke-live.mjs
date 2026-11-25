@@ -20,7 +20,9 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
     const orderedScripts = [
       '<script src="./js/validate.js"></script>',
       '<script src="./js/storage.js"></script>',
+      '<script src="./js/db.js"></script>',
       '<script src="./js/cover-resolver.js"></script>',
+      '<script src="./js/track-resolver.js"></script>',
       '<script src="./js/config.js"></script>',
       '<script src="./js/sync.js"></script>',
       '<script src="./js/sheet-adapter.js"></script>',
@@ -47,7 +49,9 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
       'js/app.js',
       'js/validate.js',
       'js/storage.js',
+      'js/db.js',
       'js/cover-resolver.js',
+      'js/track-resolver.js',
       'css/styles.css'
     ]) {
       const res = await fetch(new URL(assetPath, SITE_URL));

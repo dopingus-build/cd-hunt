@@ -8,6 +8,8 @@
   const DiskCrate = window.DiskCrate || window.CDHunt || {};
   const storage = DiskCrate.storage;
   const coverResolver = DiskCrate.coverResolver;
+  const db = DiskCrate.db || null;
+  const trackResolver = DiskCrate.trackResolver || null;
   const sync = DiskCrate.sync || null;
   const sheetAdapter = DiskCrate.sheetAdapter || null;
   const validateCatalog = window.validateCatalog || DiskCrate.validateCatalog;
@@ -57,6 +59,14 @@
   let suppressSyncPush = false;
   let sheetSyncBotEmail = null;
   let sheetSyncStatusChecked = false;
+  let trackCacheByKey = {};
+  let manualTracksByKey = {};
+  const trackFetchInFlight = new Set();
+  const trackFetchAttempted = new Set();
+  let activeTrackItemId = null;
+  let tracksExpanded = false;
+  let trackEditorOpen = false;
+  let trackMatchesByAlbumId = {};
 
   function deriveCategories(items) {
     const cats = [{ key: 'All', label: 'All Releases', dot: '#a1a1aa' }];
@@ -293,6 +303,10 @@
     pendingQueue.length = 0;
     queuedIds.clear();
     inFlightIds.clear();
+    activeTrackItemId = null;
+    tracksExpanded = false;
+    trackEditorOpen = false;
+    trackMatchesByAlbumId = {};
 
     const searchInput = document.getElementById('searchInput');
     if (searchInput) searchInput.value = '';
@@ -767,7 +781,309 @@
     safeSetItem(COVER_CACHE_KEY, JSON.stringify(state.coverCache));
   }
 
+  function getTrackReleaseKey(item) {
+    if (!item) return '';
+    if (trackResolver && typeof trackResolver.deriveTrackReleaseKey === 'function') {
+      return trackResolver.deriveTrackReleaseKey(item);
+    }
+    return String(item.mbid || item.regCatNo || item.id || '').trim();
+  }
+
+  function getEffectiveTracksInfo(item) {
+    if (!item) {
+      return { tracks: [], trackSource: null, sourceDetail: '', isOverride: false, hasCatalogTracks: false, mbid: '' };
+    }
+    const key = getTrackReleaseKey(item);
+    const manualRecord = key ? manualTracksByKey[key] : null;
+    const cacheRecord = key ? trackCacheByKey[key] : null;
+    if (trackResolver && typeof trackResolver.resolveEffectiveTracks === 'function') {
+      return trackResolver.resolveEffectiveTracks(item, { manualRecord: manualRecord, cacheRecord: cacheRecord });
+    }
+    const tracks = Array.isArray(item.tracks) ? item.tracks : [];
+    return {
+      tracks: tracks,
+      trackSource: tracks.length > 0 ? (item.trackSource || 'catalog') : null,
+      sourceDetail: item.regCatNo || 'Catalog',
+      isOverride: false,
+      hasCatalogTracks: tracks.length > 0,
+      mbid: item.mbid || ''
+    };
+  }
+
+  async function hydrateTracksFromDb() {
+    if (!db) return;
+    try {
+      const [cachedRows, manualRows] = await Promise.all([
+        typeof db.getAllTrackCache === 'function' ? db.getAllTrackCache() : [],
+        typeof db.getAllManualTracks === 'function' ? db.getAllManualTracks() : []
+      ]);
+      const nextCache = {};
+      (Array.isArray(cachedRows) ? cachedRows : []).forEach(function (row) {
+        if (row && row.releaseKey) nextCache[row.releaseKey] = row;
+      });
+      const nextManual = {};
+      (Array.isArray(manualRows) ? manualRows : []).forEach(function (row) {
+        if (row && row.releaseKey) nextManual[row.releaseKey] = row;
+      });
+      trackCacheByKey = nextCache;
+      manualTracksByKey = nextManual;
+      if (hasLoadedCatalog) {
+        if (state.search) renderAll();
+        const modal = document.getElementById('lightboxModal');
+        if (modal && modal.classList.contains('open')) {
+          renderLightbox();
+        }
+      }
+    } catch (err) {
+      // Ignore IndexedDB hydration errors safely
+    }
+  }
+
+  function getTrackSourceDisplay(info) {
+    if (!info || !info.trackSource || !Array.isArray(info.tracks) || info.tracks.length === 0) {
+      return null;
+    }
+    if (info.trackSource === 'manual') {
+      return { text: 'Custom', cls: 'source-manual' };
+    }
+    if (info.trackSource === 'catalog') {
+      return {
+        text: info.sourceDetail && info.sourceDetail !== 'Catalog' ? 'Catalog · ' + info.sourceDetail : 'Catalog',
+        cls: 'source-catalog'
+      };
+    }
+    if (info.trackSource === 'itunes') {
+      return { text: 'iTunes · Digital', cls: 'source-itunes' };
+    }
+    return {
+      text: info.sourceDetail ? 'MusicBrainz · ' + info.sourceDetail : 'MusicBrainz',
+      cls: 'source-musicbrainz'
+    };
+  }
+
+  function buildTrackListRowsHTML(tracks) {
+    const discIds = new Set();
+    let hasNonCd = false;
+    tracks.forEach(function (t) {
+      discIds.add(t.disc || 1);
+      if (t.mediaType && t.mediaType !== 'CD') hasNonCd = true;
+    });
+    const showDiscHeaders = discIds.size > 1 || hasNonCd;
+
+    let html = '';
+    let activeDisc = null;
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i];
+      const disc = t.disc || 1;
+      const mediaType = t.mediaType || 'CD';
+      if (showDiscHeaders && disc !== activeDisc) {
+        activeDisc = disc;
+        html += '<div class="track-disc-header">Disc ' + disc + ' · ' + escapeHTML(mediaType) + '</div>';
+      }
+      const numStr = String(t.number || (i + 1)).padStart(2, '0');
+      const durStr = trackResolver && typeof trackResolver.formatDurationMs === 'function'
+        ? trackResolver.formatDurationMs(t.durationMs)
+        : '';
+      const notesPill = t.notes
+        ? '<span class="track-variant-pill">' + escapeHTML(t.notes) + '</span>'
+        : '';
+      const jaHTML = t.titleJa && t.titleJa !== t.title
+        ? '<div class="track-title-ja">' + escapeHTML(t.titleJa) + '</div>'
+        : '';
+      const artistHTML = t.artist
+        ? '<div class="track-artist">' + escapeHTML(t.artist) + '</div>'
+        : '';
+      html +=
+        '<div class="track-row">' +
+          '<span class="track-num">' + numStr + '</span>' +
+          '<div class="track-main">' +
+            '<div class="track-title-line"><span>' + escapeHTML(t.title) + '</span>' + notesPill + '</div>' +
+            jaHTML +
+            artistHTML +
+          '</div>' +
+          (durStr ? '<span class="track-dur">' + escapeHTML(durStr) + '</span>' : '') +
+        '</div>';
+    }
+    return html;
+  }
+
+  function renderLightboxTracksPanel(item) {
+    const panel = document.getElementById('lbTracksPanel');
+    if (!panel || !item) return;
+
+    const key = getTrackReleaseKey(item);
+    const info = getEffectiveTracksInfo(item);
+    const tracks = Array.isArray(info.tracks) ? info.tracks : [];
+    const isFetching = !!(key && trackFetchInFlight.has(key));
+
+    const toggleBtn = document.getElementById('lbTracksToggleBtn');
+    const headingEl = document.getElementById('lbTracksHeading');
+    const sourceBadgeEl = document.getElementById('lbTrackSourceBadge');
+    const chevronEl = document.getElementById('lbTracksChevron');
+    const bodyEl = document.getElementById('lbTracksBody');
+    const disclaimerEl = document.getElementById('lbTrackDisclaimer');
+    const fetchBtn = document.getElementById('lbFetchTracksBtn');
+    const switchBtn = document.getElementById('lbSwitchTrackSourceBtn');
+    const resetBtn = document.getElementById('lbResetTracksBtn');
+    const listEl = document.getElementById('lbTracksList');
+    const editorDrawer = document.getElementById('lbTrackEditorDrawer');
+
+    if (headingEl) {
+      if (tracks.length > 0) {
+        const discs = new Set(tracks.map(function (t) { return t.disc || 1; }));
+        headingEl.textContent = 'Track List (' + tracks.length + (tracks.length === 1 ? ' track' : ' tracks') +
+          (discs.size > 1 ? ' · ' + discs.size + ' discs' : '') + ')';
+      } else {
+        headingEl.textContent = isFetching ? 'Track List (Fetching...)' : 'Track List';
+      }
+    }
+
+    const srcDisp = getTrackSourceDisplay(info);
+    if (sourceBadgeEl) {
+      if (srcDisp) {
+        sourceBadgeEl.textContent = srcDisp.text;
+        sourceBadgeEl.className = 'track-source-pill ' + srcDisp.cls;
+      } else {
+        sourceBadgeEl.textContent = '';
+        sourceBadgeEl.className = 'track-source-pill hidden';
+      }
+    }
+
+    if (toggleBtn) toggleBtn.setAttribute('aria-expanded', tracksExpanded ? 'true' : 'false');
+    if (chevronEl) chevronEl.textContent = tracksExpanded ? '▾' : '▸';
+    if (bodyEl) bodyEl.classList.toggle('hidden', !tracksExpanded);
+
+    if (disclaimerEl) {
+      if (tracks.length > 0 && info.trackSource === 'itunes') {
+        disclaimerEl.textContent = 'iTunes · Digital — may differ from physical CD editions (bonus tracks / Disc 2 omitted).';
+        disclaimerEl.classList.remove('hidden');
+      } else {
+        disclaimerEl.textContent = '';
+        disclaimerEl.classList.add('hidden');
+      }
+    }
+
+    if (fetchBtn) {
+      fetchBtn.disabled = isFetching;
+      fetchBtn.textContent = isFetching ? 'Fetching...' : (tracks.length > 0 ? '↻ Refetch Tracks' : '↻ Fetch Tracks');
+    }
+    if (switchBtn) {
+      switchBtn.disabled = isFetching;
+      const targetSource = info.trackSource === 'itunes' ? 'musicbrainz' : 'itunes';
+      switchBtn.textContent = targetSource === 'musicbrainz' ? 'Try MusicBrainz' : 'Try iTunes';
+      switchBtn.setAttribute('data-target-source', targetSource);
+    }
+    if (resetBtn) {
+      resetBtn.classList.toggle('hidden', !info.isOverride);
+    }
+
+    if (listEl) {
+      if (isFetching && tracks.length === 0) {
+        listEl.innerHTML = '<div class="lb-tracks-empty">Looking up track list...</div>';
+      } else if (tracks.length === 0) {
+        listEl.innerHTML = trackFetchAttempted.has(key)
+          ? '<div class="lb-tracks-empty">No track list found automatically. Try switching source or paste tracks manually.</div>'
+          : '<div class="lb-tracks-empty">No tracks loaded yet. Click Fetch Tracks or Edit / Paste.</div>';
+      } else {
+        listEl.innerHTML = buildTrackListRowsHTML(tracks);
+      }
+    }
+
+    if (editorDrawer) {
+      editorDrawer.classList.toggle('hidden', !trackEditorOpen);
+    }
+  }
+
+  async function fetchTracksForAlbum(item, sourceMode, force) {
+    if (!item || !trackResolver) return;
+    const key = getTrackReleaseKey(item);
+    if (!key) return;
+    const mode = sourceMode || 'auto';
+
+    if (!force && mode === 'auto') {
+      const current = getEffectiveTracksInfo(item);
+      if (current.tracks.length > 0 || trackFetchAttempted.has(key) || trackFetchInFlight.has(key)) {
+        return;
+      }
+    }
+
+    if (trackFetchInFlight.has(key)) return;
+    if (force && manualTracksByKey[key]) {
+      showToast('Reset Override first to auto-fetch tracks');
+      return;
+    }
+
+    trackFetchInFlight.add(key);
+    const filteredBefore = getFilteredAlbums();
+    const activeBefore = filteredBefore[state.lightboxIndex];
+    if (activeBefore && activeBefore.id === item.id) {
+      renderLightboxTracksPanel(activeBefore);
+    }
+
+    try {
+      const res = await trackResolver.fetchTracksForItem(item, { source: mode });
+      trackFetchAttempted.add(key);
+      if (res && Array.isArray(res.tracks) && res.tracks.length > 0) {
+        const record = {
+          releaseKey: key,
+          catNo: item.regCatNo || '',
+          mbid: res.mbid || '',
+          trackSource: res.trackSource || (mode === 'itunes' ? 'itunes' : 'musicbrainz'),
+          sourceDetail: res.sourceDetail || '',
+          fetchedAt: Date.now(),
+          tracks: res.tracks
+        };
+        trackCacheByKey[key] = record;
+        if (db && typeof db.putTrackCache === 'function') {
+          await db.putTrackCache(record);
+        }
+        if (state.search) renderAll();
+        showToast('Loaded ' + res.tracks.length + ' tracks (' + (record.trackSource === 'itunes' ? 'iTunes' : 'MusicBrainz') + ')');
+      } else {
+        showToast('No track list found');
+      }
+    } catch (err) {
+      trackFetchAttempted.add(key);
+      showToast('Failed to load tracks');
+    } finally {
+      trackFetchInFlight.delete(key);
+      const modal = document.getElementById('lightboxModal');
+      if (modal && modal.classList.contains('open')) {
+        const currentFiltered = getFilteredAlbums();
+        const currentItem = currentFiltered[state.lightboxIndex];
+        if (currentItem && currentItem.id === item.id) {
+          renderLightboxTracksPanel(currentItem);
+        }
+      }
+    }
+  }
+
+  function findMatchedTrackTitle(item, searchRaw) {
+    if (!searchRaw) return '';
+    const info = getEffectiveTracksInfo(item);
+    const tracks = info && Array.isArray(info.tracks) ? info.tracks : [];
+    if (tracks.length === 0) return '';
+
+    const normForMatch = trackResolver && typeof coverResolver.normalizeForMatch === 'function'
+      ? coverResolver.normalizeForMatch
+      : (coverResolver.normalizeForMatch || null);
+    const normQuery = normForMatch ? normForMatch(searchRaw) : '';
+
+    for (let i = 0; i < tracks.length; i++) {
+      const tr = tracks[i];
+      const fields = [tr.title, tr.titleJa, tr.artist, tr.notes].filter(Boolean).join(' ');
+      if (fields.toLowerCase().indexOf(searchRaw) !== -1) {
+        return tr.title || tr.titleJa || '';
+      }
+      if (normForMatch && normQuery && normForMatch(fields).indexOf(normQuery) !== -1) {
+        return tr.title || tr.titleJa || '';
+      }
+    }
+    return '';
+  }
+
   function getFilteredAlbums() {
+    trackMatchesByAlbumId = {};
     return ALBUMS.filter(function (item) {
       if (state.category !== 'All' && item.category !== state.category) {
         return false;
@@ -783,11 +1099,16 @@
           item.titleJa,
           item.catalog,
           item.regCatNo,
+          item.barcode,
           item.filing,
           item.kana
         ].join(' ').toLowerCase();
         if (hay.indexOf(state.search) === -1) {
-          return false;
+          const trackTitleMatch = findMatchedTrackTitle(item, state.search);
+          if (!trackTitleMatch) {
+            return false;
+          }
+          trackMatchesByAlbumId[item.id] = trackTitleMatch;
         }
       }
       return true;
@@ -1093,6 +1414,11 @@
     const spinningClass = inFlightIds.has(item.id) ? 'spinning' : '';
     const cardClasses = 'cd-card' + (isAcquired ? ' acquired' : '') + (isDigital ? ' digital' : '');
 
+    const matchedTrackTitle = state.search && trackMatchesByAlbumId[item.id] ? trackMatchesByAlbumId[item.id] : '';
+    const trackChipHTML = matchedTrackTitle
+      ? '<div class="track-match-chip" title="' + escapeAttr('Track match: ' + matchedTrackTitle) + '">♪ ' + escapeHTML(matchedTrackTitle) + '</div>'
+      : '';
+
     if (state.viewMode === 'single') {
       const shopsHTML = item.recommendedShops
         ? '<div class="shops-row"><strong>Recommended Shops:</strong> ' + escapeHTML(item.recommendedShops) + '</div>'
@@ -1121,6 +1447,7 @@
             '<div>' +
               '<h2 class="single-title">' + escapeHTML(item.title) + '</h2>' +
               '<p class="single-title-ja">' + escapeHTML(item.titleJa) + '</p>' +
+              trackChipHTML +
             '</div>' +
             '<div class="badges-wrap">' +
               '<button type="button" class="chip-btn chip-mono" data-action="copy-cat" data-catno="' + escapeAttr(item.regCatNo || item.catalog) + '" title="Copy catalog number">' +
@@ -1163,6 +1490,7 @@
           '<div class="grid-artist">' + escapeHTML(item.artist) + '</div>' +
           '<div class="grid-title">' + escapeHTML(item.title) + '</div>' +
           '<div class="grid-cat">' + escapeHTML(item.regCatNo || item.catalog) + '</div>' +
+          trackChipHTML +
         '</div>' +
       '</article>'
     );
@@ -1264,6 +1592,13 @@
     const item = filtered[state.lightboxIndex];
     enqueueCoverLookup(item.id, true);
 
+    if (activeTrackItemId !== item.id) {
+      activeTrackItemId = item.id;
+      trackEditorOpen = false;
+      const initialTrackInfo = getEffectiveTracksInfo(item);
+      tracksExpanded = !!(initialTrackInfo && initialTrackInfo.tracks && initialTrackInfo.tracks.length > 0);
+    }
+
     document.getElementById('lbCounter').textContent = (state.lightboxIndex + 1) + ' / ' + filtered.length;
     document.getElementById('lbCategoryBadge').textContent = item.category;
     const priorityBadge = document.getElementById('lbPriorityBadge');
@@ -1348,6 +1683,8 @@
         '</button>'
       );
     }).join('');
+
+    renderLightboxTracksPanel(item);
   }
 
   function copyText(text, customToast) {
@@ -1575,6 +1912,150 @@
       document.getElementById('customCoverInput').value = '';
       showToast('Added cover variant: ' + label);
     });
+
+    function getActiveLightboxItem() {
+      const filtered = getFilteredAlbums();
+      return filtered[state.lightboxIndex] || null;
+    }
+
+    function updateTrackEditorPreview() {
+      const previewEl = document.getElementById('lbTrackEditorPreview');
+      const inputEl = document.getElementById('lbTrackEditorInput');
+      if (!previewEl || !inputEl) return;
+      const parsed = trackResolver && typeof trackResolver.parseTracklistText === 'function'
+        ? trackResolver.parseTracklistText(inputEl.value)
+        : [];
+      const discCount = new Set(parsed.map(function (t) { return t.disc || 1; })).size;
+      previewEl.textContent = parsed.length + (parsed.length === 1 ? ' track' : ' tracks') +
+        (discCount > 1 ? ' · ' + discCount + ' discs' : '');
+    }
+
+    const tracksToggleBtn = document.getElementById('lbTracksToggleBtn');
+    if (tracksToggleBtn) {
+      tracksToggleBtn.addEventListener('click', function () {
+        const item = getActiveLightboxItem();
+        if (!item) return;
+        tracksExpanded = !tracksExpanded;
+        renderLightboxTracksPanel(item);
+        if (tracksExpanded) {
+          const info = getEffectiveTracksInfo(item);
+          const key = getTrackReleaseKey(item);
+          if (info.tracks.length === 0 && !trackFetchAttempted.has(key) && !trackFetchInFlight.has(key)) {
+            fetchTracksForAlbum(item, 'auto', false);
+          }
+        }
+      });
+    }
+
+    const fetchTracksBtn = document.getElementById('lbFetchTracksBtn');
+    if (fetchTracksBtn) {
+      fetchTracksBtn.addEventListener('click', function () {
+        const item = getActiveLightboxItem();
+        if (!item) return;
+        tracksExpanded = true;
+        fetchTracksForAlbum(item, 'auto', true);
+      });
+    }
+
+    const switchTrackSourceBtn = document.getElementById('lbSwitchTrackSourceBtn');
+    if (switchTrackSourceBtn) {
+      switchTrackSourceBtn.addEventListener('click', function () {
+        const item = getActiveLightboxItem();
+        if (!item) return;
+        tracksExpanded = true;
+        const targetSrc = switchTrackSourceBtn.getAttribute('data-target-source') || 'itunes';
+        fetchTracksForAlbum(item, targetSrc, true);
+      });
+    }
+
+    const editTracksBtn = document.getElementById('lbEditTracksBtn');
+    if (editTracksBtn) {
+      editTracksBtn.addEventListener('click', function () {
+        const item = getActiveLightboxItem();
+        if (!item) return;
+        tracksExpanded = true;
+        trackEditorOpen = !trackEditorOpen;
+        if (trackEditorOpen) {
+          const inputEl = document.getElementById('lbTrackEditorInput');
+          if (inputEl) {
+            const info = getEffectiveTracksInfo(item);
+            inputEl.value = trackResolver && typeof trackResolver.formatTracklistForEdit === 'function'
+              ? trackResolver.formatTracklistForEdit(info.tracks)
+              : '';
+          }
+          updateTrackEditorPreview();
+        }
+        renderLightboxTracksPanel(item);
+      });
+    }
+
+    const trackEditorInput = document.getElementById('lbTrackEditorInput');
+    if (trackEditorInput) {
+      trackEditorInput.addEventListener('input', updateTrackEditorPreview);
+    }
+
+    const cancelManualTracksBtn = document.getElementById('cancelManualTracksBtn');
+    if (cancelManualTracksBtn) {
+      cancelManualTracksBtn.addEventListener('click', function () {
+        trackEditorOpen = false;
+        const item = getActiveLightboxItem();
+        if (item) renderLightboxTracksPanel(item);
+      });
+    }
+
+    const saveManualTracksBtn = document.getElementById('saveManualTracksBtn');
+    if (saveManualTracksBtn) {
+      saveManualTracksBtn.addEventListener('click', async function () {
+        const item = getActiveLightboxItem();
+        const inputEl = document.getElementById('lbTrackEditorInput');
+        if (!item || !inputEl || !trackResolver) return;
+        const parsed = trackResolver.parseTracklistText(inputEl.value);
+        if (parsed.length === 0) {
+          showToast('Enter at least 1 track before saving');
+          return;
+        }
+        const key = getTrackReleaseKey(item);
+        if (!key) return;
+        const record = {
+          releaseKey: key,
+          trackSource: 'manual',
+          sourceDetail: 'Custom',
+          updatedAt: Date.now(),
+          tracks: parsed
+        };
+        manualTracksByKey[key] = record;
+        if (db && typeof db.putManualTracks === 'function') {
+          await db.putManualTracks(record);
+        }
+        trackEditorOpen = false;
+        tracksExpanded = true;
+        renderLightboxTracksPanel(item);
+        if (state.search) renderAll();
+        showToast('Saved ' + parsed.length + ' tracks (Custom)');
+      });
+    }
+
+    const resetTracksBtn = document.getElementById('lbResetTracksBtn');
+    if (resetTracksBtn) {
+      resetTracksBtn.addEventListener('click', async function () {
+        const item = getActiveLightboxItem();
+        if (!item) return;
+        const key = getTrackReleaseKey(item);
+        if (!key) return;
+        const hadManual = !!manualTracksByKey[key];
+        delete manualTracksByKey[key];
+        if (db && typeof db.deleteManualTracks === 'function') {
+          await db.deleteManualTracks(key);
+        }
+        trackEditorOpen = false;
+        const nextInfo = getEffectiveTracksInfo(item);
+        renderLightboxTracksPanel(item);
+        if (state.search) renderAll();
+        if (hadManual) {
+          showToast(nextInfo.tracks.length > 0 ? 'Restored underlying track list' : 'Cleared custom track list');
+        }
+      });
+    }
 
     const backupModal = document.getElementById('backupModal');
     const backupTextarea = document.getElementById('backupTextarea');
@@ -1829,6 +2310,8 @@
     }
 
     try {
+      await hydrateTracksFromDb();
+
       let needsCloudBackfill = false;
       if (sync && syncApiUrl && syncSession) {
         const pullRes = await sync.pullCloudState(syncApiUrl, syncSession.token);

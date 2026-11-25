@@ -4,7 +4,7 @@ A mobile-first, zero-dependency web application (formerly **CD Hunt**) for hunti
 
 Catalog metadata lives externally (such as the companion flat repository [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata), which hosts `index.json` and `2026-japan.json`). Users can pick a built-in preset, paste a direct JSON file URL or bare GitHub metadata repository URL, or load a local `.json` file from their device.
 
-> **Planned Roadmap:** Architecture specifications for upcoming Track Lists, Owned Releases Collection, and Opt-In Camera Scanner features live in [`docs/plans/OVERVIEW.md`](./docs/plans/OVERVIEW.md) (not yet implemented).
+> **Planned Roadmap:** Architecture specifications for upcoming Owned Releases Collection and Opt-In Camera Scanner features live in [`docs/plans/OVERVIEW.md`](./docs/plans/OVERVIEW.md) (Phases 0–1 implemented; Phases 2–3 not yet implemented).
 
 ## Key Features
 
@@ -13,6 +13,7 @@ Catalog metadata lives externally (such as the companion flat repository [`dopin
 - **Deep Links, Agent Status Link & Auto-Restore:** URL-loaded catalogs sync to `?catalog=<url>`, persist in `localStorage` (`cd_hunt_catalog_url_v1`), and include **Copy Share Link**, **Backup** JSON export/import, plus **Agent Link** (when signed in) to copy a semi-private read-only `/api/share/<token>?format=markdown` URL for AI / LLM agents without sharing GitHub credentials.
 - **Isolated Storage per Catalog:** Progress, cover caches, view mode, and banner dismissal are automatically namespaced (`deriveStoragePrefix`) so separate catalogs never collide in `localStorage`.
 - **Schema Validation (`schemaVersion: 1`):** Loaded catalogs are validated client-side by `js/validate.js` against [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json).
+- **Multi-Disc Track Lists & Track Search:** Optional `tracks[]`, `barcode`, and `mbid` schema fields, lazy on-demand MusicBrainz (`1 req/s`) / Apple iTunes track fetching cached locally in IndexedDB (`disk_crate_db_v1`), fast paste/edit manual overrides inside **Crate Flip**, and track-title search across Grid and 1-Column views (`js/db.js`, `js/track-resolver.js`).
 - **通常盤-Priority Cover Art Resolution:** Instant offline SVG jewel-case + obi strip covers (`buildJewelCaseDataURI`), lazy two-stage resolution via MusicBrainz/Cover Art Archive (`mbEditions`) and Apple iTunes Search API (`itunesQuery` + `requiredGroups`), multi-edition carousel, and separation of `digitalOnly: true` tracks from the physical shelf-hunting counter.
 
 ## Project Structure
@@ -35,7 +36,9 @@ disk-crate/
 ├── js/
 │   ├── validate.js                # Versioned schema validator, GitHub & Google Sheets URL normalizer
 │   ├── storage.js                 # Sandbox-safe localStorage wrapper & derived key prefixing
-│   ├── cover-resolver.js          # Offline SVG obi generator + MusicBrainz/iTunes lookup
+│   ├── db.js                      # IndexedDB track cache & manual override storage with memory fallback
+│   ├── cover-resolver.js          # Offline SVG obi generator + MusicBrainz/iTunes cover lookup
+│   ├── track-resolver.js          # Multi-disc MusicBrainz/iTunes track resolver, paste parser & variant matcher
 │   ├── config.js                  # Static frontend sync endpoint config (window.DiskCrate.config)
 │   ├── sync.js                    # GitHub session JWT handling, state merge, & cloud sync client
 │   ├── sheet-adapter.js           # Canonical 9-column Google Sheet CSV parser & hybrid overlay merger
@@ -61,7 +64,8 @@ disk-crate/
 │   └── index.js                   # Zero-scope GitHub OAuth, JWT auth, D1 API & circuit breaker
 └── test/
     ├── catalog-validation.test.js # Unit tests for validator, storage, cover resolver, & sync
-    ├── catalog-integration.test.js # Integration tests for index.html, presets, UI, & cloud sync
+    ├── tracks.test.js             # Unit tests for track schema, IndexedDB wrapper, resolver, & matcher
+    ├── catalog-integration.test.js # Integration tests for index.html, presets, tracks, UI, & cloud sync
     ├── cloud-sync-system.test.js  # Full-stack system tests (Frontend VM <-> HTTP Worker <-> SQLite)
     ├── worker-sync.test.js        # Worker unit tests (JWT, CORS, OAuth, rate limits, pause guard)
     └── worker-integration.test.js # End-to-end HTTP + node:sqlite Worker integration tests

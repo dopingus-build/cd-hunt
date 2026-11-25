@@ -40,7 +40,7 @@ body {
   padding-bottom: 84px;
 }
 
-button, input, select {
+button, input, select, textarea {
   font-family: inherit;
   color: inherit;
 }
@@ -1295,4 +1295,287 @@ button {
 
 .hidden {
   display: none !important;
+}
+
+/* Search Track Match Chip on Cards */
+.track-match-chip {
+  margin-top: 3px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(14, 165, 233, 0.14);
+  border: 1px solid rgba(14, 165, 233, 0.35);
+  color: #7dd3fc;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* Crate Flip Track List Panel */
+.lb-tracks-box {
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.lb-tracks-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  min-width: 0;
+}
+
+.lb-tracks-header:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.lb-tracks-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lb-tracks-header-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.lb-tracks-chevron {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.track-source-pill {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  max-width: 165px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.track-source-pill.source-catalog {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #6ee7b7;
+}
+
+.track-source-pill.source-manual {
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #fcd34d;
+}
+
+.track-source-pill.source-musicbrainz {
+  background: rgba(168, 85, 247, 0.15);
+  border-color: rgba(168, 85, 247, 0.4);
+  color: #d8b4fe;
+}
+
+.track-source-pill.source-itunes {
+  background: rgba(14, 165, 233, 0.14);
+  border-color: rgba(14, 165, 233, 0.35);
+  color: #7dd3fc;
+}
+
+.lb-tracks-body {
+  padding: 0 12px 12px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.track-disclaimer {
+  margin-top: 8px;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  background: rgba(14, 165, 233, 0.12);
+  border: 1px solid rgba(14, 165, 233, 0.3);
+  color: #bae6fd;
+  font-size: 11px;
+}
+
+.lb-tracks-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 8px;
+}
+
+.lb-track-btn {
+  padding: 5px 9px;
+  font-size: 11px;
+}
+
+.lb-tracks-list {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.lb-tracks-empty {
+  padding: 10px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  border: 1px dashed var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.track-disc-header {
+  margin-top: 6px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.track-disc-header:first-child {
+  margin-top: 0;
+}
+
+.track-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.02);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.track-num {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  min-width: 20px;
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+
+.track-main {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.track-title-line {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.track-title-ja {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.track-artist {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+.track-variant-pill {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(244, 63, 94, 0.14);
+  border: 1px solid rgba(244, 63, 94, 0.35);
+  color: #fda4af;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.track-dur {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+
+.track-editor-drawer {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.track-editor-help {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.track-editor-textarea {
+  width: 100%;
+  min-height: 115px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-main);
+  resize: vertical;
+  outline: none;
+}
+
+.track-editor-textarea:focus {
+  border-color: var(--accent-rose);
+}
+
+.track-editor-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }

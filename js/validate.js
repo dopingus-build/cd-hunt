@@ -46,6 +46,10 @@
   ];
 
   const VALID_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
+  const VALID_BARCODE_REGEX = /^\d{8,14}$/;
+  const VALID_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const VALID_TRACK_SOURCES = new Set(['catalog', 'manual', 'musicbrainz', 'itunes']);
+  const VALID_MEDIA_TYPES = new Set(['CD', 'BD', 'DVD', 'Digital']);
 
   function isPlainObject(val) {
     return val !== null && typeof val === 'object' && !Array.isArray(val);
@@ -183,6 +187,43 @@
     }
   }
 
+  function validateTracks(tracks, prefix, errors) {
+    if (tracks === undefined) return;
+    if (!Array.isArray(tracks)) {
+      errors.push(prefix + '.tracks must be an array');
+      return;
+    }
+
+    for (let i = 0; i < tracks.length; i++) {
+      const tr = tracks[i];
+      const trPrefix = prefix + '.tracks[' + i + ']';
+      if (!isPlainObject(tr)) {
+        errors.push(trPrefix + ' must be an object');
+        continue;
+      }
+      if (!Number.isInteger(tr.number) || tr.number < 1) {
+        errors.push(trPrefix + '.number must be an integer >= 1');
+      }
+      if (!isNonEmptyString(tr.title)) {
+        errors.push(trPrefix + '.title must be a non-empty string');
+      }
+      if (tr.disc !== undefined && (!Number.isInteger(tr.disc) || tr.disc < 1)) {
+        errors.push(trPrefix + '.disc must be an integer >= 1');
+      }
+      if (tr.mediaType !== undefined && (typeof tr.mediaType !== 'string' || !VALID_MEDIA_TYPES.has(tr.mediaType))) {
+        errors.push(trPrefix + '.mediaType must be one of CD, BD, DVD, Digital');
+      }
+      if (tr.durationMs !== undefined && (!Number.isInteger(tr.durationMs) || tr.durationMs < 0)) {
+        errors.push(trPrefix + '.durationMs must be a non-negative integer');
+      }
+      for (const optField of ['titleJa', 'artist', 'notes']) {
+        if (tr[optField] !== undefined && typeof tr[optField] !== 'string') {
+          errors.push(trPrefix + '.' + optField + ' must be a string');
+        }
+      }
+    }
+  }
+
   function validateItem(item, index, seenIds, categoryKeys, errors) {
     const prefix = 'items[' + index + ']';
     if (!isPlainObject(item)) {
@@ -226,6 +267,33 @@
         errors.push(prefix + '.' + field + ' must be a string');
       }
     }
+
+    if (item.barcode !== undefined) {
+      if (typeof item.barcode !== 'string') {
+        errors.push(prefix + '.barcode must be a string');
+      } else {
+        const cleanBarcode = item.barcode.replace(/[\s-]+/g, '');
+        if (cleanBarcode.length > 0 && !VALID_BARCODE_REGEX.test(cleanBarcode)) {
+          errors.push(prefix + '.barcode ("' + item.barcode + '") must contain 8 to 14 digits');
+        }
+      }
+    }
+
+    if (item.mbid !== undefined) {
+      if (typeof item.mbid !== 'string') {
+        errors.push(prefix + '.mbid must be a string');
+      } else if (item.mbid.trim().length > 0 && !VALID_UUID_REGEX.test(item.mbid.trim())) {
+        errors.push(prefix + '.mbid ("' + item.mbid + '") must be a valid UUID');
+      }
+    }
+
+    if (item.trackSource !== undefined) {
+      if (typeof item.trackSource !== 'string' || !VALID_TRACK_SOURCES.has(item.trackSource)) {
+        errors.push(prefix + '.trackSource must be one of catalog, manual, musicbrainz, itunes');
+      }
+    }
+
+    validateTracks(item.tracks, prefix, errors);
 
     validateMbEditions(item.mbEditions, prefix, errors);
 

@@ -194,7 +194,71 @@ async function attachExternalRoutes(context, appOrigin, workerBaseUrl, opts = {}
         return;
       }
 
-      if (/^(?:musicbrainz\.org|coverartarchive\.org|itunes\.apple\.com)$/.test(reqUrl.hostname)) {
+      if (reqUrl.hostname === 'musicbrainz.org') {
+        if (stateFlags.mbOffline) {
+          await route.abort('failed');
+          return;
+        }
+        const queryParam = reqUrl.searchParams.get('query') || '';
+        if (reqUrl.pathname === '/ws/2/release/' && queryParam.includes('CPCA-1004')) {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            headers: { 'Access-Control-Allow-Origin': '*' },
+            body: JSON.stringify({
+              releases: [
+                {
+                  id: 'cpca-1004-mbid-0000-000000000001',
+                  title: 'Breath of Fire III OST',
+                  status: 'Official',
+                  'label-info': [{ 'catalog-number': 'CPCA-1004' }]
+                }
+              ]
+            })
+          });
+          return;
+        }
+        if (reqUrl.pathname === '/ws/2/release/cpca-1004-mbid-0000-000000000001') {
+          stateFlags.mbTrackFetchCount = (stateFlags.mbTrackFetchCount || 0) + 1;
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            headers: { 'Access-Control-Allow-Origin': '*' },
+            body: JSON.stringify({
+              id: 'cpca-1004-mbid-0000-000000000001',
+              title: 'Breath of Fire III OST',
+              'label-info': [{ 'catalog-number': 'CPCA-1004' }],
+              media: [
+                {
+                  position: 1,
+                  format: 'CD',
+                  tracks: [
+                    { position: 1, title: "Ryu's Theme", length: 195000, 'artist-credit': [{ name: 'Capcom' }] },
+                    { position: 2, title: 'To a Distant Place', length: 242000, 'artist-credit': [{ name: 'Yoshino Aoki' }] }
+                  ]
+                },
+                {
+                  position: 2,
+                  format: 'CD',
+                  tracks: [
+                    { position: 1, title: 'Bonus Disk Track', length: 160000, 'artist-credit': [{ name: 'Capcom' }] }
+                  ]
+                }
+              ]
+            })
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: JSON.stringify({ releases: [] })
+        });
+        return;
+      }
+
+      if (/^(?:coverartarchive\.org|itunes\.apple\.com)$/.test(reqUrl.hostname)) {
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -561,7 +625,7 @@ async function main() {
     }
 
     // Device C: Standalone Google Sheet mode + Bot Email Banner + Write-Back + /api/share + Offline CSV Cache + Search/Filters + Crate Flip Swipe + Backup + Duplicate Sheets + Local CSV + Sign-out
-    const stateFlags = { sheetOffline: false, dupSheetOffline: false };
+    const stateFlags = { sheetOffline: false, dupSheetOffline: false, mbOffline: false, mbTrackFetchCount: 0 };
     const ctxC = await browser.newContext({ viewport: { width: 1280, height: 800 }, hasTouch: true });
     await attachExternalRoutes(ctxC, appOrigin, workerBaseUrl, {
       authCode: 'code_bob',
@@ -729,6 +793,16 @@ async function main() {
       await dispatchRealTouchSwipe('#lbArtBox', 100, -4);
       await pageC.waitForFunction(() => document.getElementById('lbCounter')?.textContent === '1 / 4');
 
+      // Lazy Track List fetch on 375px mobile viewport + horizontal overflow assertion
+      await pageC.click('#lbTracksToggleBtn');
+      await pageC.waitForFunction(() => document.getElementById('lbTrackSourceBadge')?.textContent === 'MusicBrainz · CPCA-1004');
+      await pageC.waitForFunction(() => {
+        const html = document.getElementById('lbTracksList')?.innerHTML || '';
+        return html.includes("Ryu's Theme") && html.includes('Disc 2 · CD') && html.includes('Bonus Disk Track');
+      });
+      const mobileTracksOverflow = await pageC.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+      assert.equal(mobileTracksOverflow, false, 'Mobile 375px Crate Flip with expanded tracks must not overflow horizontally');
+
       // Wrap backwards to digital-only Hanatan (4 / 4) and verify digital Jacket Search string
       await pageC.click('#lbPrevBtn');
       await pageC.waitForFunction(() => document.getElementById('lbCounter')?.textContent === '4 / 4');
@@ -766,11 +840,35 @@ async function main() {
       }
       assert.equal(syncedBackupKscl, true, 'Expected Backup import to sync sheet-kscl-737 to SQLite');
 
-      // Flip Google Sheet offline and reload Chromium -> restores offline CSV cache cleanly with 2/3 preserved
+      // Flip Google Sheet + MusicBrainz offline and reload Chromium -> restores offline CSV cache + real IndexedDB tracklist without refetching
       stateFlags.sheetOffline = true;
+      stateFlags.mbOffline = true;
+      const mbFetchesBeforeReload = stateFlags.mbTrackFetchCount;
       await pageC.reload({ waitUntil: 'domcontentloaded' });
       await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '2 / 3');
       await pageC.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Loaded cached Google Sheet (offline)'));
+
+      await pageC.click('#openCrateFlipBtn');
+      await pageC.waitForSelector('#lightboxModal.open');
+      await pageC.waitForFunction(() => document.getElementById('lbTrackSourceBadge')?.textContent === 'MusicBrainz · CPCA-1004');
+      await pageC.waitForFunction(() => (document.getElementById('lbTracksList')?.innerHTML || '').includes("Ryu's Theme"));
+      assert.equal(stateFlags.mbTrackFetchCount, mbFetchesBeforeReload, 'Offline reload must restore tracks from IndexedDB without network fetch');
+
+      // Manual paste override -> Custom badge, IndexedDB persistence, & #searchInput track search match chip
+      await pageC.click('#lbEditTracksBtn');
+      await pageC.waitForSelector('#lbTrackEditorDrawer:not(.hidden)');
+      await pageC.fill('#lbTrackEditorInput', '1. Custom E2E Track (3:33)\n2. Hidden B-Side Track (4:44)');
+      await pageC.waitForFunction(() => document.getElementById('lbTrackEditorPreview')?.textContent === '2 tracks');
+      await pageC.click('#saveManualTracksBtn');
+      await pageC.waitForFunction(() => document.getElementById('lbTrackSourceBadge')?.textContent === 'Custom');
+      await pageC.click('#closeLightboxBtn');
+      await pageC.waitForSelector('#lightboxModal', { state: 'hidden' });
+
+      await pageC.fill('#searchInput', 'Hidden B-Side Track');
+      await pageC.waitForFunction(() => document.getElementById('visibleCountText')?.textContent.includes('Showing 1'));
+      await pageC.waitForFunction(() => (document.getElementById('albumGrid')?.innerHTML || '').includes('Hidden B-Side Track'));
+      await pageC.click('#clearSearchBtn');
+      await pageC.waitForFunction(() => document.getElementById('visibleCountText')?.textContent.includes('Showing 3 physical'));
 
       // Load duplicate Google Sheet e2eDupSheet -> auto-deduplicates 3 rows into 2 physical items & reconciles duplicate rows
       await pageC.click('#openCatalogLoaderBtn');
@@ -851,7 +949,7 @@ async function main() {
       await ctxC.close();
     }
 
-    console.log('✓ Browser E2E checks passed (desktop + 375px mobile, OAuth, multi-device SQLite sync, search/filters, Crate Flip cover-only swipe & jacket search, backup modal, Google Sheet + dedup + write-back, /api/share, offline CSV cache, local CSV upload, sign-out, keepalive flush)');
+    console.log('✓ Browser E2E checks passed (desktop + 375px mobile, OAuth, multi-device SQLite sync, search/filters + track search, Crate Flip cover-only swipe, jacket search, Track List MB/IndexedDB persistence/paste override, backup modal, Google Sheet + dedup + write-back, /api/share, offline CSV cache, local CSV upload, sign-out, keepalive flush)');
   } finally {
     await browser.close();
     await Promise.all([

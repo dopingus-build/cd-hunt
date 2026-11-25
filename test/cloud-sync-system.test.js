@@ -12,7 +12,9 @@ const ROOT_DIR = path.join(__dirname, '..');
 const HTML_PATH = path.join(ROOT_DIR, 'index.html');
 const VALIDATE_PATH = path.join(ROOT_DIR, 'js', 'validate.js');
 const STORAGE_PATH = path.join(ROOT_DIR, 'js', 'storage.js');
+const DB_PATH = path.join(ROOT_DIR, 'js', 'db.js');
 const COVER_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'cover-resolver.js');
+const TRACK_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'track-resolver.js');
 const CONFIG_PATH = path.join(ROOT_DIR, 'js', 'config.js');
 const SYNC_PATH = path.join(ROOT_DIR, 'js', 'sync.js');
 const SHEET_ADAPTER_PATH = path.join(ROOT_DIR, 'js', 'sheet-adapter.js');
@@ -502,11 +504,13 @@ async function bootSystemClient(sys, {
   sandbox.globalThis = sandbox;
 
   const context = vm.createContext(sandbox);
-  for (const filePath of [VALIDATE_PATH, STORAGE_PATH, COVER_RESOLVER_PATH, CONFIG_PATH]) {
+  for (const filePath of [VALIDATE_PATH, STORAGE_PATH, DB_PATH, COVER_RESOLVER_PATH, TRACK_RESOLVER_PATH, CONFIG_PATH]) {
     vm.runInContext(fs.readFileSync(filePath, 'utf8'), context, { filename: filePath });
   }
-  context.CDHunt.config.syncApiUrl = sys.workerBaseUrl;
-  context.CDHunt.config.syncDebounceMs = syncDebounceMs;
+  const ns = context.DiskCrate || context.CDHunt;
+  ns.config.syncApiUrl = sys.workerBaseUrl;
+  ns.config.syncDebounceMs = syncDebounceMs;
+  ns.config.mbTrackMinIntervalMs = 0;
   for (const filePath of [SYNC_PATH, SHEET_ADAPTER_PATH, APP_PATH]) {
     vm.runInContext(fs.readFileSync(filePath, 'utf8'), context, { filename: filePath });
   }

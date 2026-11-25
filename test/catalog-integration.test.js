@@ -46,7 +46,9 @@ function getPresetTestFixtures() {
 }
 const VALIDATE_PATH = path.join(ROOT_DIR, 'js', 'validate.js');
 const STORAGE_PATH = path.join(ROOT_DIR, 'js', 'storage.js');
+const DB_PATH = path.join(ROOT_DIR, 'js', 'db.js');
 const COVER_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'cover-resolver.js');
+const TRACK_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'track-resolver.js');
 const CONFIG_PATH = path.join(ROOT_DIR, 'js', 'config.js');
 const SYNC_PATH = path.join(ROOT_DIR, 'js', 'sync.js');
 const SHEET_ADAPTER_PATH = path.join(ROOT_DIR, 'js', 'sheet-adapter.js');
@@ -191,6 +193,8 @@ async function bootApp({
   syncDebounceMs = 10,
   fetchImpl,
   imageImpl,
+  indexedDBImpl = null,
+  mbTrackMinIntervalMs = 0,
   disableIntersectionObserver = false,
   clipboardMode = 'async',
   execCommandThrow = false
@@ -198,7 +202,9 @@ async function bootApp({
   const html = readAppHtml();
   const validatorSource = readValidatorSource();
   const storageSource = fs.readFileSync(STORAGE_PATH, 'utf8');
+  const dbSource = fs.readFileSync(DB_PATH, 'utf8');
   const coverResolverSource = fs.readFileSync(COVER_RESOLVER_PATH, 'utf8');
+  const trackResolverSource = fs.readFileSync(TRACK_RESOLVER_PATH, 'utf8');
   const configSource = fs.readFileSync(CONFIG_PATH, 'utf8');
   const syncSource = fs.readFileSync(SYNC_PATH, 'utf8');
   const sheetAdapterSource = fs.readFileSync(SHEET_ADAPTER_PATH, 'utf8');
@@ -371,6 +377,7 @@ async function bootApp({
     btoa,
     TextDecoder,
     TextEncoder,
+    indexedDB: indexedDBImpl || undefined,
     Image: imageImpl || MockImage,
     FileReader: MockFileReader,
     setTimeout,
@@ -426,10 +433,13 @@ async function bootApp({
 
   vm.runInContext(validatorSource, context, { filename: VALIDATE_PATH });
   vm.runInContext(storageSource, context, { filename: STORAGE_PATH });
+  vm.runInContext(dbSource, context, { filename: DB_PATH });
   vm.runInContext(coverResolverSource, context, { filename: COVER_RESOLVER_PATH });
+  vm.runInContext(trackResolverSource, context, { filename: TRACK_RESOLVER_PATH });
   vm.runInContext(configSource, context, { filename: CONFIG_PATH });
   (context.DiskCrate || context.CDHunt).config.syncApiUrl = syncApiUrl;
   (context.DiskCrate || context.CDHunt).config.syncDebounceMs = syncDebounceMs;
+  (context.DiskCrate || context.CDHunt).config.mbTrackMinIntervalMs = mbTrackMinIntervalMs;
   vm.runInContext(syncSource, context, { filename: SYNC_PATH });
   vm.runInContext(sheetAdapterSource, context, { filename: SHEET_ADAPTER_PATH });
   vm.runInContext(appScript, context, { filename: APP_PATH });
@@ -601,7 +611,9 @@ describe('HTML entrypoint generalization & script wiring', () => {
     const expectedScripts = [
       '<script src="./js/validate.js"></script>',
       '<script src="./js/storage.js"></script>',
+      '<script src="./js/db.js"></script>',
       '<script src="./js/cover-resolver.js"></script>',
+      '<script src="./js/track-resolver.js"></script>',
       '<script src="./js/config.js"></script>',
       '<script src="./js/sync.js"></script>',
       '<script src="./js/sheet-adapter.js"></script>',
@@ -645,7 +657,9 @@ describe('Browser and Node dual export for js/validate.js', () => {
       'normalizeCatalogUrl',
       'extractGoogleSheetId',
       'storage',
+      'db',
       'coverResolver',
+      'trackResolver',
       'config',
       'sync',
       'sheetAdapter'
@@ -2803,5 +2817,354 @@ describe('Google Sheet direct loading, JSON hybrid overlay, and Agent Link butto
     const digHref = decodeURIComponent(app.elements.get('lbGoogleSearchLink').href);
     assert.ok(digHref.includes('Rokudenashi ホウキボシ ジャケット'));
     assert.equal(digHref.includes('通常盤 CD'), false);
+  });
+});
+
+describe('Phase 1 Track Lists UI, lazy MusicBrainz/iTunes resolution, IndexedDB cache, overrides, and track search', () => {
+  function makeMockIDBFactory(backing = new Map()) {
+    function makeReq() {
+      return { result: null, error: null, onupgradeneeded: null, onsuccess: null, onerror: null };
+    }
+    return {
+      open(dbName) {
+        const req = makeReq();
+        queueMicrotask(() => {
+          if (!backing.has(dbName)) {
+            backing.set(dbName, new Map());
+          }
+          const storeData = backing.get(dbName);
+          const dbObj = {
+            objectStoreNames: {
+              contains(name) { return storeData.has(name); }
+            },
+            createObjectStore(name) {
+              if (!storeData.has(name)) storeData.set(name, new Map());
+              return {};
+            },
+            transaction(storeName) {
+              if (!storeData.has(storeName)) storeData.set(storeName, new Map());
+              const map = storeData.get(storeName);
+              const tx = {
+                oncomplete: null,
+                onerror: null,
+                onabort: null,
+                objectStore() {
+                  return {
+                    get(key) {
+                      const r = makeReq();
+                      queueMicrotask(() => {
+                        r.result = map.has(key) ? JSON.parse(JSON.stringify(map.get(key))) : undefined;
+                        if (r.onsuccess) r.onsuccess();
+                        if (tx.oncomplete) tx.oncomplete();
+                      });
+                      return r;
+                    },
+                    put(val) {
+                      const r = makeReq();
+                      queueMicrotask(() => {
+                        map.set(val.releaseKey, JSON.parse(JSON.stringify(val)));
+                        r.result = val.releaseKey;
+                        if (r.onsuccess) r.onsuccess();
+                        if (tx.oncomplete) tx.oncomplete();
+                      });
+                      return r;
+                    },
+                    delete(key) {
+                      const r = makeReq();
+                      queueMicrotask(() => {
+                        map.delete(key);
+                        if (r.onsuccess) r.onsuccess();
+                        if (tx.oncomplete) tx.oncomplete();
+                      });
+                      return r;
+                    },
+                    getAll() {
+                      const r = makeReq();
+                      queueMicrotask(() => {
+                        r.result = Array.from(map.values()).map((v) => JSON.parse(JSON.stringify(v)));
+                        if (r.onsuccess) r.onsuccess();
+                        if (tx.oncomplete) tx.oncomplete();
+                      });
+                      return r;
+                    },
+                    clear() {
+                      const r = makeReq();
+                      queueMicrotask(() => {
+                        map.clear();
+                        if (r.onsuccess) r.onsuccess();
+                        if (tx.oncomplete) tx.oncomplete();
+                      });
+                      return r;
+                    }
+                  };
+                }
+              };
+              return tx;
+            },
+            close() {}
+          };
+          req.result = dbObj;
+          if (req.onupgradeneeded) req.onupgradeneeded({ target: { result: dbObj } });
+          if (req.onsuccess) req.onsuccess();
+        });
+        return req;
+      }
+    };
+  }
+
+  it('renders embedded multi-disc catalog tracks expanded immediately and filters cards by track title without network requests', async () => {
+    let fetchCalls = 0;
+    const catalog = {
+      schemaVersion: 1,
+      meta: { title: 'Track Catalog Test' },
+      items: [
+        {
+          id: 'tr-01',
+          category: 'Anime Themes & Chara',
+          artist: 'yama',
+          artistJa: 'yama (ヤマ)',
+          title: 'slash (Limited CD+BD)',
+          titleJa: 'slash',
+          regCatNo: 'SRCL-12539',
+          catalog: 'SRCL-12539 (通常盤) / SRCL-12536~38 (初回 CD+BD)',
+          barcode: '4547366611397',
+          kana: 'ヤ / Y',
+          filing: 'Look under ヤ',
+          price: '¥500',
+          tracks: [
+            { disc: 1, mediaType: 'CD', number: 1, title: 'slash', durationMs: 221000 },
+            { disc: 1, mediaType: 'CD', number: 2, title: 'Hidden Coupling Star', titleJa: '隠れ星', artist: 'Guest Composer', durationMs: 252000, notes: 'Instrumental' },
+            { disc: 2, mediaType: 'BD', number: 1, title: 'Non-Credit Opening', durationMs: 90000 }
+          ]
+        },
+        {
+          id: 'tr-02',
+          category: 'J-Rock',
+          artist: 'Asian Kung-Fu Generation',
+          title: 'Sol-fa',
+          regCatNo: 'KSCL-737',
+          catalog: 'KSCL-737',
+          kana: 'ア / A',
+          filing: 'Look under ア',
+          price: '¥400'
+        }
+      ]
+    };
+
+    const app = await bootApp({
+      catalogObject: catalog,
+      fetchImpl: async (url) => {
+        fetchCalls++;
+        throw new Error('Unexpected network call: ' + url);
+      }
+    });
+
+    await app.clickElement('openCrateFlipBtn');
+    assert.equal(app.elements.get('lbTracksToggleBtn').getAttribute('aria-expanded'), 'true');
+    assert.equal(app.elements.get('lbTracksBody').classList.contains('hidden'), false);
+    assert.equal(app.elements.get('lbTracksHeading').textContent, 'Track List (3 tracks · 2 discs)');
+    assert.equal(app.elements.get('lbTrackSourceBadge').textContent, 'Catalog · SRCL-12539');
+    assert.equal(app.elements.get('lbTrackDisclaimer').classList.contains('hidden'), true);
+
+    const listHtml = app.elements.get('lbTracksList').innerHTML;
+    assert.ok(listHtml.includes('Disc 1 · CD'));
+    assert.ok(listHtml.includes('Disc 2 · BD'));
+    assert.ok(listHtml.includes('Hidden Coupling Star'));
+    assert.ok(listHtml.includes('隠れ星'));
+    assert.ok(listHtml.includes('Guest Composer'));
+    assert.ok(listHtml.includes('Instrumental'));
+    assert.ok(listHtml.includes('4:12'));
+    assert.equal(fetchCalls, 0);
+
+    // Track title search (English + Japanese) matches album card and shows compact track chip in both Grid & 1-Col
+    await app.inputText('searchInput', '隠れ星');
+    assert.equal(app.elements.get('visibleCountText').textContent, 'Showing 1 of 2 physical covers');
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('track-match-chip'));
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('Hidden Coupling Star'));
+
+    await app.clickElement('viewModeBtn');
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('track-match-chip'));
+  });
+
+  it('lazily resolves tracks from MusicBrainz and iTunes, switches sources cleanly, and persists manual overrides in IndexedDB without cloud pushes', async () => {
+    const sharedBacking = new Map();
+    const fetchedUrls = [];
+    let cloudPutCount = 0;
+
+    const catalog = {
+      schemaVersion: 1,
+      meta: { title: 'Lazy Track Hunt' },
+      items: [
+        {
+          id: 'lz-01',
+          category: 'Anime Themes & Chara',
+          artist: 'Example Artist',
+          artistJa: 'サンプル',
+          title: 'Moonlight Single',
+          regCatNo: 'LACM-24156',
+          catalog: 'LACM-24156 (通常盤)',
+          mbEditions: [{ catno: 'LACM-24156', label: '通常盤 Regular' }],
+          itunesQuery: 'Moonlight Example Artist',
+          requiredGroups: [['moonlight'], ['example']],
+          kana: 'サ / S',
+          filing: 'Look under サ',
+          price: '¥500'
+        }
+      ]
+    };
+
+    const jwtHeader = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const jwtPayload = Buffer.from(JSON.stringify({ purpose: 'session', sub: '101', login: 'alice', exp: 9999999999 })).toString('base64url');
+    const fakeJwt = `${jwtHeader}.${jwtPayload}.sig`;
+
+    function makeFetchImpl() {
+      return async (url, init = {}) => {
+        const u = String(url);
+        const method = String(init.method || 'GET').toUpperCase();
+        fetchedUrls.push({ url: u, method });
+        if (u === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return { ok: true, status: 200, async json() { return { ok: true, user: { login: 'alice' }, state: null, updatedAt: null }; } };
+        }
+        if (u === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'PUT') {
+          cloudPutCount++;
+          return { ok: true, status: 200, async json() { return { ok: true, updatedAt: Date.now() }; } };
+        }
+        if (u.startsWith('https://musicbrainz.org/ws/2/release/?query=catno%3ALACM-24156')) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                releases: [{ id: '11111111-1111-4111-8111-111111111111', title: 'Moonlight', status: 'Official', 'label-info': [{ 'catalog-number': 'LACM-24156' }] }]
+              };
+            }
+          };
+        }
+        if (u.startsWith('https://musicbrainz.org/ws/2/release/11111111-1111-4111-8111-111111111111')) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                id: '11111111-1111-4111-8111-111111111111',
+                title: 'Moonlight',
+                'label-info': [{ 'catalog-number': 'LACM-24156' }],
+                media: [
+                  {
+                    position: 1,
+                    format: 'CD',
+                    tracks: [
+                      { position: 1, title: 'Moonlight Overture', length: 245000, 'artist-credit': [{ name: 'Example Artist' }] },
+                      { position: 2, title: 'Moonlight Overture (Off Vocal)', length: 245000, 'artist-credit': [{ name: 'Example Artist' }] }
+                    ]
+                  }
+                ]
+              };
+            }
+          };
+        }
+        if (u.startsWith('https://itunes.apple.com/search?')) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                results: [
+                  { collectionId: 999111, collectionName: 'Moonlight - EP', artistName: 'Example Artist' }
+                ]
+              };
+            }
+          };
+        }
+        if (u.startsWith('https://itunes.apple.com/lookup?id=999111')) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                results: [
+                  { wrapperType: 'collection', collectionId: 999111 },
+                  { wrapperType: 'track', discNumber: 1, trackNumber: 1, trackName: 'Moonlight (Digital Mix)', artistName: 'Example Artist', trackTimeMillis: 240000 }
+                ]
+              };
+            }
+          };
+        }
+        return { ok: true, status: 200, async json() { return { releases: [], results: [] }; } };
+      };
+    }
+
+    const app = await bootApp({
+      catalogObject: catalog,
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      initialStorage: { cd_hunt_sync_token_v1: fakeJwt },
+      indexedDBImpl: makeMockIDBFactory(sharedBacking),
+      fetchImpl: makeFetchImpl()
+    });
+
+    // Opening Crate Flip leaves empty Track List collapsed and fires zero MusicBrainz/iTunes tracklist requests
+    await app.clickElement('openCrateFlipBtn');
+    assert.equal(app.elements.get('lbTracksBody').classList.contains('hidden'), true);
+    assert.equal(
+      fetchedUrls.some((f) => f.url.includes('inc=recordings') || f.url.includes('itunes.apple.com/lookup')),
+      false
+    );
+
+    // Expanding triggers lazy MusicBrainz fetch & caches into IndexedDB with zero cloud PUTs
+    await app.clickElement('lbTracksToggleBtn');
+    await app.flush();
+    assert.equal(app.elements.get('lbTracksBody').classList.contains('hidden'), false);
+    assert.equal(app.elements.get('lbTrackSourceBadge').textContent, 'MusicBrainz · LACM-24156');
+    assert.ok(app.elements.get('lbTracksList').innerHTML.includes('Moonlight Overture'));
+    assert.equal(app.elements.get('lbTrackDisclaimer').classList.contains('hidden'), true);
+    assert.equal(cloudPutCount, 0);
+
+    // Switching source loads iTunes and displays digital-vs-physical disclaimer
+    await app.clickElement('lbSwitchTrackSourceBtn');
+    await app.flush();
+    assert.equal(app.elements.get('lbTrackSourceBadge').textContent, 'iTunes · Digital');
+    assert.equal(app.elements.get('lbTrackDisclaimer').classList.contains('hidden'), false);
+    assert.ok(app.elements.get('lbTrackDisclaimer').textContent.includes('may differ from physical CD'));
+    assert.ok(app.elements.get('lbTracksList').innerHTML.includes('Moonlight (Digital Mix)'));
+
+    // Edit & paste custom multi-disc override -> Layer 1 wins & persists across reload
+    await app.clickElement('lbEditTracksBtn');
+    assert.equal(app.elements.get('lbTrackEditorDrawer').classList.contains('hidden'), false);
+    await app.inputText('lbTrackEditorInput', 'Disc 1 (CD)\n01. Custom Vocal Track (4:00)\nDisc 2 (BD)\n01. Live Footage (15:00)');
+    assert.equal(app.elements.get('lbTrackEditorPreview').textContent, '2 tracks · 2 discs');
+    await app.clickElement('saveManualTracksBtn');
+    await app.flush();
+
+    assert.equal(app.elements.get('lbTrackSourceBadge').textContent, 'Custom');
+    assert.equal(app.elements.get('lbTrackDisclaimer').classList.contains('hidden'), true);
+    assert.equal(app.elements.get('lbResetTracksBtn').classList.contains('hidden'), false);
+
+    // Attempted auto-fetch does not overwrite active custom override
+    const fetchCountBefore = fetchedUrls.length;
+    await app.clickElement('lbFetchTracksBtn');
+    assert.equal(fetchedUrls.length, fetchCountBefore);
+    assert.ok(app.elements.get('toast').textContent.includes('Reset Override first'));
+
+    // Second boot reading from shared IndexedDB restores Custom override offline and makes it searchable
+    const appReload = await bootApp({
+      catalogObject: catalog,
+      indexedDBImpl: makeMockIDBFactory(sharedBacking),
+      fetchImpl: async (url) => {
+        throw new Error('Reload should use IndexedDB offline without fetching: ' + url);
+      }
+    });
+    await appReload.clickElement('openCrateFlipBtn');
+    assert.equal(appReload.elements.get('lbTrackSourceBadge').textContent, 'Custom');
+    assert.ok(appReload.elements.get('lbTracksList').innerHTML.includes('Custom Vocal Track'));
+
+    await appReload.inputText('searchInput', 'Live Footage');
+    assert.equal(appReload.elements.get('visibleCountText').textContent, 'Showing 1 of 1 physical covers');
+    assert.ok(appReload.elements.get('albumGrid').innerHTML.includes('Live Footage'));
+
+    // Resetting override falls back cleanly to underlying cached iTunes entry
+    await appReload.clickElement('lbResetTracksBtn');
+    await appReload.flush();
+    assert.equal(appReload.elements.get('lbTrackSourceBadge').textContent, 'iTunes · Digital');
+    assert.equal(appReload.elements.get('lbResetTracksBtn').classList.contains('hidden'), true);
   });
 });

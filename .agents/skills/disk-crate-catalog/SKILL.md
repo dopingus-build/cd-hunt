@@ -27,7 +27,7 @@ Use [`docs/AGENT_CATALOG_GUIDE.md`](../../../docs/AGENT_CATALOG_GUIDE.md) as the
 1. Read [`docs/AGENT_CATALOG_GUIDE.md`](../../../docs/AGENT_CATALOG_GUIDE.md) Part 2 & Part 3 plus [`schemas/catalog.v1.schema.json`](../../../schemas/catalog.v1.schema.json).
 2. Never rename, renumber, or reuse existing `item.id` values; check existing `regCatNo`/`mbEditions`/titles before adding new entries to avoid duplicates; never add `meta.storagePrefix`.
 3. Never include hotlinked URLs from `vgmdb.net`, `wikia.nocookie.net`, `fandom.com`, or `cdjapan.co.jp`.
-4. Verify `mbEditions` against MusicBrainz / Cover Art Archive (`front-500`) and `itunesQuery` + `requiredGroups` against Apple iTunes Search API.
+4. Verify `mbEditions` against MusicBrainz / Cover Art Archive (`front-500`) and `itunesQuery` + `requiredGroups` against Apple iTunes Search API; optionally include verified `barcode`, `mbid`, and multi-disc `tracks[]` (`CD`/`BD`/`DVD`) for buying decisions.
 5. Validate JSON with `validateCatalog` in [`js/validate.js`](../../../js/validate.js) and run `node --test test/*.test.js` before committing.
 
 ### 3. Shop Availability & Stock Scouting

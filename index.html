@@ -74,7 +74,7 @@
           id="searchInput"
           class="search-input"
           type="text"
-          placeholder="Search English, Romaji, 日本語, anime/game, or catalog #..."
+          placeholder="Search English, Romaji, 日本語, track title, anime/game, or catalog #..."
         />
         <button id="clearSearchBtn" type="button" class="clear-btn" aria-label="Clear search">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
@@ -243,6 +243,42 @@
               <button id="saveCustomCoverBtn" type="button" class="btn btn-primary">Add Cover</button>
             </div>
           </div>
+
+          <!-- Track List Panel -->
+          <div id="lbTracksPanel" class="lb-tracks-box">
+            <button id="lbTracksToggleBtn" type="button" class="lb-tracks-header" aria-expanded="false">
+              <span id="lbTracksHeading" class="lb-tracks-title">Track List</span>
+              <span class="lb-tracks-header-right">
+                <span id="lbTrackSourceBadge" class="track-source-pill hidden"></span>
+                <span id="lbTracksChevron" class="lb-tracks-chevron" aria-hidden="true">▸</span>
+              </span>
+            </button>
+
+            <div id="lbTracksBody" class="lb-tracks-body hidden">
+              <div id="lbTrackDisclaimer" class="track-disclaimer hidden"></div>
+              <div class="lb-tracks-actions">
+                <button id="lbFetchTracksBtn" type="button" class="btn lb-track-btn">↻ Fetch Tracks</button>
+                <button id="lbSwitchTrackSourceBtn" type="button" class="btn lb-track-btn">Try iTunes</button>
+                <button id="lbEditTracksBtn" type="button" class="btn lb-track-btn">Edit / Paste</button>
+                <button id="lbResetTracksBtn" type="button" class="btn lb-track-btn hidden">Reset Override</button>
+              </div>
+              <div id="lbTracksList" class="lb-tracks-list"></div>
+
+              <div id="lbTrackEditorDrawer" class="track-editor-drawer hidden">
+                <label for="lbTrackEditorInput" class="track-editor-help">
+                  Paste numbered, plain, or tab-separated tracks (optional headers like <code>Disc 2 (BD)</code> and trailing <code>(4:12)</code>):
+                </label>
+                <textarea id="lbTrackEditorInput" class="track-editor-textarea" spellcheck="false" placeholder="01. Opening Theme (4:12)&#10;02. Coupling Track (3:58)"></textarea>
+                <div class="track-editor-footer">
+                  <span id="lbTrackEditorPreview" class="count-mono">0 tracks</span>
+                  <div class="badges-wrap">
+                    <button id="cancelManualTracksBtn" type="button" class="btn lb-track-btn">Cancel</button>
+                    <button id="saveManualTracksBtn" type="button" class="btn btn-primary lb-track-btn">Save Tracks</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -273,7 +309,9 @@
 
   <script src="./js/validate.js"></script>
   <script src="./js/storage.js"></script>
+  <script src="./js/db.js"></script>
   <script src="./js/cover-resolver.js"></script>
+  <script src="./js/track-resolver.js"></script>
   <script src="./js/config.js"></script>
   <script src="./js/sync.js"></script>
   <script src="./js/sheet-adapter.js"></script>

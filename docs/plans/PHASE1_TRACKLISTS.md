@@ -1,8 +1,8 @@
 # Phase 1 Design: Shared Track Lists & Release Metadata Foundation
 
 > [!IMPORTANT]
-> **Status: Planned Design Specification (Not Yet Implemented)**
-> Phase 1 establishes track-level metadata across Hunt catalogs first so both **Hunt** (Phase 1) and **Owned Collection** (Phase 2) share one data model, resolver pipeline, IndexedDB cache foundation, and variant-aware track comparison helper.
+> **Status: Completed (`Phase 1` Shipped)**
+> Implemented across `schemas/catalog.v1.schema.json`, `js/validate.js`, `js/db.js`, `js/track-resolver.js`, `index.html`, `css/styles.css`, and `js/app.js`. Its `tracks[]` schema, IndexedDB foundation, and `compareTrackLists` helper serve as the shared base for Phase 2.
 
 ---
 

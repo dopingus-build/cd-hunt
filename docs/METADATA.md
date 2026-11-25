@@ -146,6 +146,19 @@ Each entry in `items` represents one release card:
 | `priority` | `string` | Optional | 1-Col view, Crate Flip badge | Hunting urgency (`"High"`, `"Medium"`, `"Low"`). Rendered when non-empty. |
 | `recommendedShops` | `string` | Optional | 1-Col view, Crate Flip filing box | Recommended stores/chains for finding the release (`"Book Off, Suruga-ya, Disk Union"`). |
 | `accent` | `string` | Optional (`"#e11d48"`) | Offline SVG jewel-case obi & glow | Hex color for the generated placeholder cover art. |
+| `barcode` | `string` | Optional | Track lookup, release disambiguation | Physical retail JAN-13 / EAN barcode digits (8–14 digits after stripping hyphens/spaces). |
+| `mbid` | `string` | Optional | Direct MusicBrainz lookup | Exact MusicBrainz Release UUID. |
+| `trackSource` | `string` | Optional (`"catalog"`) | Track list provenance pill | Optional provenance tag: `'catalog' \| 'manual' \| 'musicbrainz' \| 'itunes'`. |
+| `tracks` | `Array<Object>` | Optional | Crate Flip tracklist, track-title search | Flat, ordered, multi-disc-aware track objects (`{ disc?, mediaType?, number, title, titleJa?, artist?, durationMs?, notes? }`). See Track List Rules below. |
+
+### Optional `tracks[]` Structure & Lazy Resolution
+- Each object inside `tracks[]` supports:
+  - `disc` (`integer >= 1`, optional, defaults to `1`)
+  - `mediaType` (`'CD' | 'BD' | 'DVD' | 'Digital'`, optional, defaults to `'CD'`)
+  - `number` (`integer >= 1`, **required**)
+  - `title` (`string`, **required** non-empty)
+  - `titleJa` (`string`, optional), `artist` (`string`, optional for OST/VA/character tracks), `durationMs` (`integer >= 0`, optional), `notes` (`string`, optional such as `"TV Size"`, `"Instrumental"`, `"Off Vocal"`).
+- Releases without embedded `tracks[]` (including standalone 9-column Google Sheets) resolve track lists lazily on demand inside Crate Flip using 3-layer precedence: **Manual Override (`IndexedDB manual_tracks`) > Catalog JSON (`item.tracks`) > Cached Auto-Fetch (`IndexedDB track_cache`: MusicBrainz `catno:`/`barcode:` primary, Apple iTunes `country=jp` fallback with a digital-edition disclaimer)**.
 
 ---
 
@@ -226,7 +239,13 @@ See [`sample-catalog.json`](./sample-catalog.json) for a ready-to-use JSON file,
       "price": "¥500–¥1,000",
       "itunesQuery": "Album Title Artist Name",
       "requiredGroups": [["album"], ["artist"]],
-      "accent": "#e11d48"
+      "barcode": "4540774241569",
+      "accent": "#e11d48",
+      "tracks": [
+        { "disc": 1, "mediaType": "CD", "number": 1, "title": "Album Title Track", "titleJa": "タイトル曲", "durationMs": 252000 },
+        { "disc": 1, "mediaType": "CD", "number": 2, "title": "Album Title Track (Instrumental)", "notes": "Instrumental", "durationMs": 252000 },
+        { "disc": 2, "mediaType": "BD", "number": 1, "title": "Music Video", "notes": "Bonus Blu-ray" }
+      ]
     },
     {
       "id": "dig-01",

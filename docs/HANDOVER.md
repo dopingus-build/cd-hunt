@@ -18,11 +18,13 @@ When continuing development on `disk-crate`, strictly maintain these architectur
 1. **Zero External Dependencies / Zero CDN Scripts:**
    - Do **not** add Tailwind CDN (`cdn.tailwindcss.com`) or external icon/font scripts. Sandboxed preview panes and offline mobile environments in shops will block or hang on external runtime scripts.
    - All styling uses embedded CSS custom properties (`:root`) in `css/styles.css` and responsive CSS Grid/Flexbox.
-2. **Sandbox-Safe Storage Layer (`safeGetItem` / `safeSetItem`):**
+2. **Sandbox-Safe Storage Layer (`js/storage.js` & `js/db.js`):**
    - `window.localStorage` calls are wrapped in `try/catch` with a fallback `memoryStore` object so sandboxed iframes never throw `SecurityError`.
+   - `js/db.js` wraps IndexedDB (`disk_crate_db_v1`: `track_cache` and `manual_tracks` stores keyed by `releaseKey`) with an automatic deep-cloned in-memory fallback when IndexedDB is unavailable or restricted.
 3. **Instant First Paint + Viewport Lazy Loading:**
    - All loaded catalog cards render immediately on load using offline data-URI Japanese Jewel Case + Obi Strip SVGs (`buildJewelCaseDataURI`).
    - Official album jackets load asynchronously via `IntersectionObserver` (`rootMargin: '250px 0px'`) and a 3-worker concurrency queue (`MAX_WORKERS = 3`).
+   - Multi-disc release track lists (`js/track-resolver.js`) resolve lazily on user request inside Crate Flip using strict 3-layer precedence (**Manual Override > Catalog JSON > Cached Auto-Fetch**: MusicBrainz `1 req/s` queue primary, Apple iTunes JP fallback with digital-edition disclaimer) without consuming cloud sync writes.
 4. **No Hotlinked Third-Party Image URLs:**
    - Do **not** hardcode URLs from VGMdb, Wikia/Fandom, or CDJapan—they aggressively block hotlinking or return wrong promo art (e.g., Steam game art instead of soundtrack CD jackets). Rely on the two-stage verified resolver or user-added custom variants.
 

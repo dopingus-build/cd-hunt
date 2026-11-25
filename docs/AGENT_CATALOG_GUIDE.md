@@ -144,6 +144,10 @@ Static catalogs in `cd-metadata` (and imported/cached JSON files) conform to [`s
 - **`priority`** (`string`): Hunting urgency (e.g., `"High"`, `"Medium"`, `"Low"`).
 - **`recommendedShops`** (`string`): Best shops to check for this release (e.g., `"Book Off, Suruga-ya, Lashinbang"`).
 - **`accent`** (`string`): Hex accent color for SVG obi fallback (`"#3b82f6"`).
+- **`barcode`** (`string`): Physical retail JAN-13 / EAN barcode digits (8–14 digits after stripping hyphens/spaces).
+- **`mbid`** (`string`): Exact MusicBrainz Release UUID (when known for physical edition disambiguation).
+- **`trackSource`** (`string`): Optional provenance marker (`"catalog"`, `"manual"`, `"musicbrainz"`, or `"itunes"`).
+- **`tracks`** (`Array<TrackObject>`): Optional multi-disc-aware array of `{ disc?, mediaType?: 'CD' | 'BD' | 'DVD' | 'Digital', number, title, titleJa?, artist?, durationMs?, notes? }` (keep `tracks[]` omitted for Google Sheets; the browser resolves/caches them lazily in IndexedDB on demand).
 
 ### Repository Index Format (`index.json`)
 Place catalogs flat at repository root (`dopingus-build/cd-metadata` or `<your-login>/cd-metadata`) and register presets in `index.json`:
@@ -270,6 +274,11 @@ node --test test/*.test.js
   ],
   "accent": "#3b82f6",
   "priority": "High",
-  "recommendedShops": "Book Off, Suruga-ya (Anime/J-Pop aisle), Lashinbang"
+  "recommendedShops": "Book Off, Suruga-ya (Anime/J-Pop aisle), Lashinbang",
+  "barcode": "4547366611397",
+  "tracks": [
+    { "disc": 1, "mediaType": "CD", "number": 1, "title": "slash", "durationMs": 221000 },
+    { "disc": 1, "mediaType": "CD", "number": 2, "title": "strokes", "durationMs": 198000 }
+  ]
 }
 ```

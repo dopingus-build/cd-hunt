@@ -101,7 +101,42 @@
           },
           "accent": { "type": "string" },
           "priority": { "type": "string" },
-          "recommendedShops": { "type": "string" }
+          "recommendedShops": { "type": "string" },
+          "barcode": {
+            "type": "string",
+            "description": "Optional retail JAN-13 / EAN barcode digits."
+          },
+          "mbid": {
+            "type": "string",
+            "description": "Optional MusicBrainz Release UUID."
+          },
+          "trackSource": {
+            "type": "string",
+            "enum": ["catalog", "manual", "musicbrainz", "itunes"],
+            "description": "Optional provenance source for embedded tracks."
+          },
+          "tracks": {
+            "type": "array",
+            "description": "Optional flat multi-disc-aware track listing.",
+            "items": {
+              "type": "object",
+              "required": ["number", "title"],
+              "additionalProperties": false,
+              "properties": {
+                "disc": { "type": "integer", "minimum": 1 },
+                "mediaType": {
+                  "type": "string",
+                  "enum": ["CD", "BD", "DVD", "Digital"]
+                },
+                "number": { "type": "integer", "minimum": 1 },
+                "title": { "type": "string", "minLength": 1 },
+                "titleJa": { "type": "string" },
+                "artist": { "type": "string" },
+                "durationMs": { "type": "integer", "minimum": 0 },
+                "notes": { "type": "string" }
+              }
+            }
+          }
         }
       }
     }

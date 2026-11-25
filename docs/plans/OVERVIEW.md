@@ -1,8 +1,8 @@
 # Disk Crate (`disk-crate`) — Architecture Overview & Phased Roadmap
 
 > [!IMPORTANT]
-> **Status: Phase 0 Completed (`cd-hunt` → Disk Crate); Phases 1–3 Planned Architecture (Not Yet Implemented)**
-> Phase 0 (Full Rename, branding, GitHub Pages URL migration, and backwards-compatible `window.DiskCrate` / `cd_hunt_*` persistence) is completed. Phases 1–3 below remain **planned design specifications** and do **not** reflect shipped features yet; live operational documentation updates for Phases 1–3 must happen only as each phase ships.
+> **Status: Phases 0–1 Completed; Phases 2–3 Planned Architecture (Not Yet Implemented)**
+> Phase 0 (Full Rename) and Phase 1 (Shared Track Lists, IndexedDB Track Cache, MusicBrainz/iTunes Track Resolution & Variant Matcher) are completed. Phases 2–3 below remain **planned design specifications** and do **not** reflect shipped features yet; live operational documentation updates for Phases 2–3 must happen only as each phase ships.
 
 ---
 
@@ -83,7 +83,7 @@ Every phase must uphold the core invariants established in [`AGENTS.md`](../../A
 | Phase | Scope | Primary Modules / Infra Touched | Design Doc |
 | --- | --- | --- | --- |
 | **Phase 0 *(Completed)*** | Full rename (`cd-hunt` → **Disk Crate** / `disk-crate`), UI rebrand, Pages URL migration, legacy storage compatibility | `index.html`, `js/*.js`, `worker/wrangler.toml`, `worker/index.js`, schemas/docs | Section 5 below |
-| **Phase 1** | Shared `tracks[]` / `barcode` schema extension, MusicBrainz + iTunes track resolver, `js/db.js` track cache, Crate Flip tracklist + manual paste override, track-title search, variant-aware matcher | `js/validate.js`, `schemas/catalog.v1.schema.json`, `js/db.js`, `js/track-resolver.js`, `js/app.js`, `css/styles.css` | [`PHASE1_TRACKLISTS.md`](./PHASE1_TRACKLISTS.md) |
+| **Phase 1 *(Completed)*** | Shared `tracks[]` / `barcode` schema extension, MusicBrainz + iTunes track resolver, `js/db.js` track cache, Crate Flip tracklist + manual paste override, track-title search, variant-aware matcher | `js/validate.js`, `schemas/catalog.v1.schema.json`, `js/db.js`, `js/track-resolver.js`, `js/app.js`, `css/styles.css` | [`PHASE1_TRACKLISTS.md`](./PHASE1_TRACKLISTS.md) |
 | **Phase 2** | Owned Collection DB (~1,000+ releases), `Hunt` \| `Collection` switcher, incremental D1 `sync_seq` sync, lossless JSON & Google Sheet backing, Hunt ↔ Owned overlap badges & graduation | `schemas/collection.v1.schema.json`, `js/db.js`, `js/collection.js`, `js/sync.js`, `js/sheet-adapter.js`, `worker/schema.sql`, `worker/index.js` | [`PHASE2_OWNED_COLLECTION.md`](./PHASE2_OWNED_COLLECTION.md) |
 | **Phase 3a** | Opt-in Scanner Manager (manifest + SHA-256 verification + Cache Storage/OPFS + 1-click Wipe), Web Worker lifecycle, live viewfinder, Actions Pages deploy from GitHub Releases | `.github/workflows/deploy-pages.yml`, `js/scanner-manager.js`, `js/scanner-ui.js`, `js/scanner-worker.js`, `scripts/fetch-scanner-assets.mjs` | [`PHASE3_CAMERA_SCANNER.md`](./PHASE3_CAMERA_SCANNER.md) |
 | **Phase 3b** | Continuous Tier 1 Barcode/JAN-13 (`BarcodeDetector` + `zxing-wasm`) + Tier 2 Catalog Number OCR (`A-Z0-9-~`) + rapid at-home batch queue | `js/scanner-worker.js`, `js/scanner-ui.js`, `js/collection.js` | [`PHASE3_CAMERA_SCANNER.md`](./PHASE3_CAMERA_SCANNER.md) |
