@@ -11,8 +11,9 @@ This is the **single self-contained reference file** for using any AI assistant 
 
 Because external AI assistants cannot sign in with your GitHub account, Disk Crate mints a **semi-private, read-only capability link** whenever you sign in:
 1. Click **Sign in** in Disk Crate's top bar, then click **Agent Link** to copy your personal read-only status URL (`https://cd-hunt-sync.tndo.workers.dev/api/share/<token>?format=markdown`, or omit `?format=markdown` for JSON).
-2. Paste that URL to your AI assistant alongside your Google Sheet or catalog URL so it can immediately inspect which CDs are already acquired (`Got it? = TRUE`) vs. still hunting.
-3. **What is exposed:** Only non-sensitive public CD catalog IDs, checklists, view mode, and your public GitHub username (`login`). Zero GitHub access tokens, emails, or private repo data ever touch D1 or `/api/share/<token>`.
+   - To include your **Owned Collection** alongside Hunt checklists (useful so an AI scout does not recommend CDs or tracks you already own), append `&include=collection` (or `?include=collection` on the JSON URL), or use **Copy Agent Link (with Collection)** inside **Collection → JSON / Sheet Backup**.
+2. Paste that URL to your AI assistant alongside your Google Sheet or catalog URL so it can immediately inspect which CDs are already acquired (`Got it? = TRUE`), which releases are already in your Owned Collection (`collection[]`), and which targets are still hunting.
+3. **What is exposed:** Only non-sensitive public CD catalog IDs, checklists, view mode, Owned Collection release metadata (`catNo`, `barcode`, `title`, `tracks[]`, purchase notes), and your public GitHub username (`login`). Custom cover URLs (`customCovers`, `selectedVariant`), GitHub access tokens, emails, and private repo data never touch `/api/share/<token>`.
 4. **Two-Way Google Sheet Sync (Service Account):** `GOOGLE_SERVICE_ACCOUNT_JSON` is live on the Worker (`cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com`, also surfaced inside **Catalog → Copy Bot Email** and at `https://cd-hunt-sync.tndo.workers.dev/api/status`). Share your Google Sheet with `cd-hunt-sync@cd-hunt-sheets-0a54ba.iam.gserviceaccount.com` as **Editor**, and toggling `Got it?` in Disk Crate will automatically write `TRUE`/`FALSE` back to Column A (including multi-tab sheets with `#gid=`).
 
 ---

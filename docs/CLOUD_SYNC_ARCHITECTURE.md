@@ -75,7 +75,10 @@ sequenceDiagram
 | `/auth/callback` | `GET` | `state` JWT | Verifies `state`, exchanges `code` with `GITHUB_CLIENT_ID` + `GITHUB_CLIENT_SECRET`, fetches `/user`, discards GitHub token, mints session JWT (`30d` TTL), and returns `302` to validated redirect URL `#auth_token=<jwt>`. `400` invalid params/state, `502` GitHub failure. |
 | `/api/state` | `GET` | Bearer JWT | Verifies origin (`403`), JWT (`401`), `PAUSE_SYNC` & daily request threshold (`503`), increments `req_count`, and returns `{ ok: true, paused: false, user, state, updatedAt, resetsAt, shareToken, shareUrl }`. |
 | `/api/state` | `PUT` | Bearer JWT | Verifies origin (`403`), JWT (`401`), `PAUSE_SYNC` & daily write threshold (`503`), payload size `<= MAX_PAYLOAD_BYTES` (`413`), schema validation (`400`), per-user hourly cap (`429` + `Retry-After`), strips transient `sheetSync`, increments counters, upserts `user_state`, optionally syncs Column A (`Got it?`) back to Google Sheets via `GOOGLE_SERVICE_ACCOUNT_JSON`, and returns `{ ok: true, paused: false, updatedAt, resetsAt, shareToken, shareUrl, sheetSync? }`. |
-| `/api/share/<token>` | `GET` | Capability JWT (`90d` TTL) | Public read-only endpoint (`Access-Control-Allow-Origin: *`, `Cache-Control: no-store`) for AI / LLM agents lacking GitHub credentials. Verifies `purpose === 'read_share'` (`401`), obeys daily read circuit breaker (`503`), strips custom covers/internal fields, and returns `{ ok, user: { login }, updatedAt, activeCatalogUrl, catalogs }` or Markdown via `?format=markdown`. Also accepts `/api/share?token=<token>`. |
+| `/api/collection` | `GET` | Session JWT | Incremental delta pull (`?since_seq=<n>&limit=<1..200>`). Returns `{ ok, seq, hasMore, nextSinceSeq, releases[] }` containing active Owned records and tombstones (`deletedAt`). |
+| `/api/collection/batch` | `POST` | Session JWT | Incremental upsert & tombstone sync (`upserts[]`, `deletes[]`). Atomically assigns `sync_seq`, applies LWW conflict resolution (`conflicts[]`), counts as **1 write** per batch against hourly (`user_sync_state`) and daily (`daily_usage`) limits, and guards payload/collection bounds (`413`, `429`, `503`). |
+| `/api/collection/sheet-sync` | `POST` | Session JWT + Service Account | Appends non-duplicate Owned releases into an 11-column Google Sheet tab (`#gid=` aware). |
+| `/api/share/<token>` | `GET` | Capability JWT (`90d` TTL) | Public read-only endpoint (`Access-Control-Allow-Origin: *`, `Cache-Control: no-store`) for AI / LLM agents lacking GitHub credentials. Verifies `purpose === 'read_share'` (`401`), obeys daily read circuit breaker (`503`), strips custom covers (`customCovers`, `selectedVariant`) / internal fields, and returns Hunt state (plus optional `collection[]` when `?include=collection` is passed) or Markdown via `?format=markdown`. Also accepts `/api/share?token=<token>`. |
 | `/api/status` | `GET` | Public | Verifies origin (`403`) and returns `{ ok: true, paused, reason, utcDate, resetsAt, usage: { reqCount, writeCount }, limits, sheetSync: { configured, serviceAccountEmail } }` without consuming write quota. |
 | `/*` | `OPTIONS` | Origin | CORS preflight (`204` if origin allowed, `403` otherwise). Unknown routes/methods return `404`/`405`. |
 
@@ -100,6 +103,29 @@ CREATE TABLE IF NOT EXISTS daily_usage (
   req_count   INTEGER NOT NULL DEFAULT 0,
   write_count INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS user_sync_state (
+  github_id   TEXT PRIMARY KEY,
+  next_seq    INTEGER NOT NULL DEFAULT 0,
+  hour_window INTEGER NOT NULL DEFAULT 0,
+  hour_writes INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS owned_releases (
+  github_id         TEXT NOT NULL,
+  release_id        TEXT NOT NULL,
+  data_json         TEXT NOT NULL,
+  client_updated_at INTEGER NOT NULL,
+  deleted_at        INTEGER,
+  sync_seq          INTEGER NOT NULL,
+  PRIMARY KEY (github_id, release_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_owned_releases_sync
+  ON owned_releases (github_id, sync_seq);
+```
+
+- **CORS & Incremental Collection Rules:** `OPTIONS` preflight allows `GET, PUT, POST, OPTIONS`. `POST /api/collection/batch` assigns atomic monotonic `sync_seq` values per user, resolves stale writes with Last-Write-Wins (`clientUpdatedAt` comparison returning `conflicts[]`), persists soft deletes via `deletedAt` tombstones, and bills **1 write per batch** against both `user_sync_state` hourly limits and `daily_usage` caps. Automated verification lives in `test/collection.test.js`, `test/worker-integration.test.js`, `test/catalog-integration.test.js`, `test/cloud-sync-system.test.js`, `scripts/e2e-browser.mjs`, and `scripts/smoke-live.mjs`.
 ```
 
 - **`hour_window` / `hour_writes`:** `Math.floor(Date.now() / 3600000)` resets `hour_writes` to `1` atomically on hour rollover via SQLite `ON CONFLICT ... DO UPDATE`.

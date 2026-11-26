@@ -52,6 +52,7 @@ const TRACK_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'track-resolver.js');
 const CONFIG_PATH = path.join(ROOT_DIR, 'js', 'config.js');
 const SYNC_PATH = path.join(ROOT_DIR, 'js', 'sync.js');
 const SHEET_ADAPTER_PATH = path.join(ROOT_DIR, 'js', 'sheet-adapter.js');
+const COLLECTION_PATH = path.join(ROOT_DIR, 'js', 'collection.js');
 const APP_PATH = path.join(ROOT_DIR, 'js', 'app.js');
 
 const { deriveStoragePrefix } = require('../js/storage.js');
@@ -208,6 +209,7 @@ async function bootApp({
   const configSource = fs.readFileSync(CONFIG_PATH, 'utf8');
   const syncSource = fs.readFileSync(SYNC_PATH, 'utf8');
   const sheetAdapterSource = fs.readFileSync(SHEET_ADAPTER_PATH, 'utf8');
+  const collectionSource = fs.readFileSync(COLLECTION_PATH, 'utf8');
   const appScript = fs.readFileSync(APP_PATH, 'utf8');
 
   const fallbackImgsById = new Map();
@@ -442,6 +444,7 @@ async function bootApp({
   (context.DiskCrate || context.CDHunt).config.mbTrackMinIntervalMs = mbTrackMinIntervalMs;
   vm.runInContext(syncSource, context, { filename: SYNC_PATH });
   vm.runInContext(sheetAdapterSource, context, { filename: SHEET_ADAPTER_PATH });
+  vm.runInContext(collectionSource, context, { filename: COLLECTION_PATH });
   vm.runInContext(appScript, context, { filename: APP_PATH });
 
   async function flush() {
@@ -477,6 +480,18 @@ async function bootApp({
       const el = elements.get(id);
       assert.ok(el, `Element #${id} must exist`);
       el.dispatchEvent({ type: 'keydown', key, preventDefault() {} });
+      await flush();
+    },
+    async clickLookupCandidate(idx) {
+      const resBox = elements.get('releaseLookupResults');
+      assert.ok(resBox, 'Element #releaseLookupResults must exist');
+      const candStub = { getAttribute: (name) => (name === 'data-lookup-idx' ? String(idx) : null) };
+      resBox.dispatchEvent({
+        type: 'click',
+        target: { closest: (sel) => (sel === '[data-lookup-idx]' ? candStub : null) },
+        preventDefault() {},
+        stopPropagation() {}
+      });
       await flush();
     },
     async selectLocalFile(name, jsonContent, { useFileReader = false, failRead = false } = {}) {
@@ -617,6 +632,7 @@ describe('HTML entrypoint generalization & script wiring', () => {
       '<script src="./js/config.js"></script>',
       '<script src="./js/sync.js"></script>',
       '<script src="./js/sheet-adapter.js"></script>',
+      '<script src="./js/collection.js"></script>',
       '<script src="./js/app.js"></script>'
     ];
 
@@ -3166,5 +3182,349 @@ describe('Phase 1 Track Lists UI, lazy MusicBrainz/iTunes resolution, IndexedDB 
     await appReload.flush();
     assert.equal(appReload.elements.get('lbTrackSourceBadge').textContent, 'iTunes · Digital');
     assert.equal(appReload.elements.get('lbResetTracksBtn').classList.contains('hidden'), true);
+  });
+});
+
+describe('Phase 2 Owned Collection, Cross-Referencing, Graduation & Shared releaseKey Integration', () => {
+  function makeMockIDBFactoryLocal(backing) {
+    const state = backing || { stores: new Map() };
+    function makeReq(executor) {
+      const req = { result: undefined, error: null, onsuccess: null, onerror: null };
+      queueMicrotask(() => {
+        try { executor(req); } catch (err) { req.error = err; if (req.onerror) req.onerror({ target: req }); }
+      });
+      return req;
+    }
+    return {
+      open() {
+        const req = { result: null, error: null, onsuccess: null, onerror: null, onupgradeneeded: null };
+        queueMicrotask(() => {
+          const dbObj = {
+            objectStoreNames: { contains: (s) => state.stores.has(s) },
+            createObjectStore: (s, opts) => {
+              if (!state.stores.has(s)) state.stores.set(s, { keyPath: opts.keyPath, rows: new Map() });
+              return { indexNames: { contains: () => true }, createIndex: () => {} };
+            },
+            transaction: (storeName) => {
+              const storeMeta = state.stores.get(storeName);
+              const tx = { error: null, oncomplete: null, onerror: null, onabort: null };
+              const storeApi = {
+                get: (k) => makeReq((r) => { r.result = storeMeta.rows.has(k) ? JSON.parse(JSON.stringify(storeMeta.rows.get(k))) : undefined; if (r.onsuccess) r.onsuccess({ target: r }); }),
+                put: (v) => makeReq((r) => { storeMeta.rows.set(v[storeMeta.keyPath], JSON.parse(JSON.stringify(v))); r.result = v[storeMeta.keyPath]; if (r.onsuccess) r.onsuccess({ target: r }); }),
+                delete: (k) => makeReq((r) => { storeMeta.rows.delete(k); if (r.onsuccess) r.onsuccess({ target: r }); }),
+                getAll: () => makeReq((r) => { r.result = Array.from(storeMeta.rows.values()).map((v) => JSON.parse(JSON.stringify(v))); if (r.onsuccess) r.onsuccess({ target: r }); }),
+                clear: () => makeReq((r) => { storeMeta.rows.clear(); if (r.onsuccess) r.onsuccess({ target: r }); })
+              };
+              tx.objectStore = () => storeApi;
+              setTimeout(() => { if (tx.oncomplete) tx.oncomplete({ target: tx }); }, 0);
+              return tx;
+            }
+          };
+          req.result = dbObj;
+          req.transaction = { objectStore: () => ({ indexNames: { contains: () => true }, createIndex: () => {} }) };
+          if (req.onupgradeneeded) req.onupgradeneeded({ target: { result: dbObj } });
+          if (req.onsuccess) req.onsuccess({ target: req });
+        });
+        return req;
+      }
+    };
+  }
+
+  it('reuses shared releaseKey IndexedDB tracks across different Hunt catalogs and Collection without refetching, and enriches Sheet+JSON hybrid overlays', async () => {
+    const sharedBacking = { stores: new Map() };
+    const catJsonUrl = 'https://cdn.example/hybrid-tracks.json';
+    const sheetCsvUrl = 'https://docs.google.com/spreadsheets/d/hybridTrackSheet/export?format=csv&gid=12';
+
+    const hybridBaseCatalog = {
+      schemaVersion: 1,
+      meta: {
+        title: 'Hybrid Overlay Catalog',
+        googleSheetUrl: 'https://docs.google.com/spreadsheets/d/hybridTrackSheet/edit#gid=12'
+      },
+      items: [
+        {
+          id: 'hyb-lacm-24156',
+          category: 'Anime',
+          artist: 'ChouCho',
+          title: 'Moonlight',
+          regCatNo: 'LACM-24156',
+          catalog: 'LACM-24156 (通常盤)',
+          barcode: '4540774241569',
+          mbid: '11111111-1111-4111-8111-111111111111',
+          trackSource: 'catalog',
+          tracks: [
+            { disc: 1, mediaType: 'CD', number: 1, title: 'Hybrid Overlay Opening', durationMs: 240000 }
+          ],
+          kana: 'チ',
+          filing: 'Shelf A',
+          price: '¥1,320'
+        },
+        {
+          id: 'hyb-lazy',
+          category: 'Anime',
+          artist: 'yama',
+          title: 'slash',
+          regCatNo: 'SRCL-12539',
+          catalog: 'SRCL-12539 (通常盤)',
+          kana: 'ヤ',
+          filing: 'Shelf B',
+          price: '¥1,200'
+        }
+      ]
+    };
+
+    const sheetCsv = [
+      'Got it?,Aisle / Category,Artist / Franchise,Title,Catalog Number,Where to Find,Price,Priority,Recommended Shops',
+      'FALSE,Anime,ChouCho,Moonlight,LACM-24156,Shelf A,¥1320,High,Tower Records',
+      'TRUE,Game,Capcom,Battle OST,CPCA-9001,Shelf C,¥2000,Med,Book Off'
+    ].join('\n');
+
+    let trackFetchCalls = 0;
+    const appA = await bootApp({
+      savedCatalogUrl: catJsonUrl,
+      indexedDBImpl: makeMockIDBFactoryLocal(sharedBacking),
+      fetchImpl: async (url) => {
+        const u = String(url);
+        if (u === catJsonUrl) return { ok: true, status: 200, async json() { return hybridBaseCatalog; } };
+        if (u === sheetCsvUrl) return { ok: true, status: 200, async text() { return sheetCsv; } };
+        if (u.startsWith('https://musicbrainz.org/ws/2/release/?query=catno%3ASRCL-12539')) {
+          trackFetchCalls++;
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { releases: [{ id: '99999999-9999-4999-8999-999999999999', title: 'slash', status: 'Official', 'label-info': [{ 'catalog-number': 'SRCL-12539' }] }] };
+            }
+          };
+        }
+        if (u.startsWith('https://musicbrainz.org/ws/2/release/99999999-9999-4999-8999-999999999999')) {
+          trackFetchCalls++;
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                id: '99999999-9999-4999-8999-999999999999',
+                title: 'slash',
+                'label-info': [{ 'catalog-number': 'SRCL-12539' }],
+                media: [{ position: 1, format: 'CD', tracks: [{ position: 1, title: 'Shared Cached slash Track', length: 215000 }] }]
+              };
+            }
+          };
+        }
+        return { ok: true, status: 200, async json() { return { releases: [], results: [] }; } };
+      }
+    });
+
+    // Hybrid overlay kept JSON tracks/barcode/mbid while merging Sheet's priority & extra CPCA-9001 row
+    await appA.clickElement('openCrateFlipBtn');
+    assert.equal(appA.elements.get('lbTrackSourceBadge').textContent, 'Catalog · LACM-24156');
+    assert.ok(appA.elements.get('lbTracksList').innerHTML.includes('Hybrid Overlay Opening'));
+    assert.equal(appA.elements.get('lbPriorityBadge').textContent, 'Priority: High');
+
+    // Step to SRCL-12539, lazily fetch its tracks into shared IndexedDB track_cache
+    await appA.clickElement('lbNextBtn');
+    await appA.clickElement('lbTracksToggleBtn');
+    await appA.flush();
+    assert.ok(appA.elements.get('lbTracksList').innerHTML.includes('Shared Cached slash Track'));
+    assert.ok(trackFetchCalls >= 1);
+
+    // Boot completely different Catalog B (different ID 'alt-srcl') referencing the same SRCL-12539 offline
+    const altCatalog = {
+      schemaVersion: 1,
+      meta: { title: 'Catalog B' },
+      items: [
+        {
+          id: 'alt-srcl-different-id',
+          category: 'Rock',
+          artist: 'yama',
+          title: 'slash (Re-Listed)',
+          regCatNo: 'SRCL-12539',
+          catalog: 'SRCL-12539',
+          kana: 'ヤ',
+          filing: 'Row 2',
+          price: '¥1,100'
+        }
+      ]
+    };
+
+    const appB = await bootApp({
+      catalogObject: altCatalog,
+      indexedDBImpl: makeMockIDBFactoryLocal(sharedBacking),
+      fetchImpl: async (url) => {
+        throw new Error('Catalog B & Collection must reuse shared releaseKey without fetching: ' + url);
+      }
+    });
+
+    // Hunt Catalog B immediately renders SRCL-12539 tracks from shared IndexedDB cache
+    await appB.clickElement('openCrateFlipBtn');
+    assert.ok(appB.elements.get('lbTracksList').innerHTML.includes('Shared Cached slash Track'));
+
+    // Switch to Collection mode and add SRCL-12539 with empty track editor -> shares releaseKey cache immediately
+    await appB.clickElement('modeCollectionBtn');
+    await appB.clickElement('addReleaseBtn');
+    await appB.inputText('rfArtist', 'yama');
+    await appB.inputText('rfTitle', 'slash');
+    await appB.inputText('rfCatNo', 'SRCL-12539');
+    await appB.clickElement('saveReleaseFormBtn');
+    await appB.clickElement('openCrateFlipBtn');
+    assert.ok(appB.elements.get('lbTracksList').innerHTML.includes('Shared Cached slash Track'));
+  });
+
+  it('supports Hunt <-> Collection mode switching, MB lookup, CRUD, graduation, Owned & Track Overlap badges, JSON Merge/Replace, and Sheet sync', async () => {
+    const sharedBacking = { stores: new Map() };
+    const huntCatalog = {
+      schemaVersion: 1,
+      meta: { title: 'Cross-Ref Hunt List' },
+      items: [
+        {
+          id: 'hunt-01',
+          category: 'Anime',
+          artist: 'yama',
+          title: 'slash',
+          regCatNo: 'SRCL-12539',
+          catalog: 'SRCL-12539 (通常盤)',
+          kana: 'ヤ',
+          filing: 'Shelf 1',
+          price: '¥1,200',
+          tracks: [{ disc: 1, mediaType: 'CD', number: 1, title: 'slash', durationMs: 210000 }]
+        },
+        {
+          id: 'hunt-02',
+          category: 'Anime',
+          artist: 'yama',
+          title: 'the meaning of life',
+          regCatNo: 'SRCL-99999',
+          catalog: 'SRCL-99999 (Limited)',
+          kana: 'ヤ',
+          filing: 'Shelf 2',
+          price: '¥4,000',
+          tracks: [
+            { disc: 1, mediaType: 'CD', number: 1, title: 'slash', durationMs: 210000 },
+            { disc: 1, mediaType: 'CD', number: 2, title: 'Bonus Live Track', durationMs: 240000 }
+          ]
+        }
+      ]
+    };
+
+    const ownedSheetCsv = [
+      'Catalog Number,Edition,Category,Artist,Title,Barcode,Purchase Price,Purchase Shop,Purchase Date,Track Count,Notes',
+      'SRCL-12539,通常盤 Regular,Anime,yama,slash,4547366000001,¥850,Book Off,2026-11-24,1,Updated shop note',
+      'KICM-7777,初回盤,Game,Square,Imported Sheet Release,4988003000099,¥1900,Surugaya,2026-11-25,0,Mint'
+    ].join('\n');
+
+    const app = await bootApp({
+      catalogObject: huntCatalog,
+      indexedDBImpl: makeMockIDBFactoryLocal(sharedBacking),
+      fetchImpl: async (url) => {
+        const u = String(url);
+        if (u.startsWith('https://musicbrainz.org/ws/2/release/?query=barcode%3A4547366000001')) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { releases: [{ id: '44444444-4444-4444-8444-444444444444', title: 'slash', barcode: '4547366000001' }] };
+            }
+          };
+        }
+        if (u.startsWith('https://musicbrainz.org/ws/2/release/44444444-4444-4444-8444-444444444444')) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                id: '44444444-4444-4444-8444-444444444444',
+                title: 'slash',
+                barcode: '4547366000001',
+                'artist-credit': [{ name: 'yama' }],
+                'label-info': [{ 'catalog-number': 'SRCL-12539' }],
+                media: [{ position: 1, format: 'CD', tracks: [{ position: 1, title: 'slash', length: 210000 }] }]
+              };
+            }
+          };
+        }
+        if (u === 'https://docs.google.com/spreadsheets/d/myOwnedSheet1/export?format=csv') {
+          return { ok: true, status: 200, async text() { return ownedSheetCsv; } };
+        }
+        return { ok: true, status: 200, async json() { return { releases: [], results: [] }; } };
+      }
+    });
+
+    // Switch to Collection -> Add release via Barcode Lookup
+    await app.clickElement('modeCollectionBtn');
+    assert.equal(app.elements.get('addReleaseBtn').classList.contains('hidden'), false);
+    assert.equal(app.elements.get('progressBadge').textContent, '0 releases · 0 tracks');
+
+    await app.clickElement('addReleaseBtn');
+    await app.inputText('releaseLookupInput', '4547366000001');
+    await app.clickElement('releaseLookupBtn');
+    await app.clickLookupCandidate(0);
+    assert.equal(app.elements.get('rfCatNo').value, 'SRCL-12539');
+    assert.equal(app.elements.get('rfArtist').value, 'yama');
+    await app.inputText('rfNotes', 'Original local note');
+    await app.clickElement('saveReleaseFormBtn');
+
+    assert.equal(app.elements.get('progressBadge').textContent, '1 release · 1 track');
+
+    // Add second release without tracks manually -> test quick filters
+    await app.clickElement('addReleaseBtn');
+    await app.inputText('rfArtist', 'yama');
+    await app.inputText('rfTitle', 'the meaning of life');
+    await app.inputText('rfCatNo', 'SRCL-99900');
+    await app.inputText('rfCategory', 'Anime');
+    await app.clickElement('saveReleaseFormBtn');
+    assert.equal(app.elements.get('progressBadge').textContent, '2 releases · 1 track');
+
+    app.triggerDocumentClick('set-col-filter', { 'data-filter': 'missing-tracks' });
+    await app.flush();
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('SRCL-99900'));
+    assert.equal(app.elements.get('albumGrid').innerHTML.includes('SRCL-12539'), false);
+    app.triggerDocumentClick('set-col-filter', { 'data-filter': 'all' });
+    await app.flush();
+
+    // Switch back to Hunt -> Owned badge, Other Edition Owned badge, and Tracks Owned badge appear!
+    await app.clickElement('modeHuntBtn');
+    const huntHtml = app.elements.get('albumGrid').innerHTML;
+    assert.ok(huntHtml.includes('✓ Owned'));
+    assert.ok(huntHtml.includes('Other Ed. Owned (SRCL-99900)'));
+    assert.ok(huntHtml.includes('Tracks Owned: 1/2'));
+
+    // Open Crate Flip on hunt-02 -> verify #lbOwnedCrossRefBox & Graduate modal
+    app.triggerDocumentClick('open-lb', { 'data-lb-idx': '1' });
+    await app.flush();
+    assert.equal(app.elements.get('lbOwnedCrossRefBox').classList.contains('hidden'), false);
+    assert.ok(app.elements.get('lbOwnedCrossRefBox').innerHTML.includes('SRCL-99900'));
+    assert.ok(app.elements.get('lbOwnedCrossRefBox').innerHTML.includes('SRCL-12539 (slash)'));
+    await app.clickElement('lbGraduateBtn');
+    assert.equal(app.elements.get('rfCatNo').value, 'SRCL-99999');
+    await app.clickElement('saveReleaseFormBtn');
+    await app.clickElement('closeLightboxBtn');
+
+    // Check off both Hunt items, graduate physical via batch button (hunt-01 & hunt-02 already exact-owned -> batch button hidden cleanly)
+    assert.equal(app.elements.get('batchGraduateBtn').classList.contains('hidden'), true);
+
+    // Switch back to Collection -> Import Owned Google Sheet non-destructively (updates shop/notes while preserving slash tracks)
+    await app.clickElement('modeCollectionBtn');
+    await app.clickElement('collectionBackupBtn');
+    await app.inputText('ownedSheetUrlInput', 'https://docs.google.com/spreadsheets/d/myOwnedSheet1/edit');
+    await app.clickElement('importOwnedSheetBtn');
+    await app.flush();
+
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('KICM-7777'));
+    // Soft-delete first item via Crate Flip Delete button -> reload retains remaining items and omits soft-deleted item
+    await app.clickElement('openCrateFlipBtn');
+    await app.clickElement('lbDeleteReleaseBtn');
+    await app.clickElement('closeLightboxBtn');
+
+    // Test JSON Replace import
+    await app.clickElement('collectionBackupBtn');
+    const snapshotText = JSON.stringify({
+      schemaVersion: 1,
+      items: [{ id: 'own-replaced', artist: 'Replaced Artist', title: 'Replaced Title', category: 'Rock', catNo: 'REP-001' }]
+    });
+    await app.inputText('collectionBackupTextarea', snapshotText);
+    await app.clickElement('importCollectionReplaceBtn');
+    assert.equal(app.elements.get('progressBadge').textContent, '1 release · 0 tracks');
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('REP-001'));
   });
 });

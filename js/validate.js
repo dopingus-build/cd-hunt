@@ -310,6 +310,233 @@
     collectProhibitedDomainErrors(item, prefix, errors);
   }
 
+  const OWNED_REQUIRED_STRINGS = [
+    'id',
+    'artist',
+    'title',
+    'category',
+    'catNo'
+  ];
+
+  const OWNED_OPTIONAL_STRINGS = [
+    'artistJa',
+    'titleJa',
+    'editionLabel',
+    'accent',
+    'purchasePrice',
+    'purchaseShop',
+    'purchaseDate',
+    'notes'
+  ];
+
+  function normalizeCatNo(raw) {
+    return String(raw || '').trim().replace(/[～〜]/g, '~').toUpperCase();
+  }
+
+  function validateCustomCoversObject(customCovers, prefix, errors) {
+    if (customCovers === undefined || customCovers === null) return;
+    if (!isPlainObject(customCovers) || !Array.isArray(customCovers.variants)) {
+      errors.push(prefix + '.customCovers must be null or an object with a variants array');
+      return;
+    }
+    if (
+      customCovers.selectedIndex !== undefined &&
+      (!Number.isInteger(customCovers.selectedIndex) || customCovers.selectedIndex < 0)
+    ) {
+      errors.push(prefix + '.customCovers.selectedIndex must be a non-negative integer');
+    }
+    for (let i = 0; i < customCovers.variants.length; i++) {
+      const v = customCovers.variants[i];
+      const vPrefix = prefix + '.customCovers.variants[' + i + ']';
+      if (!isPlainObject(v) || !isNonEmptyString(v.url)) {
+        errors.push(vPrefix + '.url must be a non-empty string');
+        continue;
+      }
+      if (v.label !== undefined && typeof v.label !== 'string') {
+        errors.push(vPrefix + '.label must be a string');
+      }
+      if (v.catNo !== undefined && typeof v.catNo !== 'string') {
+        errors.push(vPrefix + '.catNo must be a string');
+      }
+      if (v.source !== undefined && typeof v.source !== 'string') {
+        errors.push(vPrefix + '.source must be a string');
+      }
+      if (v.isRegular !== undefined && typeof v.isRegular !== 'boolean') {
+        errors.push(vPrefix + '.isRegular must be a boolean');
+      }
+    }
+  }
+
+  function validateSelectedVariantObject(selectedVariant, prefix, errors) {
+    if (selectedVariant === undefined || selectedVariant === null) return;
+    if (!isPlainObject(selectedVariant) || !isNonEmptyString(selectedVariant.url)) {
+      errors.push(prefix + '.selectedVariant must be null or an object with a non-empty url');
+      return;
+    }
+    if (
+      selectedVariant.selectedIndex !== undefined &&
+      (!Number.isInteger(selectedVariant.selectedIndex) || selectedVariant.selectedIndex < 0)
+    ) {
+      errors.push(prefix + '.selectedVariant.selectedIndex must be a non-negative integer');
+    }
+    if (selectedVariant.label !== undefined && typeof selectedVariant.label !== 'string') {
+      errors.push(prefix + '.selectedVariant.label must be a string');
+    }
+  }
+
+  /**
+   * Validate a single Owned Release item.
+   * @param {unknown} item
+   * @param {number} index
+   * @param {Set<string>} seenIds
+   * @param {string[]} errors
+   */
+  function validateOwnedRelease(item, index, seenIds, errors) {
+    const prefix = 'items[' + index + ']';
+    if (!isPlainObject(item)) {
+      errors.push(prefix + ' must be an object');
+      return;
+    }
+
+    for (let i = 0; i < OWNED_REQUIRED_STRINGS.length; i++) {
+      const field = OWNED_REQUIRED_STRINGS[i];
+      if (!isNonEmptyString(item[field])) {
+        errors.push(prefix + '.' + field + ' must be a non-empty string');
+      }
+    }
+
+    if (isNonEmptyString(item.id)) {
+      if (!VALID_ID_REGEX.test(item.id)) {
+        errors.push(prefix + '.id ("' + item.id + '") must match /^[a-zA-Z0-9_-]+$/');
+      }
+      if (seenIds) {
+        if (seenIds.has(item.id)) {
+          errors.push('Duplicate item id "' + item.id + '" at ' + prefix);
+        } else {
+          seenIds.add(item.id);
+        }
+      }
+    }
+
+    for (let i = 0; i < OWNED_OPTIONAL_STRINGS.length; i++) {
+      const field = OWNED_OPTIONAL_STRINGS[i];
+      if (item[field] !== undefined && typeof item[field] !== 'string') {
+        errors.push(prefix + '.' + field + ' must be a string');
+      }
+    }
+
+    if (item.barcode !== undefined) {
+      if (typeof item.barcode !== 'string') {
+        errors.push(prefix + '.barcode must be a string');
+      } else {
+        const cleanBarcode = item.barcode.replace(/[\s-]+/g, '');
+        if (cleanBarcode.length > 0 && !VALID_BARCODE_REGEX.test(cleanBarcode)) {
+          errors.push(prefix + '.barcode ("' + item.barcode + '") must contain 8 to 14 digits');
+        }
+      }
+    }
+
+    if (item.mbid !== undefined) {
+      if (typeof item.mbid !== 'string') {
+        errors.push(prefix + '.mbid must be a string');
+      } else if (item.mbid.trim().length > 0 && !VALID_UUID_REGEX.test(item.mbid.trim())) {
+        errors.push(prefix + '.mbid ("' + item.mbid + '") must be a valid UUID');
+      }
+    }
+
+    if (item.trackSource !== undefined) {
+      if (typeof item.trackSource !== 'string' || !VALID_TRACK_SOURCES.has(item.trackSource)) {
+        errors.push(prefix + '.trackSource must be one of catalog, manual, musicbrainz, itunes');
+      }
+    }
+
+    validateTracks(item.tracks, prefix, errors);
+    validateCustomCoversObject(item.customCovers, prefix, errors);
+    validateSelectedVariantObject(item.selectedVariant, prefix, errors);
+
+    if (item.createdAt !== undefined && (!Number.isInteger(item.createdAt) || item.createdAt < 0)) {
+      errors.push(prefix + '.createdAt must be a non-negative integer');
+    }
+    if (item.clientUpdatedAt !== undefined && (!Number.isInteger(item.clientUpdatedAt) || item.clientUpdatedAt < 0)) {
+      errors.push(prefix + '.clientUpdatedAt must be a non-negative integer');
+    }
+    if (
+      item.syncSeq !== undefined &&
+      item.syncSeq !== null &&
+      (!Number.isInteger(item.syncSeq) || item.syncSeq < 0)
+    ) {
+      errors.push(prefix + '.syncSeq must be null or a non-negative integer');
+    }
+    if (
+      item.deletedAt !== undefined &&
+      item.deletedAt !== null &&
+      (!Number.isInteger(item.deletedAt) || item.deletedAt < 0)
+    ) {
+      errors.push(prefix + '.deletedAt must be null or a non-negative integer');
+    }
+
+    collectProhibitedDomainErrors(item, prefix, errors);
+  }
+
+  /**
+   * Validate an exported or imported Owned Collection snapshot against collection.v1.schema.json.
+   * @param {unknown} collection
+   * @returns {{ valid: boolean, errors: string[] }}
+   */
+  function validateCollection(collection) {
+    const errors = [];
+
+    if (!isPlainObject(collection)) {
+      return { valid: false, errors: ['Collection root must be a non-null plain object'] };
+    }
+
+    if (collection.$schema !== undefined && !isNonEmptyString(collection.$schema)) {
+      errors.push('$schema must be a non-empty string when provided');
+    }
+
+    if (collection.schemaVersion === undefined) {
+      errors.push('schemaVersion is required and must be integer ' + SUPPORTED_SCHEMA_VERSION);
+    } else if (!Number.isInteger(collection.schemaVersion)) {
+      errors.push('schemaVersion must be an integer');
+    } else if (collection.schemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+      errors.push('Unsupported schemaVersion ' + collection.schemaVersion + '; expected ' + SUPPORTED_SCHEMA_VERSION);
+    }
+
+    if (
+      collection.exportedAt !== undefined &&
+      typeof collection.exportedAt !== 'string' &&
+      (!Number.isInteger(collection.exportedAt) || collection.exportedAt < 0)
+    ) {
+      errors.push('exportedAt must be a string or non-negative integer');
+    }
+
+    if (collection.meta !== undefined) {
+      if (!isPlainObject(collection.meta)) {
+        errors.push('meta must be a plain object');
+      } else {
+        for (const mf of ['title', 'ownedSheetUrl', 'exportedBy']) {
+          if (collection.meta[mf] !== undefined && typeof collection.meta[mf] !== 'string') {
+            errors.push('meta.' + mf + ' must be a string');
+          }
+        }
+      }
+    }
+
+    if (!Array.isArray(collection.items)) {
+      errors.push('items must be an array');
+    } else {
+      const seenIds = new Set();
+      for (let i = 0; i < collection.items.length; i++) {
+        validateOwnedRelease(collection.items[i], i, seenIds, errors);
+      }
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors: errors
+    };
+  }
+
   /**
    * Validate a catalog object against the METADATA.md schema and rules.
    * @param {unknown} catalog
@@ -414,16 +641,29 @@
 
   if (root) {
     root.validateCatalog = validateCatalog;
+    root.validateCollection = validateCollection;
+    root.validateOwnedRelease = validateOwnedRelease;
+    root.normalizeCatNo = normalizeCatNo;
     root.normalizeCatalogUrl = normalizeCatalogUrl;
     root.extractGoogleSheetId = extractGoogleSheetId;
     root.DiskCrate = root.DiskCrate || root.CDHunt || {};
     root.DiskCrate.validateCatalog = validateCatalog;
+    root.DiskCrate.validateCollection = validateCollection;
+    root.DiskCrate.validateOwnedRelease = validateOwnedRelease;
+    root.DiskCrate.normalizeCatNo = normalizeCatNo;
     root.DiskCrate.normalizeCatalogUrl = normalizeCatalogUrl;
     root.DiskCrate.extractGoogleSheetId = extractGoogleSheetId;
     root.CDHunt = root.DiskCrate;
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { validateCatalog, normalizeCatalogUrl, extractGoogleSheetId };
+    module.exports = {
+      validateCatalog,
+      validateCollection,
+      validateOwnedRelease,
+      normalizeCatNo,
+      normalizeCatalogUrl,
+      extractGoogleSheetId
+    };
   }
 })(typeof window !== 'undefined' ? window : typeof globalThis !== 'undefined' ? globalThis : null);

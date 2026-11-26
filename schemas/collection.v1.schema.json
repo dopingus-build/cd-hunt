@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dopingus-build.github.io/disk-crate/schemas/collection.v1.schema.json",
+  "title": "Disk Crate Owned Collection Schema v1",
+  "description": "Schema for lossless owned-collection JSON snapshots exported and imported by Disk Crate.",
+  "type": "object",
+  "required": ["schemaVersion", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional URI pointing to the owned collection JSON Schema."
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Owned collection schema version marker. Must be 1."
+    },
+    "exportedAt": {
+      "type": ["integer", "string"],
+      "description": "Optional export timestamp (epoch ms or ISO-8601 string)."
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string" },
+        "ownedSheetUrl": { "type": "string" },
+        "exportedBy": { "type": "string" }
+      }
+    },
+    "items": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "#/$defs/OwnedRelease"
+      }
+    }
+  },
+  "$defs": {
+    "OwnedRelease": {
+      "type": "object",
+      "required": ["id", "artist", "title", "category", "catNo"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "artist": { "type": "string", "minLength": 1 },
+        "artistJa": { "type": "string" },
+        "title": { "type": "string", "minLength": 1 },
+        "titleJa": { "type": "string" },
+        "category": { "type": "string", "minLength": 1 },
+        "catNo": { "type": "string", "minLength": 1 },
+        "editionLabel": { "type": "string" },
+        "barcode": { "type": "string" },
+        "mbid": { "type": "string" },
+        "accent": { "type": "string" },
+        "trackSource": {
+          "type": "string",
+          "enum": ["catalog", "manual", "musicbrainz", "itunes"]
+        },
+        "tracks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["number", "title"],
+            "additionalProperties": false,
+            "properties": {
+              "disc": { "type": "integer", "minimum": 1 },
+              "mediaType": {
+                "type": "string",
+                "enum": ["CD", "BD", "DVD", "Digital"]
+              },
+              "number": { "type": "integer", "minimum": 1 },
+              "title": { "type": "string", "minLength": 1 },
+              "titleJa": { "type": "string" },
+              "artist": { "type": "string" },
+              "durationMs": { "type": "integer", "minimum": 0 },
+              "notes": { "type": "string" }
+            }
+          }
+        },
+        "customCovers": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["variants"],
+          "properties": {
+            "selectedIndex": { "type": "integer", "minimum": 0 },
+            "variants": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["url"],
+                "additionalProperties": false,
+                "properties": {
+                  "url": { "type": "string", "minLength": 1 },
+                  "label": { "type": "string" },
+                  "catNo": { "type": "string" },
+                  "source": { "type": "string" },
+                  "isRegular": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "selectedVariant": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["url"],
+          "properties": {
+            "url": { "type": "string", "minLength": 1 },
+            "selectedIndex": { "type": "integer", "minimum": 0 },
+            "label": { "type": "string" }
+          }
+        },
+        "purchasePrice": { "type": "string" },
+        "purchaseShop": { "type": "string" },
+        "purchaseDate": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "integer", "minimum": 0 },
+        "clientUpdatedAt": { "type": "integer", "minimum": 0 },
+        "syncSeq": { "type": ["integer", "null"], "minimum": 0 },
+        "deletedAt": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    }
+  }
+}

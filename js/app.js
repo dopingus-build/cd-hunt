@@ -12,6 +12,7 @@
   const trackResolver = DiskCrate.trackResolver || null;
   const sync = DiskCrate.sync || null;
   const sheetAdapter = DiskCrate.sheetAdapter || null;
+  const collectionMod = DiskCrate.collection || null;
   const validateCatalog = window.validateCatalog || DiskCrate.validateCatalog;
   const normalizeCatalogUrl = window.normalizeCatalogUrl || DiskCrate.normalizeCatalogUrl || function (u) {
     return String(u || '').trim();
@@ -68,10 +69,33 @@
   let trackEditorOpen = false;
   let trackMatchesByAlbumId = {};
 
+  let appMode = 'hunt';
+  let ownedReleases = [];
+  let ownedAllReleases = [];
+  let ownedDisplayItems = [];
+  let ownedIndex = collectionMod ? collectionMod.buildOwnedIndex([], trackResolver) : null;
+  let collectionCategory = 'All';
+  let collectionQuickFilter = 'all';
+  let collectionCoverCache = {};
+  let ownedSheetUrl = '';
+  let collectionSyncTimer = null;
+  let collectionSyncInFlight = false;
+  let collectionSyncPendingRerun = false;
+
+  function getCategoryColor(catKey, index) {
+    const palette = ['#f59e0b', '#f43f5e', '#10b981', '#38bdf8', '#a855f7', '#22d3ee'];
+    const s = String(catKey || '');
+    let hash = 0;
+    for (let i = 0; i < s.length; i++) {
+      hash = ((hash << 5) - hash) + s.charCodeAt(i);
+      hash |= 0;
+    }
+    return palette[Math.abs(hash + (index || 0)) % palette.length];
+  }
+
   function deriveCategories(items) {
     const cats = [{ key: 'All', label: 'All Releases', dot: '#a1a1aa' }];
     const seen = new Set(['All']);
-    const palette = ['#f59e0b', '#f43f5e', '#10b981', '#38bdf8', '#a855f7', '#22d3ee'];
     let idx = 0;
     items.forEach(function (item) {
       if (item && item.category && !seen.has(item.category)) {
@@ -79,12 +103,95 @@
         cats.push({
           key: item.category,
           label: item.category,
-          dot: item.accent || palette[idx % palette.length]
+          dot: item.accent || getCategoryColor(item.category, idx)
         });
         idx++;
       }
     });
     return cats;
+  }
+
+  function isCollectionMode() {
+    return appMode === 'collection';
+  }
+
+  function getActiveItems() {
+    return isCollectionMode() ? ownedDisplayItems : ALBUMS;
+  }
+
+  function getActiveCoverCache() {
+    return isCollectionMode() ? collectionCoverCache : state.coverCache;
+  }
+
+  function findActiveItemById(id) {
+    return getActiveItems().find(function (a) { return a && a.id === id; }) || null;
+  }
+
+  function findOwnedById(id) {
+    return ownedReleases.find(function (r) { return r && r.id === id; }) || null;
+  }
+
+  function syncModeQueryParam(mode) {
+    try {
+      if (window.history && typeof window.history.replaceState === 'function' && window.location) {
+        const params = new URLSearchParams(window.location.search || '');
+        if (mode === 'collection') {
+          params.set('mode', 'collection');
+        } else {
+          params.delete('mode');
+        }
+        const basePath = window.location.pathname || '';
+        const queryStr = params.toString();
+        window.history.replaceState(null, '', queryStr ? basePath + '?' + queryStr : basePath);
+      }
+    } catch (e) {}
+  }
+
+  function rebuildOwnedStateAndCovers() {
+    ownedDisplayItems = collectionMod
+      ? ownedReleases.map(function (r) { return collectionMod.ownedToDisplayItem(r); }).filter(Boolean)
+      : [];
+    const indexInput = ownedReleases.map(function (r) {
+      if (!r || !collectionMod) return r;
+      const disp = collectionMod.ownedToDisplayItem(r);
+      const eff = disp ? getEffectiveTracksInfo(disp) : null;
+      if (eff && Array.isArray(eff.tracks) && eff.tracks.length > 0 && (eff.isOverride || !Array.isArray(r.tracks) || r.tracks.length === 0)) {
+        return Object.assign({}, r, { tracks: eff.tracks, trackSource: eff.trackSource || r.trackSource });
+      }
+      return r;
+    });
+    ownedIndex = collectionMod ? collectionMod.buildOwnedIndex(indexInput, trackResolver) : null;
+
+    const nextCovers = {};
+    ownedReleases.forEach(function (owned) {
+      const existingMem = collectionCoverCache[owned.id];
+      const existingAuto = existingMem && Array.isArray(existingMem.variants)
+        ? existingMem.variants.filter(function (v) { return v && v.source !== 'custom'; })
+        : [];
+      const customVars = owned.customCovers && Array.isArray(owned.customCovers.variants)
+        ? owned.customCovers.variants.map(function (v) {
+            return {
+              url: v.url,
+              label: v.label || 'Custom Jacket',
+              catNo: v.catNo || '',
+              source: 'custom',
+              isRegular: !!v.isRegular
+            };
+          })
+        : [];
+      const combined = customVars.concat(existingAuto);
+      if (combined.length > 0) {
+        let selIdx = 0;
+        if (owned.selectedVariant && owned.selectedVariant.url) {
+          const hit = combined.findIndex(function (v) { return v.url === owned.selectedVariant.url; });
+          if (hit !== -1) selIdx = hit;
+        } else if (owned.customCovers && typeof owned.customCovers.selectedIndex === 'number') {
+          selIdx = Math.max(0, Math.min(owned.customCovers.selectedIndex, combined.length - 1));
+        }
+        nextCovers[owned.id] = { variants: combined, selectedIndex: selIdx };
+      }
+    });
+    collectionCoverCache = nextCovers;
   }
 
   function applyCatalogData(catalog, sourceContext) {
@@ -252,7 +359,7 @@
     const urlInput = document.getElementById('catalogUrlInput');
     const infoEl = document.getElementById('activeCatalogInfo');
 
-    if (visible) {
+    if (visible && !isCollectionMode()) {
       loader.classList.remove('hidden');
       if (noteBanner) noteBanner.classList.add('hidden');
       if (compactBar) compactBar.classList.add('hidden');
@@ -278,6 +385,12 @@
       loadCatalogPresets();
     } else {
       loader.classList.add('hidden');
+      if (isCollectionMode()) {
+        if (noteBanner) noteBanner.classList.add('hidden');
+        if (compactBar) compactBar.classList.add('hidden');
+        if (digSection) digSection.classList.add('hidden');
+        return;
+      }
       const hasDigital = ALBUMS.some(function (a) { return !!a.digitalOnly; });
       if (!hasDigital) {
         if (noteBanner) noteBanner.classList.add('hidden');
@@ -289,6 +402,114 @@
         if (noteBanner) noteBanner.classList.remove('hidden');
         if (compactBar) compactBar.classList.add('hidden');
       }
+    }
+  }
+
+  function applyHeaderTextForMode() {
+    const brandTitleEl = document.getElementById('brandTitle');
+    const brandSubEl = document.getElementById('brandSub');
+    const searchEl = document.getElementById('searchInput');
+    if (isCollectionMode()) {
+      document.title = 'Disk Crate — Owned Collection';
+      if (brandTitleEl) brandTitleEl.textContent = 'Disk Crate · Collection';
+      if (brandSubEl) brandSubEl.textContent = 'Owned Releases Database (IndexedDB + Incremental Sync)';
+      if (searchEl) searchEl.setAttribute('placeholder', 'Search owned releases, track titles, cat #, barcode, or notes...');
+    } else {
+      document.title = CATALOG_META.documentTitle || 'Disk Crate — Cover Album & Checklist';
+      if (brandTitleEl) brandTitleEl.textContent = CATALOG_META.title || 'Disk Crate';
+      if (brandSubEl) brandSubEl.textContent = CATALOG_META.subtitle || 'Cover Album & Crate Checklist (通常盤 Priority)';
+      if (searchEl) {
+        searchEl.setAttribute(
+          'placeholder',
+          CATALOG_META.searchPlaceholder || 'Search English, Romaji, 日本語, track title, anime/game, or catalog #...'
+        );
+      }
+    }
+  }
+
+  function countGraduatableHuntItems() {
+    if (!collectionMod || !hasLoadedCatalog) return 0;
+    let count = 0;
+    ALBUMS.forEach(function (item) {
+      if (!item || item.digitalOnly || !state.acquiredMap[item.id]) return;
+      const xref = ownedIndex
+        ? collectionMod.crossReferenceHuntItem(item, ownedIndex, null, trackResolver)
+        : { status: 'none' };
+      if (xref.status !== 'exact') count++;
+    });
+    return count;
+  }
+
+  function updateBatchGraduateButton() {
+    const btn = document.getElementById('batchGraduateBtn');
+    if (!btn) return;
+    const count = isCollectionMode() ? 0 : countGraduatableHuntItems();
+    btn.classList.toggle('hidden', count === 0);
+    if (count > 0) {
+      btn.textContent = 'Move Found to Collection (' + count + ')';
+    }
+  }
+
+  function updateModeUI() {
+    const col = isCollectionMode();
+    const huntTab = document.getElementById('modeHuntBtn');
+    const colTab = document.getElementById('modeCollectionBtn');
+    if (huntTab) {
+      huntTab.classList.toggle('active', !col);
+      huntTab.setAttribute('aria-selected', !col ? 'true' : 'false');
+    }
+    if (colTab) {
+      colTab.classList.toggle('active', col);
+      colTab.setAttribute('aria-selected', col ? 'true' : 'false');
+    }
+
+    ['huntingOnlyBtn', 'refreshAllBtn', 'backupBtn', 'openCatalogLoaderBtn'].forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle('hidden', col);
+    });
+    ['addReleaseBtn', 'collectionBackupBtn', 'collectionQuickFilters'].forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle('hidden', !col);
+    });
+
+    const viewLabel = document.getElementById('viewModeLabel');
+    if (viewLabel) {
+      viewLabel.textContent = state.viewMode === 'single' ? 'Grid View' : '1-Col View';
+    }
+
+    updateBatchGraduateButton();
+    applyHeaderTextForMode();
+  }
+
+  function setAppMode(nextMode, opts) {
+    const normalized = nextMode === 'collection' ? 'collection' : 'hunt';
+    const options = opts || {};
+    appMode = normalized;
+    pendingQueue.length = 0;
+    queuedIds.clear();
+    activeTrackItemId = null;
+    tracksExpanded = false;
+    trackEditorOpen = false;
+    state.lightboxIndex = 0;
+
+    const modal = document.getElementById('lightboxModal');
+    if (modal) modal.classList.remove('open');
+
+    if (!options.skipQuerySync) {
+      syncModeQueryParam(appMode);
+    }
+
+    updateModeUI();
+    if (isCollectionMode()) {
+      showCatalogLoader(false);
+      renderCategoryPills();
+      renderAll();
+    } else if (!hasLoadedCatalog) {
+      showCatalogLoader(true);
+    } else {
+      showCatalogLoader(false);
+      renderCategoryPills();
+      renderAll();
     }
   }
 
@@ -394,6 +615,11 @@
 
     document.getElementById('viewModeLabel').textContent = state.viewMode === 'single' ? 'Grid View' : '1-Col View';
     hasLoadedCatalog = true;
+    if (isCollectionMode()) {
+      appMode = 'hunt';
+      syncModeQueryParam('hunt');
+    }
+    updateModeUI();
     showCatalogLoader(false);
     renderCategoryPills();
     renderAll();
@@ -676,6 +902,115 @@
     flushCloudPush(options);
   }
 
+  async function hydrateOwnedFromDb() {
+    if (!db || typeof db.getAllOwnedReleases !== 'function') return;
+    try {
+      const [allRows, meta] = await Promise.all([
+        db.getAllOwnedReleases({ includeDeleted: true }),
+        typeof db.getSyncMeta === 'function' ? db.getSyncMeta('collectionSync') : null
+      ]);
+      ownedAllReleases = Array.isArray(allRows) ? allRows : [];
+      ownedReleases = ownedAllReleases.filter(function (r) {
+        return r && (r.deletedAt === null || r.deletedAt === undefined);
+      });
+      if (meta && meta.lastOwnedSheetUrl) {
+        ownedSheetUrl = String(meta.lastOwnedSheetUrl);
+      }
+      rebuildOwnedStateAndCovers();
+      updateBatchGraduateButton();
+      if (hasLoadedCatalog || isCollectionMode()) {
+        renderCategoryPills();
+        renderAll();
+        const modal = document.getElementById('lightboxModal');
+        if (modal && modal.classList.contains('open')) {
+          renderLightbox();
+        }
+      }
+    } catch (err) {
+      // Ignore IndexedDB hydration errors cleanly
+    }
+  }
+
+  async function syncCollectionNow(options) {
+    if (collectionSyncTimer !== null) {
+      clearTimeout(collectionSyncTimer);
+      collectionSyncTimer = null;
+    }
+    const opts = options || {};
+    if (!db || !sync || !syncApiUrl || !syncSession || typeof sync.syncOwnedCollection !== 'function') {
+      return { ok: false, offline: true };
+    }
+    if (syncPausedUntil) {
+      if (!opts.quietOnIdle || isCollectionMode()) updateSyncUI('Paused until 00:00 UTC', 'warn');
+      return { ok: false, paused: true };
+    }
+    if (collectionSyncInFlight) {
+      collectionSyncPendingRerun = true;
+      return { ok: false, pending: true };
+    }
+
+    collectionSyncInFlight = true;
+    if (!opts.quietOnIdle || isCollectionMode()) {
+      updateSyncUI('Syncing...', 'muted');
+    }
+
+    let res = { ok: false, offline: true };
+    try {
+      res = await sync.syncOwnedCollection(db, syncApiUrl, syncSession.token, undefined, opts.keepalive ? { keepalive: true } : undefined);
+      if (res.unauthorized) {
+        sync.clearAuthSession(storage);
+        syncSession = null;
+        syncShareUrl = null;
+        updateSyncUI('Session expired', 'warn');
+        showToast('GitHub sync session expired — please sign in again');
+        return res;
+      }
+      if (res.paused) {
+        syncPausedUntil = res.resetsAt || '00:00 UTC';
+        if (!opts.quietOnIdle || isCollectionMode()) updateSyncUI('Paused until 00:00 UTC', 'warn');
+        return res;
+      }
+      if (res.rateLimited) {
+        if (!opts.quietOnIdle || isCollectionMode()) updateSyncUI('Rate limited — saved locally', 'warn');
+        return res;
+      }
+      if (!res.ok) {
+        if (!opts.quietOnIdle || isCollectionMode()) updateSyncUI('Offline — saved locally', 'muted');
+        return res;
+      }
+
+      if (res.pulledCount > 0 || res.conflictCount > 0 || res.pushedCount > 0) {
+        await hydrateOwnedFromDb();
+      }
+      if (!opts.quietOnIdle || isCollectionMode() || res.pulledCount > 0 || res.pushedCount > 0) {
+        updateSyncUI('Synced', 'ok');
+      }
+      return res;
+    } finally {
+      collectionSyncInFlight = false;
+      if (collectionSyncPendingRerun) {
+        collectionSyncPendingRerun = false;
+        setTimeout(function () { syncCollectionNow({ quietOnIdle: true }); }, 0);
+      }
+    }
+  }
+
+  function scheduleCollectionSync() {
+    if (!sync || !syncApiUrl || !syncSession || suppressSyncPush) return;
+    if (syncPausedUntil) {
+      updateSyncUI('Paused until 00:00 UTC', 'warn');
+      return;
+    }
+    clearTimeout(collectionSyncTimer);
+    updateSyncUI('Pending...', 'muted');
+    collectionSyncTimer = setTimeout(function () { syncCollectionNow(); }, getSyncDebounceMs());
+  }
+
+  function flushPendingCollectionSync(options) {
+    if (collectionSyncTimer === null) return;
+    syncCollectionNow(options);
+  }
+
   async function tryLoadUserMetadataRepo(login) {
     if (!login) return false;
     const repoIndexUrl = 'https://raw.githubusercontent.com/' + encodeURIComponent(login) + '/cd-metadata/main/index.json';
@@ -778,7 +1113,114 @@
   }
 
   function saveCoverCache() {
+    if (isCollectionMode()) return;
     safeSetItem(COVER_CACHE_KEY, JSON.stringify(state.coverCache));
+  }
+
+  async function upsertLocalOwnedState(savedRecord) {
+    if (!savedRecord || !savedRecord.id) return;
+    const nextAll = ownedAllReleases.filter(function (r) { return r && r.id !== savedRecord.id; });
+    nextAll.push(savedRecord);
+    ownedAllReleases = nextAll;
+    ownedReleases = nextAll.filter(function (r) {
+      return r && (r.deletedAt === null || r.deletedAt === undefined);
+    });
+    rebuildOwnedStateAndCovers();
+    updateBatchGraduateButton();
+  }
+
+  async function persistOwnedCoverChange(releaseId) {
+    const owned = findOwnedById(releaseId);
+    if (!owned || !db || typeof db.putOwnedRelease !== 'function') return;
+    const cacheEntry = collectionCoverCache[releaseId];
+    let customCovers = null;
+    let selectedVariant = null;
+    if (cacheEntry && Array.isArray(cacheEntry.variants) && cacheEntry.variants.length > 0) {
+      const customVars = [];
+      let customSel = 0;
+      cacheEntry.variants.forEach(function (v, idx) {
+        if (v && v.source === 'custom' && v.url) {
+          if (idx === (cacheEntry.selectedIndex || 0)) customSel = customVars.length;
+          customVars.push({
+            url: v.url,
+            label: v.label || 'Custom Jacket',
+            catNo: v.catNo || '',
+            source: 'custom',
+            isRegular: !!v.isRegular
+          });
+        }
+      });
+      if (customVars.length > 0) {
+        customCovers = { variants: customVars, selectedIndex: customSel };
+      }
+      const selIdx = Math.max(0, Math.min(cacheEntry.selectedIndex || 0, cacheEntry.variants.length - 1));
+      const activeVar = cacheEntry.variants[selIdx];
+      if (activeVar && activeVar.url) {
+        selectedVariant = { url: activeVar.url, selectedIndex: selIdx, label: activeVar.label || '' };
+      }
+    }
+
+    const updated = Object.assign({}, owned, {
+      clientUpdatedAt: Date.now(),
+      dirty: 1
+    });
+    if (customCovers) updated.customCovers = customCovers;
+    else delete updated.customCovers;
+    if (selectedVariant) updated.selectedVariant = selectedVariant;
+    else delete updated.selectedVariant;
+
+    const stored = await db.putOwnedRelease(updated);
+    await upsertLocalOwnedState(stored || updated);
+    scheduleCollectionSync();
+  }
+
+  async function syncOwnedReleaseTracksChange(item, tracks, trackSource) {
+    if (!isCollectionMode() || !item || !db || typeof db.putOwnedRelease !== 'function') return;
+    const owned = findOwnedById(item.id);
+    if (!owned) return;
+    const updated = Object.assign({}, owned, {
+      clientUpdatedAt: Date.now(),
+      dirty: 1
+    });
+    if (Array.isArray(tracks) && tracks.length > 0) {
+      updated.tracks = tracks;
+      updated.trackSource = trackSource || 'manual';
+    } else {
+      delete updated.tracks;
+      delete updated.trackSource;
+    }
+    const stored = await db.putOwnedRelease(updated);
+    await upsertLocalOwnedState(stored || updated);
+    scheduleCollectionSync();
+  }
+
+  async function softDeleteOwnedRelease(releaseId) {
+    const owned = findOwnedById(releaseId);
+    if (!owned || !db || typeof db.putOwnedRelease !== 'function') return false;
+    const ts = Date.now();
+    const tombstone = Object.assign({}, owned, {
+      deletedAt: ts,
+      clientUpdatedAt: ts,
+      dirty: 1
+    });
+    const stored = await db.putOwnedRelease(tombstone);
+    delete collectionCoverCache[releaseId];
+    await upsertLocalOwnedState(stored || tombstone);
+    renderCategoryPills();
+    renderAll();
+    const modal = document.getElementById('lightboxModal');
+    if (modal && modal.classList.contains('open')) {
+      const remaining = getFilteredAlbums();
+      if (remaining.length === 0) {
+        closeLightbox();
+      } else {
+        if (state.lightboxIndex >= remaining.length) state.lightboxIndex = remaining.length - 1;
+        renderLightbox();
+      }
+    }
+    scheduleCollectionSync();
+    showToast('Removed from Collection (synced as tombstone)');
+    return true;
   }
 
   function getTrackReleaseKey(item) {
@@ -827,8 +1269,11 @@
       });
       trackCacheByKey = nextCache;
       manualTracksByKey = nextManual;
-      if (hasLoadedCatalog) {
-        if (state.search) renderAll();
+      if (ownedReleases.length > 0) {
+        rebuildOwnedStateAndCovers();
+      }
+      if (hasLoadedCatalog || isCollectionMode()) {
+        if (state.search || ownedReleases.length > 0) renderAll();
         const modal = document.getElementById('lightboxModal');
         if (modal && modal.classList.contains('open')) {
           renderLightbox();
@@ -861,7 +1306,15 @@
     };
   }
 
-  function buildTrackListRowsHTML(tracks) {
+  function getHuntCrossRef(item) {
+    if (isCollectionMode() || !collectionMod || !ownedIndex || ownedIndex.activeCount === 0 || !item) {
+      return null;
+    }
+    const eff = getEffectiveTracksInfo(item);
+    return collectionMod.crossReferenceHuntItem(item, ownedIndex, eff.tracks, trackResolver);
+  }
+
+  function buildTrackListRowsHTML(tracks, xref) {
     const discIds = new Set();
     let hasNonCd = false;
     tracks.forEach(function (t) {
@@ -869,6 +1322,15 @@
       if (t.mediaType && t.mediaType !== 'CD') hasNonCd = true;
     });
     const showDiscHeaders = discIds.size > 1 || hasNonCd;
+
+    const overlapByKey = new Map();
+    if (xref && xref.trackOverlap && Array.isArray(xref.trackOverlap.matches)) {
+      xref.trackOverlap.matches.forEach(function (m) {
+        if (!m || !m.targetTrack || m.matchType === 'none' || !m.ownedRelease) return;
+        const k = (m.targetTrack.disc || 1) + ':' + (m.targetTrack.number || 0) + ':' + m.targetTrack.title;
+        overlapByKey.set(k, m);
+      });
+    }
 
     let html = '';
     let activeDisc = null;
@@ -887,6 +1349,15 @@
       const notesPill = t.notes
         ? '<span class="track-variant-pill">' + escapeHTML(t.notes) + '</span>'
         : '';
+      const overlapKey = disc + ':' + (t.number || 0) + ':' + t.title;
+      const overlapMatch = overlapByKey.get(overlapKey);
+      let overlapTag = '';
+      if (overlapMatch) {
+        const ownedCat = escapeHTML(overlapMatch.ownedRelease.catNo || overlapMatch.ownedRelease.title || 'Owned');
+        overlapTag = overlapMatch.matchType === 'exact'
+          ? '<span class="track-overlap-tag">Owned · ' + ownedCat + '</span>'
+          : '<span class="track-overlap-tag variant-only">Variant Owned · ' + ownedCat + '</span>';
+      }
       const jaHTML = t.titleJa && t.titleJa !== t.title
         ? '<div class="track-title-ja">' + escapeHTML(t.titleJa) + '</div>'
         : '';
@@ -897,7 +1368,7 @@
         '<div class="track-row">' +
           '<span class="track-num">' + numStr + '</span>' +
           '<div class="track-main">' +
-            '<div class="track-title-line"><span>' + escapeHTML(t.title) + '</span>' + notesPill + '</div>' +
+            '<div class="track-title-line"><span>' + escapeHTML(t.title) + '</span>' + notesPill + overlapTag + '</div>' +
             jaHTML +
             artistHTML +
           '</div>' +
@@ -907,7 +1378,7 @@
     return html;
   }
 
-  function renderLightboxTracksPanel(item) {
+  function renderLightboxTracksPanel(item, xrefOverride) {
     const panel = document.getElementById('lbTracksPanel');
     if (!panel || !item) return;
 
@@ -985,7 +1456,8 @@
           ? '<div class="lb-tracks-empty">No track list found automatically. Try switching source or paste tracks manually.</div>'
           : '<div class="lb-tracks-empty">No tracks loaded yet. Click Fetch Tracks or Edit / Paste.</div>';
       } else {
-        listEl.innerHTML = buildTrackListRowsHTML(tracks);
+        const xref = xrefOverride !== undefined ? xrefOverride : getHuntCrossRef(item);
+        listEl.innerHTML = buildTrackListRowsHTML(tracks, xref);
       }
     }
 
@@ -1024,11 +1496,12 @@
       const res = await trackResolver.fetchTracksForItem(item, { source: mode });
       trackFetchAttempted.add(key);
       if (res && Array.isArray(res.tracks) && res.tracks.length > 0) {
+        const resolvedSource = res.trackSource || (mode === 'itunes' ? 'itunes' : 'musicbrainz');
         const record = {
           releaseKey: key,
-          catNo: item.regCatNo || '',
+          catNo: item.regCatNo || item.catNo || '',
           mbid: res.mbid || '',
-          trackSource: res.trackSource || (mode === 'itunes' ? 'itunes' : 'musicbrainz'),
+          trackSource: resolvedSource,
           sourceDetail: res.sourceDetail || '',
           fetchedAt: Date.now(),
           tracks: res.tracks
@@ -1037,8 +1510,14 @@
         if (db && typeof db.putTrackCache === 'function') {
           await db.putTrackCache(record);
         }
-        if (state.search) renderAll();
-        showToast('Loaded ' + res.tracks.length + ' tracks (' + (record.trackSource === 'itunes' ? 'iTunes' : 'MusicBrainz') + ')');
+        if (isCollectionMode()) {
+          await syncOwnedReleaseTracksChange(item, res.tracks, resolvedSource);
+          renderAll();
+        } else {
+          rebuildOwnedStateAndCovers();
+          if (state.search) renderAll();
+        }
+        showToast('Loaded ' + res.tracks.length + ' tracks (' + (resolvedSource === 'itunes' ? 'iTunes' : 'MusicBrainz') + ')');
       } else {
         showToast('No track list found');
       }
@@ -1084,6 +1563,46 @@
 
   function getFilteredAlbums() {
     trackMatchesByAlbumId = {};
+    if (isCollectionMode()) {
+      return ownedDisplayItems.filter(function (item) {
+        if (collectionCategory !== 'All' && item.category !== collectionCategory) {
+          return false;
+        }
+        if (collectionQuickFilter === 'has-tracks') {
+          if (getEffectiveTracksInfo(item).tracks.length === 0) return false;
+        } else if (collectionQuickFilter === 'missing-tracks') {
+          if (getEffectiveTracksInfo(item).tracks.length > 0) return false;
+        } else if (collectionQuickFilter === 'has-notes') {
+          if (!((item.notes && item.notes.trim()) || (item.purchaseShop && item.purchaseShop.trim()))) {
+            return false;
+          }
+        }
+        if (state.search) {
+          const hay = [
+            item.artist,
+            item.artistJa,
+            item.title,
+            item.titleJa,
+            item.catalog,
+            item.catNo,
+            item.editionLabel,
+            item.barcode,
+            item.purchaseShop,
+            item.purchasePrice,
+            item.purchaseDate,
+            item.notes,
+            item.category
+          ].join(' ').toLowerCase();
+          if (hay.indexOf(state.search) === -1) {
+            const trackTitleMatch = findMatchedTrackTitle(item, state.search);
+            if (!trackTitleMatch) return false;
+            trackMatchesByAlbumId[item.id] = trackTitleMatch;
+          }
+        }
+        return true;
+      });
+    }
+
     return ALBUMS.filter(function (item) {
       if (state.category !== 'All' && item.category !== state.category) {
         return false;
@@ -1116,7 +1635,8 @@
   }
 
   function getActiveVariant(item) {
-    const entry = state.coverCache[item.id];
+    const cache = getActiveCoverCache();
+    const entry = cache[item.id];
     if (entry && Array.isArray(entry.variants) && entry.variants.length > 0) {
       const idx = Math.max(0, Math.min(entry.selectedIndex || 0, entry.variants.length - 1));
       return {
@@ -1130,9 +1650,10 @@
   }
 
   async function resolveCoverForAlbum(item) {
+    const cache = getActiveCoverCache();
     const mbVariants = await tryMusicBrainzCovers(item);
     const itunesVariants = await tryItunesCovers(item);
-    const existingCustom = ((state.coverCache[item.id] && state.coverCache[item.id].variants) || []).filter(function (v) {
+    const existingCustom = ((cache[item.id] && cache[item.id].variants) || []).filter(function (v) {
       return v.source === 'custom';
     });
 
@@ -1149,7 +1670,7 @@
       return (b.isRegular ? 1 : 0) - (a.isRegular ? 1 : 0);
     });
 
-    state.coverCache[item.id] = {
+    cache[item.id] = {
       variants: merged,
       selectedIndex: 0
     };
@@ -1173,10 +1694,11 @@
   }
 
   function observeCards() {
+    const cache = getActiveCoverCache();
     const cards = document.querySelectorAll('[data-album-id]');
     cards.forEach(function (card) {
       const id = card.getAttribute('data-album-id');
-      if (!id || state.coverCache[id]) return;
+      if (!id || cache[id]) return;
       if (cardObserver) {
         cardObserver.observe(card);
       } else {
@@ -1186,7 +1708,8 @@
   }
 
   function enqueueCoverLookup(id, highPriority) {
-    if (!id || state.coverCache[id] || inFlightIds.has(id) || queuedIds.has(id)) return;
+    const cache = getActiveCoverCache();
+    if (!id || cache[id] || inFlightIds.has(id) || queuedIds.has(id)) return;
     queuedIds.add(id);
     if (highPriority) {
       pendingQueue.unshift(id);
@@ -1197,12 +1720,13 @@
   }
 
   function pumpLookupQueue() {
+    const cache = getActiveCoverCache();
     while (activeWorkers < MAX_WORKERS && pendingQueue.length > 0) {
       const id = pendingQueue.shift();
       queuedIds.delete(id);
-      if (!id || state.coverCache[id] || inFlightIds.has(id)) continue;
+      if (!id || cache[id] || inFlightIds.has(id)) continue;
 
-      const item = ALBUMS.find(function (a) { return a.id === id; });
+      const item = findActiveItemById(id);
       if (!item) continue;
 
       activeWorkers++;
@@ -1241,22 +1765,27 @@
   }
 
   function selectCoverVariant(id, index, directionOverride) {
-    const entry = state.coverCache[id];
+    const cache = getActiveCoverCache();
+    const entry = cache[id];
     if (!entry || !Array.isArray(entry.variants) || entry.variants.length === 0) return;
     const len = entry.variants.length;
     const prevIdx = entry.selectedIndex || 0;
     const direction = directionOverride || (index > prevIdx ? 'next' : index < prevIdx ? 'prev' : 'flip');
     entry.selectedIndex = ((index % len) + len) % len;
-    saveCoverCache();
     refreshCardDOM(id, direction);
-    scheduleCloudPush();
+    if (isCollectionMode()) {
+      persistOwnedCoverChange(id);
+    } else {
+      saveCoverCache();
+      scheduleCloudPush();
+    }
   }
 
   async function handlePerEntryRefresh(id, forceRefetch) {
-    const item = ALBUMS.find(function (a) { return a.id === id; });
+    const item = findActiveItemById(id);
     if (!item || inFlightIds.has(id)) return;
 
-    const existing = state.coverCache[id];
+    const existing = getActiveCoverCache()[id];
     if (!forceRefetch && existing && Array.isArray(existing.variants) && existing.variants.length > 1) {
       const nextIdx = ((existing.selectedIndex || 0) + 1) % existing.variants.length;
       selectCoverVariant(id, nextIdx, 'next');
@@ -1324,7 +1853,7 @@
   }
 
   function refreshCardDOM(id, direction) {
-    const item = ALBUMS.find(function (a) { return a.id === id; });
+    const item = findActiveItemById(id);
     if (!item) return;
     const slot = document.getElementById('art-slot-' + id);
     if (slot) {
@@ -1348,11 +1877,12 @@
   }
 
   function attachImageErrorHandlers(root) {
+    const cache = getActiveCoverCache();
     const imgs = (root || document).querySelectorAll('img[data-fallback-id]');
     imgs.forEach(function (img) {
       img.onerror = function () {
         const id = img.getAttribute('data-fallback-id');
-        const entry = state.coverCache[id];
+        const entry = cache[id];
         if (entry && Array.isArray(entry.variants) && entry.variants.length > 0) {
           const idx = Math.max(0, Math.min(entry.selectedIndex || 0, entry.variants.length - 1));
           entry.variants.splice(idx, 1);
@@ -1371,6 +1901,7 @@
       state.acquiredMap[id] = true;
     }
     saveChecklistSync();
+    updateBatchGraduateButton();
     renderAll();
     if (document.getElementById('lightboxModal').classList.contains('open')) {
       renderLightbox();
@@ -1380,6 +1911,27 @@
 
   function renderCategoryPills() {
     const container = document.getElementById('categoryPills');
+    if (isCollectionMode()) {
+      const colCats = deriveCategories(ownedDisplayItems);
+      if (colCats.every(function (c) { return c.key !== collectionCategory; })) {
+        collectionCategory = 'All';
+      }
+      container.innerHTML = colCats.map(function (cat) {
+        const count = cat.key === 'All'
+          ? ownedDisplayItems.length
+          : ownedDisplayItems.filter(function (a) { return a.category === cat.key; }).length;
+        const active = collectionCategory === cat.key;
+        return (
+          '<button type="button" class="pill ' + (active ? 'active' : '') + '" data-action="set-cat" data-cat="' + escapeAttr(cat.key) + '">' +
+          '<span class="pill-dot" style="background:' + cat.dot + ';"></span>' +
+          '<span>' + escapeHTML(cat.label) + '</span>' +
+          '<span style="opacity:0.65; font-family:var(--font-mono); font-size:10px;">' + count + '</span>' +
+          '</button>'
+        );
+      }).join('');
+      return;
+    }
+
     container.innerHTML = CATEGORIES.map(function (cat) {
       const count = cat.key === 'All'
         ? ALBUMS.length
@@ -1408,9 +1960,30 @@
     return '<span class="priority-badge ' + getPriorityToneClass(priority) + '">Priority: ' + escapeHTML(priority) + '</span>';
   }
 
+  function buildHuntOwnedBadgesHTML(xref) {
+    if (!xref) return '';
+    const badges = [];
+    if (xref.status === 'exact') {
+      badges.push('<span class="owned-badge owned-exact">✓ Owned</span>');
+    } else if (xref.status === 'other_edition') {
+      const first = xref.matchedReleases && xref.matchedReleases[0];
+      const suffix = first && first.catNo ? ' (' + escapeHTML(first.catNo) + ')' : '';
+      badges.push('<span class="owned-badge owned-other">Other Ed. Owned' + suffix + '</span>');
+    }
+    if (xref.trackOverlap && (xref.trackOverlap.exactCount > 0 || xref.trackOverlap.variantCount > 0)) {
+      const ownedCount = xref.trackOverlap.exactCount + xref.trackOverlap.variantCount;
+      badges.push(
+        '<span class="owned-badge owned-tracks">Tracks Owned: ' + ownedCount + '/' + xref.trackOverlap.total + '</span>'
+      );
+    }
+    if (badges.length === 0) return '';
+    return '<div class="owned-badges-row">' + badges.join('') + '</div>';
+  }
+
   function buildCardHTML(item, lightboxIdx) {
-    const isAcquired = !!state.acquiredMap[item.id];
-    const isDigital = !!item.digitalOnly;
+    const colMode = isCollectionMode();
+    const isAcquired = !colMode && !!state.acquiredMap[item.id];
+    const isDigital = !colMode && !!item.digitalOnly;
     const spinningClass = inFlightIds.has(item.id) ? 'spinning' : '';
     const cardClasses = 'cd-card' + (isAcquired ? ' acquired' : '') + (isDigital ? ' digital' : '');
 
@@ -1418,6 +1991,85 @@
     const trackChipHTML = matchedTrackTitle
       ? '<div class="track-match-chip" title="' + escapeAttr('Track match: ' + matchedTrackTitle) + '">♪ ' + escapeHTML(matchedTrackTitle) + '</div>'
       : '';
+
+    if (colMode) {
+      const effTracks = getEffectiveTracksInfo(item).tracks;
+      const trackBadgeHTML = effTracks.length > 0
+        ? '<span class="owned-badge owned-tracks">' + effTracks.length + (effTracks.length === 1 ? ' track' : ' tracks') + '</span>'
+        : '<span class="owned-badge owned-other">No tracks</span>';
+      const topLeftBadge = escapeHTML(item.editionLabel || item.category || 'Owned');
+
+      if (state.viewMode === 'single') {
+        const metaLines = [];
+        if (item.purchaseShop) metaLines.push('<strong>Shop:</strong> ' + escapeHTML(item.purchaseShop));
+        if (item.purchaseDate) metaLines.push('<strong>Date:</strong> ' + escapeHTML(item.purchaseDate));
+        if (item.barcode) metaLines.push('<strong>Barcode:</strong> ' + escapeHTML(item.barcode));
+        if (item.notes) metaLines.push('<strong>Notes:</strong> ' + escapeHTML(item.notes));
+        if (metaLines.length === 0) metaLines.push('<strong>Category:</strong> ' + escapeHTML(item.category));
+
+        return (
+          '<article class="' + cardClasses + '" data-album-id="' + item.id + '" data-action="open-lb" data-lb-idx="' + lightboxIdx + '">' +
+            '<div class="cover-box">' +
+              '<div id="art-slot-' + item.id + '" style="width:100%; height:100%;">' + buildCoverInnerHTML(item) + '</div>' +
+              '<span class="badge-kana">' + topLeftBadge + '</span>' +
+            '</div>' +
+            '<div class="single-meta">' +
+              '<div id="single-variants-' + item.id + '" class="variant-pills-row">' + buildSingleVariantPillsHTML(item) + '</div>' +
+              '<div class="single-top-row">' +
+                '<div>' +
+                  '<div class="single-artist">' + escapeHTML(item.artist) + '</div>' +
+                  '<div class="single-artist-ja">' + escapeHTML(item.artistJa) + '</div>' +
+                '</div>' +
+                '<div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end;">' +
+                  trackBadgeHTML +
+                  (item.purchasePrice ? '<span class="price-badge">' + escapeHTML(item.purchasePrice) + '</span>' : '') +
+                '</div>' +
+              '</div>' +
+              '<div>' +
+                '<h2 class="single-title">' + escapeHTML(item.title) + '</h2>' +
+                '<p class="single-title-ja">' + escapeHTML(item.titleJa) + '</p>' +
+                trackChipHTML +
+              '</div>' +
+              '<div class="badges-wrap">' +
+                '<button type="button" class="chip-btn chip-mono" data-action="copy-cat" data-catno="' + escapeAttr(item.catNo || item.catalog) + '" title="Copy catalog number">' +
+                  '<span>📋 ' + escapeHTML(item.catalog) + '</span>' +
+                '</button>' +
+                '<button type="button" class="chip-btn" data-action="refetch-one" data-id="' + item.id + '" style="color:#fcd34d;">' +
+                  '<span id="refresh-icon-' + item.id + '" class="' + spinningClass + '" style="display:inline-block;">↻</span>' +
+                  '<span>Re-fetch Covers</span>' +
+                '</button>' +
+                '<button type="button" class="chip-btn" data-action="edit-owned" data-id="' + item.id + '">Edit</button>' +
+                '<button type="button" class="chip-btn" data-action="delete-owned" data-id="' + item.id + '" style="color:#fda4af;">Delete</button>' +
+              '</div>' +
+              '<div class="filing-box">' + metaLines.join(' · ') + '</div>' +
+            '</div>' +
+          '</article>'
+        );
+      }
+
+      return (
+        '<article class="' + cardClasses + '" data-album-id="' + item.id + '" data-action="open-lb" data-lb-idx="' + lightboxIdx + '">' +
+          '<div class="cover-box">' +
+            '<div id="art-slot-' + item.id + '" style="width:100%; height:100%;">' + buildCoverInnerHTML(item) + '</div>' +
+            '<span class="badge-kana">' + escapeHTML(item.category) + '</span>' +
+            (item.purchasePrice ? '<span class="badge-price-top">' + escapeHTML(item.purchasePrice) + '</span>' : '') +
+            '<button type="button" class="refresh-cover-btn" data-action="cycle-one" data-id="' + item.id + '" title="Switch edition cover or fetch cover" aria-label="Refresh cover">' +
+              '<span id="refresh-icon-' + item.id + '" class="' + spinningClass + '" style="display:inline-block; font-size:13px; font-weight:700;">↻</span>' +
+            '</button>' +
+          '</div>' +
+          '<div class="grid-meta">' +
+            '<div class="grid-artist">' + escapeHTML(item.artist) + '</div>' +
+            '<div class="grid-title">' + escapeHTML(item.title) + '</div>' +
+            '<div class="grid-cat">' + escapeHTML(item.catNo) + '</div>' +
+            '<div class="owned-badges-row">' + trackBadgeHTML + '</div>' +
+            trackChipHTML +
+          '</div>' +
+        '</article>'
+      );
+    }
+
+    const xref = getHuntCrossRef(item);
+    const ownedBadgesHTML = buildHuntOwnedBadgesHTML(xref);
 
     if (state.viewMode === 'single') {
       const shopsHTML = item.recommendedShops
@@ -1447,6 +2099,7 @@
             '<div>' +
               '<h2 class="single-title">' + escapeHTML(item.title) + '</h2>' +
               '<p class="single-title-ja">' + escapeHTML(item.titleJa) + '</p>' +
+              ownedBadgesHTML +
               trackChipHTML +
             '</div>' +
             '<div class="badges-wrap">' +
@@ -1490,6 +2143,7 @@
           '<div class="grid-artist">' + escapeHTML(item.artist) + '</div>' +
           '<div class="grid-title">' + escapeHTML(item.title) + '</div>' +
           '<div class="grid-cat">' + escapeHTML(item.regCatNo || item.catalog) + '</div>' +
+          ownedBadgesHTML +
           trackChipHTML +
         '</div>' +
       '</article>'
@@ -1497,9 +2151,51 @@
   }
 
   function renderAll() {
+    const colMode = isCollectionMode();
+    const gridEl = document.getElementById('albumGrid');
+    const digSection = document.getElementById('digitalOnlySection');
+    const digGrid = document.getElementById('digitalGrid');
+    const emptyBox = document.getElementById('emptyState');
+    const layoutClass = state.viewMode === 'single' ? 'cd-single-col' : 'cd-grid';
+
+    if (colMode) {
+      const totalReleases = ownedDisplayItems.length;
+      const totalTracks = ownedDisplayItems.reduce(function (sum, it) {
+        return sum + getEffectiveTracksInfo(it).tracks.length;
+      }, 0);
+      document.getElementById('progressBadge').textContent =
+        totalReleases + (totalReleases === 1 ? ' release' : ' releases') + ' · ' +
+        totalTracks + (totalTracks === 1 ? ' track' : ' tracks');
+
+      const filtered = getFilteredAlbums();
+      const countLabel = 'Showing ' + filtered.length + ' of ' + totalReleases + ' owned releases';
+      document.getElementById('visibleCountText').textContent = countLabel;
+      document.getElementById('visibleCountTextAlt').textContent = countLabel;
+
+      digGrid.innerHTML = '';
+      digSection.classList.add('hidden');
+
+      if (filtered.length === 0) {
+        gridEl.innerHTML = '';
+        gridEl.classList.add('hidden');
+        emptyBox.classList.remove('hidden');
+        return;
+      }
+      emptyBox.classList.add('hidden');
+      gridEl.classList.remove('hidden');
+      gridEl.className = layoutClass;
+      gridEl.innerHTML = filtered.map(function (item, idx) {
+        return buildCardHTML(item, idx);
+      }).join('');
+      attachImageErrorHandlers(document);
+      observeCards();
+      return;
+    }
+
     const physicalAll = ALBUMS.filter(function (a) { return !a.digitalOnly; });
     const acquiredPhysical = physicalAll.filter(function (a) { return !!state.acquiredMap[a.id]; }).length;
     document.getElementById('progressBadge').textContent = acquiredPhysical + ' / ' + physicalAll.length;
+    updateBatchGraduateButton();
 
     const filtered = getFilteredAlbums();
     const physicalFiltered = filtered.filter(function (a) { return !a.digitalOnly; });
@@ -1511,11 +2207,6 @@
     document.getElementById('visibleCountText').textContent = countLabel;
     document.getElementById('visibleCountTextAlt').textContent = countLabel;
 
-    const gridEl = document.getElementById('albumGrid');
-    const digSection = document.getElementById('digitalOnlySection');
-    const digGrid = document.getElementById('digitalGrid');
-    const emptyBox = document.getElementById('emptyState');
-
     if (filtered.length === 0) {
       gridEl.classList.add('hidden');
       digSection.classList.add('hidden');
@@ -1523,8 +2214,6 @@
       return;
     }
     emptyBox.classList.add('hidden');
-
-    const layoutClass = state.viewMode === 'single' ? 'cd-single-col' : 'cd-grid';
 
     if (physicalFiltered.length > 0) {
       gridEl.classList.remove('hidden');
@@ -1617,16 +2306,74 @@
     document.getElementById('lbTitleJa').textContent = item.titleJa;
     document.getElementById('lbCatalogText').textContent = '📋 ' + item.catalog;
     document.getElementById('lbPrice').textContent = item.price;
-    document.getElementById('lbFiling').textContent = item.filing;
+
+    const colMode = isCollectionMode();
+    const filingLabelEl = document.getElementById('lbFilingLabel');
+    if (filingLabelEl) {
+      filingLabelEl.textContent = colMode ? 'Collection Info:' : (item.digitalOnly ? 'Note:' : 'どこで探す (Shelf):');
+    }
+    if (colMode) {
+      const infoParts = [];
+      if (item.purchaseShop) infoParts.push('Shop: ' + item.purchaseShop);
+      if (item.purchaseDate) infoParts.push('Date: ' + item.purchaseDate);
+      if (item.barcode) infoParts.push('Barcode: ' + item.barcode);
+      if (item.notes) infoParts.push('Notes: ' + item.notes);
+      document.getElementById('lbFiling').textContent = infoParts.length > 0 ? infoParts.join(' · ') : 'In Owned Collection';
+    } else {
+      document.getElementById('lbFiling').textContent = item.filing;
+    }
+
     const shopsRow = document.getElementById('lbShopsRow');
     const shopsEl = document.getElementById('lbShops');
     if (shopsRow && shopsEl) {
-      if (item.recommendedShops) {
+      if (!colMode && item.recommendedShops) {
         shopsEl.textContent = item.recommendedShops;
         shopsRow.classList.remove('hidden');
       } else {
         shopsEl.textContent = '';
         shopsRow.classList.add('hidden');
+      }
+    }
+
+    const xref = !colMode ? getHuntCrossRef(item) : null;
+    const crossRefBox = document.getElementById('lbOwnedCrossRefBox');
+    if (crossRefBox) {
+      const hasOverlap = !!(xref && xref.trackOverlap && (xref.trackOverlap.exactCount > 0 || xref.trackOverlap.variantCount > 0));
+      if (!colMode && xref && (xref.status !== 'none' || hasOverlap)) {
+        const lines = [];
+        if (xref.status === 'exact') {
+          const labels = (xref.matchedReleases || []).map(function (r) {
+            return escapeHTML(r.catNo + (r.editionLabel ? ' (' + r.editionLabel + ')' : ''));
+          }).join(', ');
+          lines.push('<div><strong>✓ Exact Edition Already Owned:</strong> ' + labels + '</div>');
+        } else if (xref.status === 'other_edition') {
+          const labels = (xref.matchedReleases || []).map(function (r) {
+            return escapeHTML(r.catNo + (r.editionLabel ? ' (' + r.editionLabel + ')' : ''));
+          }).join(', ');
+          lines.push('<div><strong>Other Edition Owned:</strong> ' + labels + '</div>');
+        }
+        if (hasOverlap) {
+          const ov = xref.trackOverlap;
+          const sourcesMap = new Map();
+          ov.matches.forEach(function (m) {
+            if (m && m.matchType !== 'none' && m.ownedRelease) {
+              sourcesMap.set(m.ownedRelease.id, m.ownedRelease.catNo + ' (' + m.ownedRelease.title + ')');
+            }
+          });
+          const summaryParts = [];
+          if (ov.exactCount > 0) summaryParts.push(ov.exactCount + ' exact');
+          if (ov.variantCount > 0) summaryParts.push(ov.variantCount + ' variant');
+          lines.push(
+            '<div><strong>Track Overlap:</strong> ' + summaryParts.join(', ') + ' of ' + ov.total + ' tracks · Found on: ' +
+            escapeHTML(Array.from(sourcesMap.values()).join(', ')) + '</div>'
+          );
+        }
+        crossRefBox.innerHTML = lines.join('');
+        crossRefBox.className = 'lb-crossref-box' +
+          (xref.status === 'other_edition' ? ' crossref-other' : xref.status === 'none' ? ' crossref-tracks' : '');
+      } else {
+        crossRefBox.innerHTML = '';
+        crossRefBox.className = 'lb-crossref-box hidden';
       }
     }
 
@@ -1642,11 +2389,27 @@
       : [item.regCatNo || '', item.artist || '', item.titleJa || item.title || '', item.digitalOnly ? 'ジャケット' : '通常盤 CD'].filter(Boolean).join(' ').trim();
     document.getElementById('lbGoogleSearchLink').href = 'https://www.google.com/search?tbm=isch&q=' + encodeURIComponent(qText);
 
-    const isAcquired = !!state.acquiredMap[item.id];
+    const isAcquired = !colMode && !!state.acquiredMap[item.id];
     const acqBtn = document.getElementById('lbAcquireBtn');
-    acqBtn.textContent = item.digitalOnly
-      ? (isAcquired ? '✓ Saved / Streamed' : '+ Mark Saved (Digital)')
-      : (isAcquired ? '✓ In Crate (Acquired)' : '+ Mark Acquired');
+    acqBtn.classList.toggle('hidden', colMode);
+    if (!colMode) {
+      acqBtn.textContent = item.digitalOnly
+        ? (isAcquired ? '✓ Saved / Streamed' : '+ Mark Saved (Digital)')
+        : (isAcquired ? '✓ In Crate (Acquired)' : '+ Mark Acquired');
+    }
+
+    const graduateBtn = document.getElementById('lbGraduateBtn');
+    if (graduateBtn) {
+      graduateBtn.classList.toggle('hidden', colMode || !!item.digitalOnly);
+    }
+    const editReleaseBtn = document.getElementById('lbEditReleaseBtn');
+    if (editReleaseBtn) {
+      editReleaseBtn.classList.toggle('hidden', !colMode);
+    }
+    const deleteReleaseBtn = document.getElementById('lbDeleteReleaseBtn');
+    if (deleteReleaseBtn) {
+      deleteReleaseBtn.classList.toggle('hidden', !colMode);
+    }
 
     const activeInfo = getActiveVariant(item);
     const variantsPanel = document.getElementById('lbVariantsPanel');
@@ -1684,7 +2447,7 @@
       );
     }).join('');
 
-    renderLightboxTracksPanel(item);
+    renderLightboxTracksPanel(item, xref);
   }
 
   function copyText(text, customToast) {
@@ -1743,12 +2506,33 @@
         submitCatalogUrl(presetUrl);
       } else if (action === 'set-cat') {
         e.stopPropagation();
-        state.category = target.getAttribute('data-cat') || 'All';
+        const chosenCat = target.getAttribute('data-cat') || 'All';
+        if (isCollectionMode()) {
+          collectionCategory = chosenCat;
+        } else {
+          state.category = chosenCat;
+        }
         renderCategoryPills();
+        renderAll();
+      } else if (action === 'set-col-filter') {
+        e.stopPropagation();
+        collectionQuickFilter = target.getAttribute('data-filter') || 'all';
+        const row = document.getElementById('collectionQuickFilters');
+        if (row && typeof row.querySelectorAll === 'function') {
+          row.querySelectorAll('[data-filter]').forEach(function (btn) {
+            btn.classList.toggle('active', btn.getAttribute('data-filter') === collectionQuickFilter);
+          });
+        }
         renderAll();
       } else if (action === 'toggle-acq') {
         e.stopPropagation();
         toggleAcquired(target.getAttribute('data-id'));
+      } else if (action === 'edit-owned') {
+        e.stopPropagation();
+        openReleaseFormForEdit(target.getAttribute('data-id'));
+      } else if (action === 'delete-owned') {
+        e.stopPropagation();
+        softDeleteOwnedRelease(target.getAttribute('data-id'));
       } else if (action === 'cycle-one') {
         e.stopPropagation();
         handlePerEntryRefresh(target.getAttribute('data-id'), false);
@@ -1759,7 +2543,7 @@
         e.stopPropagation();
         const id = target.getAttribute('data-id');
         const delta = parseInt(target.getAttribute('data-delta'), 10) || 1;
-        const entry = state.coverCache[id];
+        const entry = getActiveCoverCache()[id];
         if (entry && Array.isArray(entry.variants)) {
           selectCoverVariant(id, (entry.selectedIndex || 0) + delta);
         }
@@ -1772,13 +2556,17 @@
         e.stopPropagation();
         const id = target.getAttribute('data-id');
         const idx = parseInt(target.getAttribute('data-idx'), 10) || 0;
-        const entry = state.coverCache[id];
+        const entry = getActiveCoverCache()[id];
         if (entry && Array.isArray(entry.variants)) {
           entry.variants.splice(idx, 1);
           entry.selectedIndex = Math.max(0, Math.min(entry.selectedIndex || 0, entry.variants.length - 1));
-          saveCoverCache();
           refreshCardDOM(id);
-          scheduleCloudPush();
+          if (isCollectionMode()) {
+            persistOwnedCoverChange(id);
+          } else {
+            saveCoverCache();
+            scheduleCloudPush();
+          }
           showToast('Removed cover variant');
         }
       } else if (action === 'copy-cat') {
@@ -1790,12 +2578,26 @@
       }
     });
 
+    const modeHuntBtn = document.getElementById('modeHuntBtn');
+    if (modeHuntBtn) {
+      modeHuntBtn.addEventListener('click', function () {
+        setAppMode('hunt');
+      });
+    }
+
+    const modeCollectionBtn = document.getElementById('modeCollectionBtn');
+    if (modeCollectionBtn) {
+      modeCollectionBtn.addEventListener('click', function () {
+        setAppMode('collection');
+      });
+    }
+
     document.getElementById('viewModeBtn').addEventListener('click', function () {
       state.viewMode = state.viewMode === 'grid' ? 'single' : 'grid';
-      safeSetItem(VIEW_MODE_KEY, state.viewMode);
+      if (!isCollectionMode()) safeSetItem(VIEW_MODE_KEY, state.viewMode);
       document.getElementById('viewModeLabel').textContent = state.viewMode === 'single' ? 'Grid View' : '1-Col View';
       renderAll();
-      scheduleCloudPush();
+      if (!isCollectionMode()) scheduleCloudPush();
     });
 
     document.getElementById('huntingOnlyBtn').addEventListener('click', function () {
@@ -1840,9 +2642,20 @@
       searchInput.value = '';
       state.search = '';
       clearBtn.classList.remove('visible');
-      state.category = 'All';
-      state.huntingOnly = false;
-      document.getElementById('huntingOnlyBtn').classList.remove('btn-active-filter');
+      if (isCollectionMode()) {
+        collectionCategory = 'All';
+        collectionQuickFilter = 'all';
+        const row = document.getElementById('collectionQuickFilters');
+        if (row) {
+          row.querySelectorAll('[data-filter]').forEach(function (btn) {
+            btn.classList.toggle('active', btn.getAttribute('data-filter') === 'all');
+          });
+        }
+      } else {
+        state.category = 'All';
+        state.huntingOnly = false;
+        document.getElementById('huntingOnlyBtn').classList.remove('btn-active-filter');
+      }
       renderCategoryPills();
       renderAll();
     });
@@ -1894,21 +2707,27 @@
       const label = document.getElementById('customCoverLabel').value || 'Custom Jacket';
       if (!item || !url) return;
 
-      if (!state.coverCache[item.id] || !Array.isArray(state.coverCache[item.id].variants)) {
-        state.coverCache[item.id] = { variants: [], selectedIndex: 0 };
+      const cache = getActiveCoverCache();
+      if (!cache[item.id] || !Array.isArray(cache[item.id].variants)) {
+        cache[item.id] = { variants: [], selectedIndex: 0 };
       }
-      const variants = state.coverCache[item.id].variants;
+      const variants = cache[item.id].variants;
+      const refCat = item.catNo || item.regCatNo || '';
       variants.push({
         url: url,
         label: label,
-        catNo: label.indexOf('通常') !== -1 ? (item.regCatNo || '') : '',
+        catNo: label.indexOf('通常') !== -1 ? refCat : '',
         source: 'custom',
         isRegular: label.indexOf('通常') !== -1
       });
-      state.coverCache[item.id].selectedIndex = variants.length - 1;
-      saveCoverCache();
+      cache[item.id].selectedIndex = variants.length - 1;
       refreshCardDOM(item.id);
-      scheduleCloudPush();
+      if (isCollectionMode()) {
+        persistOwnedCoverChange(item.id);
+      } else {
+        saveCoverCache();
+        scheduleCloudPush();
+      }
       document.getElementById('customCoverInput').value = '';
       showToast('Added cover variant: ' + label);
     });
@@ -2029,8 +2848,16 @@
         }
         trackEditorOpen = false;
         tracksExpanded = true;
-        renderLightboxTracksPanel(item);
-        if (state.search) renderAll();
+        if (isCollectionMode()) {
+          await syncOwnedReleaseTracksChange(item, parsed, 'manual');
+          const refreshed = getActiveLightboxItem() || item;
+          renderLightboxTracksPanel(refreshed);
+          renderAll();
+        } else {
+          rebuildOwnedStateAndCovers();
+          renderLightboxTracksPanel(item);
+          if (state.search) renderAll();
+        }
         showToast('Saved ' + parsed.length + ' tracks (Custom)');
       });
     }
@@ -2048,6 +2875,23 @@
           await db.deleteManualTracks(key);
         }
         trackEditorOpen = false;
+        if (isCollectionMode()) {
+          const fallbackCache = key ? trackCacheByKey[key] : null;
+          await syncOwnedReleaseTracksChange(
+            item,
+            fallbackCache && Array.isArray(fallbackCache.tracks) ? fallbackCache.tracks : [],
+            fallbackCache && fallbackCache.trackSource ? fallbackCache.trackSource : null
+          );
+          const refreshed = getActiveLightboxItem() || item;
+          const nextInfo = getEffectiveTracksInfo(refreshed);
+          renderLightboxTracksPanel(refreshed);
+          renderAll();
+          if (hadManual) {
+            showToast(nextInfo.tracks.length > 0 ? 'Restored underlying track list' : 'Cleared custom track list');
+          }
+          return;
+        }
+        rebuildOwnedStateAndCovers();
         const nextInfo = getEffectiveTracksInfo(item);
         renderLightboxTracksPanel(item);
         if (state.search) renderAll();
@@ -2263,7 +3107,8 @@
     if (copyAgentLinkBtn) {
       copyAgentLinkBtn.addEventListener('click', function () {
         if (!syncShareUrl) return;
-        copyText(syncShareUrl + '?format=markdown', 'Copied semi-private Agent status link');
+        const suffix = isCollectionMode() ? '?format=markdown&include=collection' : '?format=markdown';
+        copyText(syncShareUrl + suffix, 'Copied semi-private Agent status link');
       });
     }
 
@@ -2273,6 +3118,8 @@
         if (!sync) return;
         clearTimeout(syncPushTimer);
         syncPushTimer = null;
+        clearTimeout(collectionSyncTimer);
+        collectionSyncTimer = null;
         sync.clearAuthSession(storage);
         syncSession = null;
         syncShareUrl = null;
@@ -2282,14 +3129,578 @@
       });
     }
 
+    // ── Phase 2: Release Add / Edit Form Modal + Lookup + Graduation ──
+    const releaseFormModal = document.getElementById('releaseFormModal');
+    let rfDraftCustomCovers = null;
+    let rfDraftSelectedVariant = null;
+    let rfDraftTrackSource = 'manual';
+    let rfDraftTracksOrigText = '';
+    let rfLookupCandidates = [];
+
+    function updateRfTracksPreview() {
+      const previewEl = document.getElementById('rfTracksPreview');
+      const inputEl = document.getElementById('rfTracksInput');
+      if (!previewEl || !inputEl) return;
+      const parsed = trackResolver && typeof trackResolver.parseTracklistText === 'function'
+        ? trackResolver.parseTracklistText(inputEl.value)
+        : [];
+      const discCount = new Set(parsed.map(function (t) { return t.disc || 1; })).size;
+      previewEl.textContent = parsed.length + (parsed.length === 1 ? ' track' : ' tracks') +
+        (discCount > 1 ? ' · ' + discCount + ' discs' : '');
+    }
+
+    function openReleaseFormModal(prefill, headingText) {
+      if (!releaseFormModal) return;
+      const data = prefill || {};
+      document.getElementById('releaseFormHeading').textContent = headingText || 'Add Owned Release';
+      document.getElementById('rfId').value = data.id || '';
+      document.getElementById('rfArtist').value = data.artist || '';
+      document.getElementById('rfArtistJa').value = data.artistJa || '';
+      document.getElementById('rfTitle').value = data.title || '';
+      document.getElementById('rfTitleJa').value = data.titleJa || '';
+      document.getElementById('rfCategory').value = data.category || (isCollectionMode() && collectionCategory !== 'All' ? collectionCategory : 'Soundtrack');
+      document.getElementById('rfCatNo').value = data.catNo || '';
+      document.getElementById('rfEditionLabel').value = data.editionLabel || '';
+      document.getElementById('rfBarcode').value = data.barcode || '';
+      document.getElementById('rfMbid').value = data.mbid || '';
+      document.getElementById('rfPurchasePrice').value = data.purchasePrice || '';
+      document.getElementById('rfPurchaseShop').value = data.purchaseShop || '';
+      document.getElementById('rfPurchaseDate').value = data.purchaseDate || '';
+      document.getElementById('rfNotes').value = data.notes || '';
+
+      const tracksStr = Array.isArray(data.tracks) && data.tracks.length > 0 && trackResolver
+        ? trackResolver.formatTracklistForEdit(data.tracks)
+        : '';
+      document.getElementById('rfTracksInput').value = tracksStr;
+      rfDraftTracksOrigText = tracksStr;
+      rfDraftTrackSource = data.trackSource || 'manual';
+      rfDraftCustomCovers = data.customCovers || null;
+      rfDraftSelectedVariant = data.selectedVariant || null;
+      rfLookupCandidates = [];
+      updateRfTracksPreview();
+
+      const lookupInput = document.getElementById('releaseLookupInput');
+      if (lookupInput) lookupInput.value = '';
+      const lookupRes = document.getElementById('releaseLookupResults');
+      if (lookupRes) {
+        lookupRes.innerHTML = '';
+        lookupRes.classList.add('hidden');
+      }
+      releaseFormModal.classList.add('open');
+    }
+
+    function openReleaseFormForEdit(releaseId) {
+      const owned = findOwnedById(releaseId);
+      if (!owned) return;
+      const disp = collectionMod ? collectionMod.ownedToDisplayItem(owned) : null;
+      const eff = disp ? getEffectiveTracksInfo(disp) : null;
+      const mergedData = Object.assign({}, owned, {
+        tracks: eff && eff.tracks && eff.tracks.length > 0 ? eff.tracks : (owned.tracks || []),
+        trackSource: (eff && eff.trackSource) || owned.trackSource || 'manual'
+      });
+      openReleaseFormModal(mergedData, 'Edit Owned Release');
+    }
+
+    const addReleaseBtn = document.getElementById('addReleaseBtn');
+    if (addReleaseBtn) {
+      addReleaseBtn.addEventListener('click', function () {
+        openReleaseFormModal(null, 'Add Owned Release');
+      });
+    }
+
+    const lbEditReleaseBtn = document.getElementById('lbEditReleaseBtn');
+    if (lbEditReleaseBtn) {
+      lbEditReleaseBtn.addEventListener('click', function () {
+        const item = getActiveLightboxItem();
+        if (item) openReleaseFormForEdit(item.id);
+      });
+    }
+
+    const lbDeleteReleaseBtn = document.getElementById('lbDeleteReleaseBtn');
+    if (lbDeleteReleaseBtn) {
+      lbDeleteReleaseBtn.addEventListener('click', function () {
+        const item = getActiveLightboxItem();
+        if (item) softDeleteOwnedRelease(item.id);
+      });
+    }
+
+    const lbGraduateBtn = document.getElementById('lbGraduateBtn');
+    if (lbGraduateBtn) {
+      lbGraduateBtn.addEventListener('click', function () {
+        const item = getActiveLightboxItem();
+        if (!item || !collectionMod) return;
+        const activeInfo = getActiveVariant(item);
+        const effTracks = getEffectiveTracksInfo(item);
+        const draft = collectionMod.graduateHuntItemToOwned(item, {
+          activeVariant: activeInfo ? activeInfo.variant : null,
+          selectedVariantIndex: activeInfo ? activeInfo.index : 0,
+          effectiveTracksInfo: effTracks,
+          customCoverEntry: state.coverCache[item.id] || null,
+          existingIds: ownedAllReleases
+        });
+        draft.id = '';
+        openReleaseFormModal(draft, 'Add Hunt Release to Collection');
+      });
+    }
+
+    const batchGraduateBtn = document.getElementById('batchGraduateBtn');
+    if (batchGraduateBtn) {
+      batchGraduateBtn.addEventListener('click', async function () {
+        if (!collectionMod || !db || typeof db.putOwnedReleasesBatch !== 'function') return;
+        const usedIds = new Set(ownedAllReleases.map(function (r) { return r && r.id; }).filter(Boolean));
+        const toCreate = [];
+        const nowMs = Date.now();
+        ALBUMS.forEach(function (item) {
+          if (!item || item.digitalOnly || !state.acquiredMap[item.id]) return;
+          const xref = ownedIndex
+            ? collectionMod.crossReferenceHuntItem(item, ownedIndex, null, trackResolver)
+            : { status: 'none' };
+          if (xref.status === 'exact') return;
+          const activeInfo = getActiveVariant(item);
+          const effTracks = getEffectiveTracksInfo(item);
+          const rec = collectionMod.graduateHuntItemToOwned(item, {
+            activeVariant: activeInfo ? activeInfo.variant : null,
+            selectedVariantIndex: activeInfo ? activeInfo.index : 0,
+            effectiveTracksInfo: effTracks,
+            customCoverEntry: state.coverCache[item.id] || null,
+            existingIds: usedIds,
+            nowMs: nowMs
+          });
+          usedIds.add(rec.id);
+          toCreate.push(rec);
+        });
+        if (toCreate.length === 0) {
+          showToast('All checked physical Hunt items are already owned');
+          return;
+        }
+        const saved = await db.putOwnedReleasesBatch(toCreate);
+        for (let i = 0; i < (saved || toCreate).length; i++) {
+          await upsertLocalOwnedState((saved || toCreate)[i]);
+        }
+        renderAll();
+        scheduleCollectionSync();
+        showToast('Added ' + toCreate.length + (toCreate.length === 1 ? ' release' : ' releases') + ' to Owned Collection');
+      });
+    }
+
+    const closeReleaseFormBtn = document.getElementById('closeReleaseFormBtn');
+    const cancelReleaseFormBtn = document.getElementById('cancelReleaseFormBtn');
+    if (closeReleaseFormBtn) {
+      closeReleaseFormBtn.addEventListener('click', function () {
+        if (releaseFormModal) releaseFormModal.classList.remove('open');
+      });
+    }
+    if (cancelReleaseFormBtn) {
+      cancelReleaseFormBtn.addEventListener('click', function () {
+        if (releaseFormModal) releaseFormModal.classList.remove('open');
+      });
+    }
+
+    const rfTracksInput = document.getElementById('rfTracksInput');
+    if (rfTracksInput) {
+      rfTracksInput.addEventListener('input', updateRfTracksPreview);
+    }
+
+    async function runReleaseLookup() {
+      const inputEl = document.getElementById('releaseLookupInput');
+      const resultsEl = document.getElementById('releaseLookupResults');
+      if (!inputEl || !resultsEl || !trackResolver || typeof trackResolver.lookupReleaseCandidates !== 'function') return;
+      const q = inputEl.value.trim();
+      if (!q) return;
+      resultsEl.classList.remove('hidden');
+      resultsEl.innerHTML = '<div class="preset-sub">Searching MusicBrainz &amp; iTunes...</div>';
+      try {
+        const candidates = await trackResolver.lookupReleaseCandidates(q);
+        rfLookupCandidates = Array.isArray(candidates) ? candidates : [];
+        if (rfLookupCandidates.length === 0) {
+          resultsEl.innerHTML = '<div class="preset-sub">No matching releases found — enter details manually below.</div>';
+          return;
+        }
+        resultsEl.innerHTML = rfLookupCandidates.map(function (c, idx) {
+          const trackCnt = Array.isArray(c.tracks) ? c.tracks.length : 0;
+          return (
+            '<button type="button" class="lookup-cand-btn" data-lookup-idx="' + idx + '">' +
+              '<div style="min-width:0;">' +
+                '<div style="font-size:12px; font-weight:700;">' + escapeHTML(c.artist + ' — ' + c.title) + '</div>' +
+                '<div class="preset-sub">' + escapeHTML([c.catNo, c.editionLabel, c.barcode].filter(Boolean).join(' · ') || 'No catalog #') + '</div>' +
+              '</div>' +
+              '<span class="tag-sky">' + trackCnt + ' tracks</span>' +
+            '</button>'
+          );
+        }).join('');
+      } catch (err) {
+        resultsEl.innerHTML = '<div class="preset-sub">Lookup unavailable offline.</div>';
+      }
+    }
+
+    const releaseLookupBtn = document.getElementById('releaseLookupBtn');
+    const releaseLookupInput = document.getElementById('releaseLookupInput');
+    if (releaseLookupBtn) {
+      releaseLookupBtn.addEventListener('click', runReleaseLookup);
+    }
+    if (releaseLookupInput) {
+      releaseLookupInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          runReleaseLookup();
+        }
+      });
+    }
+
+    const releaseLookupResults = document.getElementById('releaseLookupResults');
+    if (releaseLookupResults) {
+      releaseLookupResults.addEventListener('click', function (e) {
+        const btn = e.target.closest('[data-lookup-idx]');
+        if (!btn) return;
+        const idx = parseInt(btn.getAttribute('data-lookup-idx'), 10);
+        const c = rfLookupCandidates[idx];
+        if (!c) return;
+        document.getElementById('rfArtist').value = c.artist || '';
+        document.getElementById('rfArtistJa').value = c.artistJa || '';
+        document.getElementById('rfTitle').value = c.title || '';
+        document.getElementById('rfTitleJa').value = c.titleJa || '';
+        if (c.catNo) document.getElementById('rfCatNo').value = c.catNo;
+        if (c.editionLabel) document.getElementById('rfEditionLabel').value = c.editionLabel;
+        if (c.barcode) document.getElementById('rfBarcode').value = c.barcode;
+        if (c.mbid) document.getElementById('rfMbid').value = c.mbid;
+        if (Array.isArray(c.tracks) && c.tracks.length > 0 && trackResolver) {
+          const text = trackResolver.formatTracklistForEdit(c.tracks);
+          document.getElementById('rfTracksInput').value = text;
+          rfDraftTracksOrigText = text;
+          rfDraftTrackSource = c.trackSource || 'musicbrainz';
+          updateRfTracksPreview();
+        }
+        releaseLookupResults.classList.add('hidden');
+        showToast('Applied lookup candidate');
+      });
+    }
+
+    const saveReleaseFormBtn = document.getElementById('saveReleaseFormBtn');
+    if (saveReleaseFormBtn) {
+      saveReleaseFormBtn.addEventListener('click', async function () {
+        if (!collectionMod || !db || typeof db.putOwnedRelease !== 'function') return;
+        const idVal = document.getElementById('rfId').value.trim();
+        const artist = document.getElementById('rfArtist').value.trim();
+        const artistJa = document.getElementById('rfArtistJa').value.trim();
+        const title = document.getElementById('rfTitle').value.trim();
+        const titleJa = document.getElementById('rfTitleJa').value.trim();
+        const category = document.getElementById('rfCategory').value.trim() || 'Uncategorized';
+        const rawCatNo = document.getElementById('rfCatNo').value.trim();
+        const editionLabel = document.getElementById('rfEditionLabel').value.trim();
+        const rawBarcode = document.getElementById('rfBarcode').value.trim();
+        const mbid = document.getElementById('rfMbid').value.trim();
+        const purchasePrice = document.getElementById('rfPurchasePrice').value.trim();
+        const purchaseShop = document.getElementById('rfPurchaseShop').value.trim();
+        const purchaseDate = document.getElementById('rfPurchaseDate').value.trim();
+        const notes = document.getElementById('rfNotes').value.trim();
+        const tracksText = document.getElementById('rfTracksInput').value;
+
+        if (!artist || !title || !rawCatNo) {
+          showToast('Artist, Title, and Catalog Number are required');
+          return;
+        }
+        const cleanBarcode = rawBarcode.replace(/[\s-]+/g, '').trim();
+        if (cleanBarcode && !/^\d{8,14}$/.test(cleanBarcode)) {
+          showToast('Barcode must contain 8 to 14 digits');
+          return;
+        }
+        if (mbid && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(mbid)) {
+          showToast('MusicBrainz ID must be a valid UUID');
+          return;
+        }
+
+        const existingOwned = idVal ? findOwnedById(idVal) : null;
+        const parsedTracks = trackResolver && tracksText.trim()
+          ? trackResolver.parseTracklistText(tracksText)
+          : [];
+        const tracksEdited = tracksText !== rfDraftTracksOrigText;
+        const trackSource = parsedTracks.length > 0
+          ? (tracksEdited ? 'manual' : (rfDraftTrackSource || 'manual'))
+          : undefined;
+
+        const nowMs = Date.now();
+        const record = collectionMod.createOwnedRelease(
+          {
+            id: idVal || collectionMod.generateReleaseId(rawCatNo, ownedAllReleases),
+            artist: artist,
+            artistJa: artistJa,
+            title: title,
+            titleJa: titleJa,
+            category: category,
+            catNo: rawCatNo,
+            editionLabel: editionLabel,
+            barcode: cleanBarcode,
+            mbid: mbid,
+            tracks: parsedTracks.length > 0 ? parsedTracks : undefined,
+            trackSource: trackSource,
+            customCovers: (existingOwned && existingOwned.customCovers) || rfDraftCustomCovers || undefined,
+            selectedVariant: (existingOwned && existingOwned.selectedVariant) || rfDraftSelectedVariant || undefined,
+            purchasePrice: purchasePrice,
+            purchaseShop: purchaseShop,
+            purchaseDate: purchaseDate,
+            notes: notes,
+            createdAt: existingOwned && Number.isInteger(existingOwned.createdAt) ? existingOwned.createdAt : nowMs,
+            clientUpdatedAt: nowMs,
+            syncSeq: existingOwned && existingOwned.syncSeq !== undefined ? existingOwned.syncSeq : null,
+            deletedAt: null,
+            dirty: 1
+          },
+          nowMs
+        );
+
+        const stored = await db.putOwnedRelease(record);
+        if (parsedTracks.length > 0 && tracksEdited && trackResolver && typeof db.putManualTracks === 'function') {
+          const rKey = trackResolver.deriveTrackReleaseKey(collectionMod.ownedToDisplayItem(record));
+          if (rKey) {
+            const manualRec = {
+              releaseKey: rKey,
+              trackSource: 'manual',
+              sourceDetail: 'Custom',
+              updatedAt: nowMs,
+              tracks: parsedTracks
+            };
+            manualTracksByKey[rKey] = manualRec;
+            await db.putManualTracks(manualRec);
+          }
+        }
+
+        await upsertLocalOwnedState(stored || record);
+        if (releaseFormModal) releaseFormModal.classList.remove('open');
+        renderCategoryPills();
+        renderAll();
+        const modal = document.getElementById('lightboxModal');
+        if (isCollectionMode() && modal && modal.classList.contains('open')) {
+          renderLightbox();
+        }
+        scheduleCollectionSync();
+        showToast(existingOwned ? 'Updated release: ' + record.catNo : 'Added to Collection: ' + record.catNo);
+      });
+    }
+
+    // ── Phase 2: Collection JSON & Google Sheet Sync Modal ──
+    const collectionBackupModal = document.getElementById('collectionBackupModal');
+    const collectionBackupBtn = document.getElementById('collectionBackupBtn');
+    const collectionBackupTextarea = document.getElementById('collectionBackupTextarea');
+
+    function openCollectionBackupModal() {
+      if (!collectionBackupModal || !collectionMod) return;
+      const snapshot = collectionMod.exportCollectionJson(
+        ownedReleases,
+        ownedSheetUrl ? { ownedSheetUrl: ownedSheetUrl } : undefined
+      );
+      if (collectionBackupTextarea) {
+        collectionBackupTextarea.value = JSON.stringify(snapshot, null, 2);
+      }
+      const sheetInput = document.getElementById('ownedSheetUrlInput');
+      if (sheetInput && !sheetInput.value && ownedSheetUrl) {
+        sheetInput.value = ownedSheetUrl;
+      }
+      const botBanner = document.getElementById('ownedSheetBotBanner');
+      if (botBanner) {
+        if (sheetSyncBotEmail) {
+          botBanner.textContent = 'Two-way Google Sheet sync: share your Owned Sheet as Editor with ' + sheetSyncBotEmail;
+          botBanner.classList.remove('hidden');
+        } else {
+          botBanner.classList.add('hidden');
+          loadSheetSyncBotInfo();
+        }
+      }
+      const agentColBtn = document.getElementById('copyCollectionAgentLinkBtn');
+      if (agentColBtn) {
+        agentColBtn.classList.toggle('hidden', !(syncSession && syncShareUrl));
+      }
+      collectionBackupModal.classList.add('open');
+    }
+
+    if (collectionBackupBtn) {
+      collectionBackupBtn.addEventListener('click', openCollectionBackupModal);
+    }
+
+    const closeCollectionBackupBtn = document.getElementById('closeCollectionBackupBtn');
+    if (closeCollectionBackupBtn) {
+      closeCollectionBackupBtn.addEventListener('click', function () {
+        if (collectionBackupModal) collectionBackupModal.classList.remove('open');
+      });
+    }
+
+    const copyCollectionBackupBtn = document.getElementById('copyCollectionBackupBtn');
+    if (copyCollectionBackupBtn) {
+      copyCollectionBackupBtn.addEventListener('click', function () {
+        if (collectionBackupTextarea) copyText(collectionBackupTextarea.value, 'Copied Collection JSON');
+      });
+    }
+
+    const downloadCollectionJsonBtn = document.getElementById('downloadCollectionJsonBtn');
+    if (downloadCollectionJsonBtn) {
+      downloadCollectionJsonBtn.addEventListener('click', function () {
+        if (!collectionBackupTextarea) return;
+        try {
+          if (typeof Blob === 'function' && window.URL && typeof window.URL.createObjectURL === 'function') {
+            const blob = new Blob([collectionBackupTextarea.value], { type: 'application/json' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'owned-collection.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            if (typeof window.URL.revokeObjectURL === 'function') window.URL.revokeObjectURL(url);
+            showToast('Downloaded owned-collection.json');
+            return;
+          }
+        } catch (err) {}
+        copyText(collectionBackupTextarea.value, 'Copied Collection JSON');
+      });
+    }
+
+    const uploadCollectionJsonBtn = document.getElementById('uploadCollectionJsonBtn');
+    const collectionJsonFileInput = document.getElementById('collectionJsonFileInput');
+    if (uploadCollectionJsonBtn && collectionJsonFileInput) {
+      uploadCollectionJsonBtn.addEventListener('click', function () {
+        collectionJsonFileInput.click();
+      });
+      collectionJsonFileInput.addEventListener('change', async function (e) {
+        const files = (e && e.target && e.target.files) || collectionJsonFileInput.files;
+        const file = files && files[0];
+        if (!file || !collectionBackupTextarea) return;
+        try {
+          const text = typeof file.text === 'function'
+            ? await file.text()
+            : await new Promise(function (resolve, reject) {
+                const reader = new FileReader();
+                reader.onload = function () { resolve(String(reader.result || '')); };
+                reader.onerror = function () { reject(new Error('Failed to read JSON file')); };
+                reader.readAsText(file);
+              });
+          collectionBackupTextarea.value = text;
+          showToast('Loaded ' + (file.name || 'file') + ' — click Merge JSON or Replace All');
+        } catch (err) {
+          showToast('Failed to read JSON file');
+        } finally {
+          collectionJsonFileInput.value = '';
+        }
+      });
+    }
+
+    async function handleCollectionJsonImport(mode) {
+      if (!collectionMod || !db || !collectionBackupTextarea || typeof db.putOwnedReleasesBatch !== 'function') return;
+      let parsed;
+      try {
+        parsed = JSON.parse(collectionBackupTextarea.value);
+      } catch (err) {
+        showToast('Invalid JSON format');
+        return;
+      }
+      const plan = collectionMod.planCollectionJsonImport(parsed, ownedAllReleases, mode);
+      if (!plan.ok) {
+        showToast('Validation failed: ' + (plan.errors[0] || 'Invalid schema'));
+        return;
+      }
+      if (plan.toUpsert.length > 0) {
+        await db.putOwnedReleasesBatch(plan.toUpsert);
+        await hydrateOwnedFromDb();
+        scheduleCollectionSync();
+      }
+      if (collectionBackupModal) collectionBackupModal.classList.remove('open');
+      showToast(
+        'Collection import (' + mode + '): +' + plan.addedCount + ' added, ' +
+        plan.updatedCount + ' updated' + (plan.deletedCount > 0 ? ', ' + plan.deletedCount + ' removed' : '')
+      );
+    }
+
+    const importCollectionMergeBtn = document.getElementById('importCollectionMergeBtn');
+    const importCollectionReplaceBtn = document.getElementById('importCollectionReplaceBtn');
+    if (importCollectionMergeBtn) {
+      importCollectionMergeBtn.addEventListener('click', function () { handleCollectionJsonImport('merge'); });
+    }
+    if (importCollectionReplaceBtn) {
+      importCollectionReplaceBtn.addEventListener('click', function () { handleCollectionJsonImport('replace'); });
+    }
+
+    const copyCollectionAgentLinkBtn = document.getElementById('copyCollectionAgentLinkBtn');
+    if (copyCollectionAgentLinkBtn) {
+      copyCollectionAgentLinkBtn.addEventListener('click', function () {
+        if (!syncShareUrl) return;
+        copyText(syncShareUrl + '?format=markdown&include=collection', 'Copied Agent Collection status link');
+      });
+    }
+
+    async function persistLastOwnedSheetUrl(url) {
+      ownedSheetUrl = url;
+      if (db && typeof db.getSyncMeta === 'function' && typeof db.putSyncMeta === 'function') {
+        const meta = (await db.getSyncMeta('collectionSync')) || { lastSyncSeq: 0, lastPulledAt: 0, lastPushedAt: 0 };
+        meta.lastOwnedSheetUrl = url;
+        await db.putSyncMeta('collectionSync', meta);
+      }
+    }
+
+    const importOwnedSheetBtn = document.getElementById('importOwnedSheetBtn');
+    if (importOwnedSheetBtn) {
+      importOwnedSheetBtn.addEventListener('click', async function () {
+        if (!sheetAdapter || !collectionMod || !db || typeof db.putOwnedReleasesBatch !== 'function') return;
+        const inputEl = document.getElementById('ownedSheetUrlInput');
+        const rawUrl = inputEl ? inputEl.value.trim() : '';
+        const csvUrl = normalizeCatalogUrl(rawUrl);
+        if (!csvUrl || !sheetAdapter.isGoogleSheetCsvUrl(csvUrl)) {
+          showToast('Enter a valid Google Sheet URL');
+          return;
+        }
+        try {
+          const res = await fetch(csvUrl);
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const csvText = await res.text();
+          const parsed = sheetAdapter.parseOwnedSheetCsv(csvText);
+          const plan = collectionMod.planOwnedSheetMerge(parsed.items, ownedAllReleases);
+          if (plan.toUpsert.length > 0) {
+            await db.putOwnedReleasesBatch(plan.toUpsert);
+          }
+          await persistLastOwnedSheetUrl(rawUrl);
+          await hydrateOwnedFromDb();
+          scheduleCollectionSync();
+          if (collectionBackupModal) collectionBackupModal.classList.remove('open');
+          showToast('Imported Owned Sheet: +' + plan.addedCount + ' added, ' + plan.updatedCount + ' merged');
+        } catch (err) {
+          showToast('Failed to import Owned Sheet: ' + (err && err.message ? err.message : String(err)));
+        }
+      });
+    }
+
+    const pushOwnedSheetBtn = document.getElementById('pushOwnedSheetBtn');
+    if (pushOwnedSheetBtn) {
+      pushOwnedSheetBtn.addEventListener('click', async function () {
+        if (!sync || !syncApiUrl || !syncSession || typeof sync.pushOwnedSheetSync !== 'function') {
+          showToast('Sign in with GitHub first to sync to Google Sheets');
+          return;
+        }
+        const inputEl = document.getElementById('ownedSheetUrlInput');
+        const rawUrl = inputEl ? inputEl.value.trim() : '';
+        if (!rawUrl || (sheetAdapter && !sheetAdapter.isGoogleSheetCsvUrl(rawUrl))) {
+          showToast('Enter a valid Google Sheet URL');
+          return;
+        }
+        await persistLastOwnedSheetUrl(rawUrl);
+        await syncCollectionNow();
+        const res = await sync.pushOwnedSheetSync(syncApiUrl, syncSession.token, rawUrl);
+        if (res.ok) {
+          showToast('Synced ' + res.writtenRows + ' owned row(s) to Google Sheet');
+        } else if (res.skipped) {
+          showToast('Sheet sync unavailable: service account not configured');
+        } else {
+          showToast('Google Sheet sync failed: ' + (res.error || 'Try again later'));
+        }
+      });
+    }
+
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'hidden') {
         flushPendingCloudPush({ keepalive: true });
+        flushPendingCollectionSync({ keepalive: true });
       }
     });
     if (typeof window.addEventListener === 'function') {
       window.addEventListener('pagehide', function () {
         flushPendingCloudPush({ keepalive: true });
+        flushPendingCollectionSync({ keepalive: true });
       });
     }
   }
@@ -2310,9 +3721,18 @@
     }
 
     try {
+      const params = new URLSearchParams(window.location.search || '');
+      const initialMode = params.get('mode') === 'collection' ? 'collection' : 'hunt';
+      if (initialMode === 'collection') {
+        appMode = 'collection';
+        updateModeUI();
+      }
+
       await hydrateTracksFromDb();
+      await hydrateOwnedFromDb();
 
       let needsCloudBackfill = false;
+      let statePullOk = false;
       if (sync && syncApiUrl && syncSession) {
         const pullRes = await sync.pullCloudState(syncApiUrl, syncSession.token);
         if (pullRes.unauthorized) {
@@ -2326,6 +3746,7 @@
         } else if (pullRes.offline || !pullRes.ok) {
           updateSyncUI('Offline — saved locally', 'muted');
         } else {
+          statePullOk = true;
           const localPayload = sync.buildLocalSyncPayload(storage, null, null, null);
           if (pullRes.state) {
             const mergeRes = sync.mergeAndApplyCloudState(storage, localPayload, pullRes.state);
@@ -2338,7 +3759,10 @@
         }
       }
 
-      const params = new URLSearchParams(window.location.search || '');
+      if (statePullOk && syncSession) {
+        await syncCollectionNow({ quietOnIdle: true });
+      }
+
       const queryUrl = params.get('catalog');
       const savedUrl = typeof storage.getActiveCatalogUrl === 'function' ? storage.getActiveCatalogUrl() : null;
       const initialUrl = queryUrl || savedUrl;
@@ -2349,11 +3773,14 @@
           await loadAndApplyCatalogFromUrl(initialUrl);
         } else if (window.CD_HUNT_CATALOG) {
           applyValidatedCatalog(window.CD_HUNT_CATALOG, {});
-        } else {
+        } else if (initialMode !== 'collection') {
           const loadedUserRepo = syncSession ? await tryLoadUserMetadataRepo(syncSession.user.login) : false;
           if (!loadedUserRepo) {
             showCatalogLoader(true);
           }
+        }
+        if (initialMode === 'collection') {
+          setAppMode('collection', { skipQuerySync: true });
         }
       } finally {
         suppressSyncPush = false;

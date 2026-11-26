@@ -1,8 +1,8 @@
 # Phase 2 Design: Owned Releases Database, Incremental Sync & Hunt Cross-Referencing
 
 > [!IMPORTANT]
-> **Status: Planned Design Specification (Not Yet Implemented)**
-> Builds directly on Phase 1's shared `tracks[]` schema, `js/db.js` IndexedDB foundation, and variant-aware track matcher to add a dedicated **Owned Collection** mode alongside **Hunt** mode.
+> **Status: Completed (Implemented & Verified)**
+> Builds directly on Phase 1's shared `tracks[]` schema, `js/db.js` IndexedDB foundation, and variant-aware track matcher to provide a dedicated **Owned Collection** mode alongside **Hunt** mode (`schemas/collection.v1.schema.json`, `js/collection.js`, `js/db.js`, `js/sync.js`, `js/sheet-adapter.js`, `worker/schema.sql`, `worker/index.js`).
 
 ---
 
@@ -173,7 +173,9 @@ While browsing **Hunt** mode, cards and Crate Flip cross-reference the in-memory
   - `GET /api/collection?since=`, paginated `hasMore`, strict `github_id` tenant isolation.
   - `POST /api/collection/batch` atomic `sync_seq` assignment, tombstone writes, 1-write-per-batch hourly cap accounting, `PAUSE_SYNC` & daily circuit breaker `503`.
   - Collection share output on `/api/share/<token>` & Owned Sheet sync-out via mock Sheets API.
-- **Full-Stack System Tests:**
+- **Frontend Integration & Full-Stack System Tests (`test/catalog-integration.test.js`, `test/cloud-sync-system.test.js`):**
+  - **Shared `releaseKey` reuse & Sheet/JSON overlay enrichment:** Verify that IndexedDB `track_cache` and `manual_tracks` keyed by `releaseKey` are shared across different Hunt catalogs and between Hunt mode and Owned Collection without refetching, and that a JSON sidecar overlay enriching a Google Sheet catalog cleanly supplies `tracks[]`, `barcode`, and `mbid`.
+  - **Cloud-sync payload isolation:** Verify against the real Worker + SQLite that Hunt-mode auto-fetched `track_cache` and `manual_tracks` stay strictly local in IndexedDB and never leak into `user_state.state_json` or trigger spurious `PUT /api/state` pushes, while Owned Collection `tracks[]` sync incrementally via `/api/collection/batch`.
   - Two simulated offline devices adding/editing/deleting owned releases and converging cleanly via Worker + SQLite.
   - Hunt → Owned graduation workflow and lossless JSON backup/restore round-trip.
 - **Headless Chromium E2E (`scripts/e2e-browser.mjs`):**

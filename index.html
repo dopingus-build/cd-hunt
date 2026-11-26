@@ -32,12 +32,19 @@
         </div>
 
         <div class="toolbar">
+          <div id="modeSwitcher" class="mode-switcher" role="tablist" aria-label="Workspace Mode">
+            <button id="modeHuntBtn" type="button" class="mode-tab active" role="tab" aria-selected="true">Hunt</button>
+            <button id="modeCollectionBtn" type="button" class="mode-tab" role="tab" aria-selected="false">Collection</button>
+          </div>
           <button id="viewModeBtn" type="button" class="btn">
             <span id="viewModeLabel">1-Col View</span>
           </button>
           <button id="huntingOnlyBtn" type="button" class="btn">
             <span class="status-dot"></span>
             <span>Hunting Only</span>
+          </button>
+          <button id="batchGraduateBtn" type="button" class="btn hidden" title="Move checked physical Hunt items into Owned Collection">
+            <span>Move Found to Collection</span>
           </button>
           <button id="refreshAllBtn" type="button" class="btn" title="Clear cover cache and re-fetch Regular Editions first">
             <span>Refresh Covers</span>
@@ -47,6 +54,12 @@
           </button>
           <button id="openCatalogLoaderBtn" type="button" class="btn" title="Load or switch catalog metadata URL or local JSON">
             <span>Catalog</span>
+          </button>
+          <button id="addReleaseBtn" type="button" class="btn btn-primary hidden" title="Add an owned CD / BD release">
+            <span>+ Add Release</span>
+          </button>
+          <button id="collectionBackupBtn" type="button" class="btn hidden" title="Export / Import Owned Collection JSON &amp; Google Sheet Sync">
+            <span>Backup / Sheet</span>
           </button>
           <span id="syncStatusPill" class="sync-pill hidden" aria-live="polite"></span>
           <button id="githubAuthBtn" type="button" class="btn hidden" title="Sign in with GitHub (public identity only) to sync progress">
@@ -85,6 +98,12 @@
 
       <!-- Aisle Filter Pills -->
       <div id="categoryPills" class="pills-row"></div>
+      <div id="collectionQuickFilters" class="col-quick-filters hidden" role="group" aria-label="Collection Quick Filters">
+        <button type="button" class="pill active" data-action="set-col-filter" data-filter="all">All</button>
+        <button type="button" class="pill" data-action="set-col-filter" data-filter="has-tracks">Has Tracks</button>
+        <button type="button" class="pill" data-action="set-col-filter" data-filter="missing-tracks">Missing Tracks</button>
+        <button type="button" class="pill" data-action="set-col-filter" data-filter="has-notes">Has Notes</button>
+      </div>
     </div>
   </header>
 
@@ -209,12 +228,17 @@
           </div>
 
           <div class="filing-box">
-            <strong>どこで探す (Shelf):</strong> <span id="lbFiling"></span>
+            <strong id="lbFilingLabel">どこで探す (Shelf):</strong> <span id="lbFiling"></span>
             <div id="lbShopsRow" class="shops-row hidden"><strong>Recommended Shops:</strong> <span id="lbShops"></span></div>
           </div>
 
+          <div id="lbOwnedCrossRefBox" class="lb-crossref-box hidden"></div>
+
           <div class="badges-wrap">
             <button id="lbAcquireBtn" type="button" class="btn btn-primary" style="flex:1; min-width:140px;"></button>
+            <button id="lbGraduateBtn" type="button" class="btn hidden">Add to Collection →</button>
+            <button id="lbEditReleaseBtn" type="button" class="btn hidden">Edit Release</button>
+            <button id="lbDeleteReleaseBtn" type="button" class="btn hidden" style="color:#fda4af;">Delete</button>
             <button id="lbRefreshCoverBtn" type="button" class="btn">↻ Re-fetch Covers</button>
             <button id="lbToggleCustomBtn" type="button" class="btn">+ Add Cover Variant</button>
             <a id="lbGoogleSearchLink" href="#" target="_blank" rel="noopener noreferrer" class="btn" style="text-decoration:none; color:#7dd3fc;">Search Jacket ↗</a>
@@ -304,6 +328,135 @@
     </div>
   </div>
 
+  <!-- Add / Edit Owned Release Modal -->
+  <div id="releaseFormModal" class="modal-backdrop" role="dialog" aria-modal="true">
+    <div class="modal-inner" style="max-width:640px; margin:auto; background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-xl); padding:18px; display:flex; flex-direction:column; gap:12px;">
+      <div class="modal-top">
+        <h2 id="releaseFormHeading" style="margin:0; font-size:16px; font-weight:800;">Add Owned Release</h2>
+        <button id="closeReleaseFormBtn" type="button" class="btn">Close ✕</button>
+      </div>
+
+      <div class="release-lookup-box">
+        <label for="releaseLookupInput" style="font-size:11px; font-weight:700; color:var(--text-muted);">Quick Lookup (Barcode, Catalog #, or Artist &amp; Title)</label>
+        <div class="release-lookup-row">
+          <input id="releaseLookupInput" class="drawer-input" type="text" placeholder="e.g. LACM-24156, 4540774241569, or Artist Title" />
+          <button id="releaseLookupBtn" type="button" class="btn">Lookup</button>
+        </div>
+        <div id="releaseLookupResults" class="lookup-results hidden"></div>
+      </div>
+
+      <input id="rfId" type="hidden" value="" />
+      <div class="release-form-grid">
+        <label class="rf-field">
+          <span>Artist *</span>
+          <input id="rfArtist" class="drawer-input" type="text" placeholder="Artist name" />
+        </label>
+        <label class="rf-field">
+          <span>Artist (日本語)</span>
+          <input id="rfArtistJa" class="drawer-input" type="text" placeholder="アーティスト名" />
+        </label>
+        <label class="rf-field">
+          <span>Title *</span>
+          <input id="rfTitle" class="drawer-input" type="text" placeholder="Release title" />
+        </label>
+        <label class="rf-field">
+          <span>Title (日本語)</span>
+          <input id="rfTitleJa" class="drawer-input" type="text" placeholder="タイトル" />
+        </label>
+        <label class="rf-field">
+          <span>Catalog Number *</span>
+          <input id="rfCatNo" class="drawer-input" type="text" placeholder="e.g. LACM-24156" />
+        </label>
+        <label class="rf-field">
+          <span>Edition</span>
+          <input id="rfEditionLabel" class="drawer-input" type="text" placeholder="e.g. 通常盤 Regular / 初回盤 CD+BD" />
+        </label>
+        <label class="rf-field">
+          <span>Category / Aisle *</span>
+          <input id="rfCategory" class="drawer-input" type="text" placeholder="e.g. Anime OST / J-Rock" />
+        </label>
+        <label class="rf-field">
+          <span>JAN / EAN Barcode</span>
+          <input id="rfBarcode" class="drawer-input" type="text" placeholder="13 digits (optional)" />
+        </label>
+        <label class="rf-field">
+          <span>MusicBrainz UUID</span>
+          <input id="rfMbid" class="drawer-input" type="text" placeholder="Optional MBID UUID" />
+        </label>
+        <label class="rf-field">
+          <span>Purchase Price</span>
+          <input id="rfPurchasePrice" class="drawer-input" type="text" placeholder="e.g. ¥900" />
+        </label>
+        <label class="rf-field">
+          <span>Purchase Shop</span>
+          <input id="rfPurchaseShop" class="drawer-input" type="text" placeholder="e.g. Book Off Nipponbashi" />
+        </label>
+        <label class="rf-field">
+          <span>Purchase Date</span>
+          <input id="rfPurchaseDate" class="drawer-input" type="text" placeholder="YYYY-MM-DD" />
+        </label>
+      </div>
+
+      <label class="rf-field">
+        <span>Notes</span>
+        <input id="rfNotes" class="drawer-input" type="text" placeholder="Obi present, mint condition, signed, etc." />
+      </label>
+
+      <label class="rf-field">
+        <span style="display:flex; justify-content:space-between; align-items:center;">
+          <span>Track List (optional — supports Disc headers &amp; durations)</span>
+          <span id="rfTracksPreview" class="count-mono">0 tracks</span>
+        </span>
+        <textarea id="rfTracksInput" class="track-editor-textarea" spellcheck="false" placeholder="01. Track One (4:12)&#10;02. Track Two (3:45)"></textarea>
+      </label>
+
+      <div class="badges-wrap" style="justify-content:flex-end;">
+        <button id="cancelReleaseFormBtn" type="button" class="btn">Cancel</button>
+        <button id="saveReleaseFormBtn" type="button" class="btn btn-primary">Save Release</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Owned Collection JSON & Google Sheet Sync Modal -->
+  <div id="collectionBackupModal" class="modal-backdrop" role="dialog" aria-modal="true">
+    <div class="modal-inner" style="max-width:620px; margin:auto; background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-xl); padding:18px; display:flex; flex-direction:column; gap:12px;">
+      <div class="modal-top">
+        <h2 style="margin:0; font-size:16px; font-weight:800;">Owned Collection Backup &amp; Google Sheet Sync</h2>
+        <button id="closeCollectionBackupBtn" type="button" class="btn">Close ✕</button>
+      </div>
+
+      <p style="margin:0; font-size:12px; color:var(--text-muted);">
+        Export a lossless <code>owned-collection.json</code> snapshot (tracks, editions, custom covers, and notes), import via Merge or Replace, or mirror to an 11-column Google Sheet.
+      </p>
+
+      <textarea id="collectionBackupTextarea" class="backup-textarea" spellcheck="false"></textarea>
+      <input id="collectionJsonFileInput" type="file" accept=".json,application/json" class="hidden" />
+
+      <div class="badges-wrap" style="justify-content:space-between;">
+        <div class="badges-wrap">
+          <button id="copyCollectionBackupBtn" type="button" class="btn">Copy JSON</button>
+          <button id="downloadCollectionJsonBtn" type="button" class="btn">Download JSON</button>
+          <button id="uploadCollectionJsonBtn" type="button" class="btn">Load File</button>
+          <button id="copyCollectionAgentLinkBtn" type="button" class="btn hidden">Agent Collection Link</button>
+        </div>
+        <div class="badges-wrap">
+          <button id="importCollectionMergeBtn" type="button" class="btn btn-primary">Merge JSON</button>
+          <button id="importCollectionReplaceBtn" type="button" class="btn" style="color:#fda4af;">Replace All</button>
+        </div>
+      </div>
+
+      <div class="owned-sheet-sync-box">
+        <label for="ownedSheetUrlInput" style="font-size:11px; font-weight:700; color:var(--text-muted);">Owned Collection Google Sheet URL (optional <code>#gid=</code> tab supported)</label>
+        <div id="ownedSheetBotBanner" class="catalog-url-pill hidden"></div>
+        <div class="release-lookup-row">
+          <input id="ownedSheetUrlInput" class="drawer-input" type="url" placeholder="https://docs.google.com/spreadsheets/d/.../edit#gid=..." />
+          <button id="importOwnedSheetBtn" type="button" class="btn">Import Sheet</button>
+          <button id="pushOwnedSheetBtn" type="button" class="btn btn-primary">Sync to Sheet</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast -->
   <div id="toast" class="toast">Copied!</div>
 
@@ -315,6 +468,7 @@
   <script src="./js/config.js"></script>
   <script src="./js/sync.js"></script>
   <script src="./js/sheet-adapter.js"></script>
+  <script src="./js/collection.js"></script>
   <script src="./js/app.js"></script>
 </body>
 </html>

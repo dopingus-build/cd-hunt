@@ -26,6 +26,10 @@ function createSqliteD1Database() {
               const row = stmt.get(...params);
               return row === undefined ? null : row;
             },
+            async all() {
+              const results = stmt.all(...params);
+              return { results, success: true };
+            },
             async run() {
               const info = stmt.run(...params);
               return { success: true, meta: { changes: Number(info.changes) || 0 } };
@@ -33,6 +37,20 @@ function createSqliteD1Database() {
           };
         }
       };
+    },
+    async batch(statements) {
+      db.exec('BEGIN');
+      try {
+        const out = [];
+        for (const s of statements) {
+          out.push(await s.run());
+        }
+        db.exec('COMMIT');
+        return out;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
     },
     queryRaw(sql, ...params) {
       return db.prepare(sql).all(...params);
@@ -868,5 +886,273 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
     assert.equal(sharePausedRes.status, 503);
     assert.equal(sharePausedRes.headers.get('access-control-allow-origin'), '*');
     assert.equal((await sharePausedRes.json()).paused, true);
+  });
+
+  it('syncs incremental owned_releases via GET /api/collection & POST /api/collection/batch with atomic sync_seq, tombstones, LWW conflicts, tenant isolation, and limits', async (t) => {
+    const env = await startIntegrationServers({
+      USER_HOURLY_WRITE_LIMIT: '2',
+      MAX_PAYLOAD_BYTES: '4096'
+    });
+    t.after(() => env.close());
+
+    const { token: aliceToken } = await env.loginViaHttp('code_alice');
+    const { token: bobToken } = await env.loginViaHttp('code_bob');
+
+    // Empty GET /api/collection and GET /api/state stays clean before any writes
+    const initialCol = await (
+      await fetch(`${env.workerBaseUrl}/api/collection`, {
+        headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}` }
+      })
+    ).json();
+    assert.equal(initialCol.ok, true);
+    assert.deepEqual(initialCol.items, []);
+    assert.equal(initialCol.latestSeq, 0);
+
+    // Batch 1: 3 active items in 1 POST -> atomic sync_seq 1..3, 1 hourly write unit, 4 D1 row writes
+    const batch1Res = await fetch(`${env.workerBaseUrl}/api/collection/batch`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items: [
+          {
+            id: 'own-a1',
+            artist: 'Alice Artist',
+            title: 'First Disc',
+            category: 'OST',
+            catNo: 'LACM-1001',
+            tracks: [{ disc: 1, mediaType: 'CD', number: 1, title: 'Opening' }],
+            trackSource: 'manual',
+            customCovers: { variants: [{ url: 'https://img.example/a1.jpg', label: 'Custom', source: 'custom' }], selectedIndex: 0 },
+            clientUpdatedAt: 2000
+          },
+          { id: 'own-a2', artist: 'Alice Artist', title: 'Second Disc', category: 'OST', catNo: 'LACM-1002', clientUpdatedAt: 2100 },
+          { id: 'own-a3', artist: 'Alice Artist', title: 'Third Disc', category: 'Rock', catNo: 'KSCL-1003', clientUpdatedAt: 2200 }
+        ]
+      })
+    });
+    assert.equal(batch1Res.status, 200);
+    const batch1Json = await batch1Res.json();
+    assert.equal(batch1Json.latestSeq, 3);
+    assert.deepEqual(batch1Json.accepted.map((a) => a.syncSeq), [1, 2, 3]);
+    assert.deepEqual(batch1Json.conflicts, []);
+
+    // Confirm Hunt GET /api/state remains null (user_sync_state did NOT pollute user_state)
+    const aliceState = await (
+      await fetch(`${env.workerBaseUrl}/api/state`, {
+        headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}` }
+      })
+    ).json();
+    assert.equal(aliceState.state, null);
+    assert.equal(aliceState.updatedAt, null);
+
+    // Confirm 1 hourly write unit used for the 3-item batch while daily_usage recorded 1 + 3 = 4 row writes
+    const syncStateRow = env.db.queryRaw("SELECT next_seq, hour_writes FROM user_sync_state WHERE github_id = '1001'");
+    assert.equal(syncStateRow[0].next_seq, 3);
+    assert.equal(syncStateRow[0].hour_writes, 1);
+    const dailyRow = env.db.queryRaw('SELECT write_count FROM daily_usage')[0];
+    assert.equal(dailyRow.write_count, 4);
+
+    // Tenant isolation: Bob sees zero items from Alice
+    const bobCol = await (
+      await fetch(`${env.workerBaseUrl}/api/collection?since=0`, {
+        headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${bobToken}` }
+      })
+    ).json();
+    assert.deepEqual(bobCol.items, []);
+
+    // Paginated GET /api/collection?since=0&limit=2 -> hasMore=true, then ?since=2&limit=2
+    const page1 = await (
+      await fetch(`${env.workerBaseUrl}/api/collection?since=0&limit=2`, {
+        headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}` }
+      })
+    ).json();
+    assert.equal(page1.items.length, 2);
+    assert.equal(page1.hasMore, true);
+    assert.equal(page1.nextCursor, 2);
+    assert.equal(page1.latestSeq, 3);
+
+    const page2 = await (
+      await fetch(`${env.workerBaseUrl}/api/collection?since=${page1.nextCursor}&limit=2`, {
+        headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}` }
+      })
+    ).json();
+    assert.equal(page2.items.length, 1);
+    assert.equal(page2.hasMore, false);
+    assert.equal(page2.items[0].id, 'own-a3');
+
+    // Batch 2: stale offline update triggers LWW conflict + soft-delete tombstone succeeds
+    const batch2Res = await fetch(`${env.workerBaseUrl}/api/collection/batch`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items: [
+          { id: 'own-a1', artist: 'Alice', title: 'Stale Offline Title', category: 'OST', catNo: 'LACM-1001', clientUpdatedAt: 1500 },
+          { id: 'own-a2', clientUpdatedAt: 5000, deletedAt: 5000 }
+        ]
+      })
+    });
+    assert.equal(batch2Res.status, 200);
+    const batch2Json = await batch2Res.json();
+    assert.equal(batch2Json.accepted.length, 1);
+    assert.equal(batch2Json.accepted[0].id, 'own-a2');
+    assert.equal(batch2Json.accepted[0].deletedAt, 5000);
+    assert.equal(batch2Json.conflicts.length, 1);
+    assert.equal(batch2Json.conflicts[0].id, 'own-a1');
+    assert.equal(batch2Json.conflicts[0].serverItem.title, 'First Disc');
+
+    // Batch 3 exceeds USER_HOURLY_WRITE_LIMIT=2 -> 429 with Retry-After
+    const batch3Res = await fetch(`${env.workerBaseUrl}/api/collection/batch`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: [{ id: 'own-a4', artist: 'X', title: 'Y', category: 'OST', catNo: 'X-1', clientUpdatedAt: 6000 }] })
+    });
+    assert.equal(batch3Res.status, 429);
+    assert.ok(Number(batch3Res.headers.get('retry-after')) >= 1);
+
+    // Oversized batch > MAX_PAYLOAD_BYTES=4096 -> 413
+    const hugeRes = await fetch(`${env.workerBaseUrl}/api/collection/batch`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${bobToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: [{ id: 'huge', artist: 'A', title: 'T'.repeat(5000), category: 'Rock', catNo: 'H-1', clientUpdatedAt: 1000 }] })
+    });
+    assert.equal(hugeRes.status, 413);
+
+    // >100 items or bad query params -> 400
+    const badSince = await fetch(`${env.workerBaseUrl}/api/collection?since=-1`, {
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}` }
+    });
+    assert.equal(badSince.status, 400);
+
+    // Extended /api/share?include=collection (JSON + Markdown) excludes tombstones & strips customCovers
+    const shareDefault = await (await fetch(aliceState.shareUrl, { headers: { Origin: 'https://agent.example' } })).json();
+    assert.equal(shareDefault.collection, undefined);
+
+    const shareCol = await (
+      await fetch(`${aliceState.shareUrl}?include=collection`, { headers: { Origin: 'https://agent.example' } })
+    ).json();
+    assert.equal(shareCol.collection.count, 2); // own-a2 was soft-deleted
+    const a1Share = shareCol.collection.items.find((i) => i.id === 'own-a1');
+    assert.equal(a1Share.tracks[0].title, 'Opening');
+    assert.equal(a1Share.customCovers, undefined);
+
+    const shareMd = await (
+      await fetch(`${aliceState.shareUrl}?include=collection&format=markdown`, { headers: { Origin: 'https://agent.example' } })
+    ).text();
+    assert.ok(shareMd.includes('## Owned Collection (2 releases)'));
+    assert.ok(shareMd.includes('LACM-1001'));
+    assert.equal(shareMd.includes('LACM-1002'), false);
+  });
+
+  it('writes 11-column Owned Collection rows via POST /api/collection/sheet-sync (#gid= aware) and reports skipped when unconfigured', async (t) => {
+    const keyPair = await crypto.subtle.generateKey(
+      { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+      true,
+      ['sign', 'verify']
+    );
+    const pkcs8 = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey);
+    const pem = `-----BEGIN PRIVATE KEY-----\n${Buffer.from(pkcs8).toString('base64').match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
+
+    const sheetWrites = [];
+    const sheetClears = [];
+    const mockGoogleServer = http.createServer(async (req, res) => {
+      const reqUrl = new URL(req.url, 'http://127.0.0.1');
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const bodyText = Buffer.concat(chunks).toString('utf8');
+
+      if (req.method === 'POST' && reqUrl.pathname === '/oauth/token') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ access_token: 'ya29.col-token', expires_in: 3600 }));
+        return;
+      }
+      if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/ownedSheet01') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ sheets: [{ properties: { sheetId: 77, title: 'Owned' } }] }));
+        return;
+      }
+      if (req.method === 'POST' && reqUrl.pathname.endsWith(':clear')) {
+        sheetClears.push(reqUrl.pathname);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({}));
+        return;
+      }
+      if (req.method === 'PUT' && reqUrl.pathname.includes('/v4/spreadsheets/ownedSheet01/values/')) {
+        sheetWrites.push({ path: reqUrl.pathname, body: JSON.parse(bodyText) });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ updatedRows: 2 }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const googleUrl = await listenServer(mockGoogleServer);
+    t.after(() => closeServer(mockGoogleServer));
+
+    // 1) Unconfigured service account -> { ok: false, skipped: true }
+    const envNoSa = await startIntegrationServers();
+    t.after(() => envNoSa.close());
+    const aliceNoSa = (await envNoSa.loginViaHttp('code_alice')).token;
+    const skippedRes = await (
+      await fetch(`${envNoSa.workerBaseUrl}/api/collection/sheet-sync`, {
+        method: 'POST',
+        headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceNoSa}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ googleSheetUrl: 'https://docs.google.com/spreadsheets/d/ownedSheet01/edit#gid=77' })
+      })
+    ).json();
+    assert.equal(skippedRes.skipped, true);
+
+    // 2) Configured service account -> clears Owned!A1:K5000 and writes 11-column header + active rows
+    const env = await startIntegrationServers({
+      GOOGLE_OAUTH_TOKEN_URL: `${googleUrl}/oauth/token`,
+      GOOGLE_SHEETS_API_BASE_URL: googleUrl,
+      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+        client_email: 'bot@demo.iam.gserviceaccount.com',
+        private_key: pem,
+        token_uri: `${googleUrl}/oauth/token`
+      })
+    });
+    t.after(() => env.close());
+    const aliceToken = (await env.loginViaHttp('code_alice')).token;
+
+    await fetch(`${env.workerBaseUrl}/api/collection/batch`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items: [
+          {
+            id: 'own-s1',
+            artist: 'yama',
+            artistJa: 'ヤマ',
+            title: 'slash',
+            category: 'Anime',
+            catNo: 'SRCL-12539',
+            editionLabel: '通常盤 Regular',
+            barcode: '4547366000011',
+            purchasePrice: '¥1,200',
+            purchaseShop: 'Book Off',
+            purchaseDate: '2026-11-20',
+            notes: 'With obi',
+            tracks: [{ disc: 1, mediaType: 'CD', number: 1, title: 'slash' }],
+            clientUpdatedAt: 3000
+          }
+        ]
+      })
+    });
+
+    const syncRes = await (
+      await fetch(`${env.workerBaseUrl}/api/collection/sheet-sync`, {
+        method: 'POST',
+        headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ googleSheetUrl: 'https://docs.google.com/spreadsheets/d/ownedSheet01/edit#gid=77' })
+      })
+    ).json();
+    assert.equal(syncRes.ok, true);
+    assert.equal(syncRes.writtenRows, 1);
+    assert.equal(syncRes.tabTitle, 'Owned');
+    assert.equal(sheetClears.length, 1);
+    assert.equal(sheetWrites[0].body.values[0].length, 11);
+    assert.equal(sheetWrites[0].body.values[1][0], 'SRCL-12539');
+    assert.equal(sheetWrites[0].body.values[1][3], 'yama (ヤマ)');
+    assert.equal(sheetWrites[0].body.values[1][9], '1');
   });
 });

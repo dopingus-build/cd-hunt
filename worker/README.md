@@ -16,9 +16,17 @@ Cloudflare Worker + Cloudflare D1 backend for optional per-user cloud sync in [*
 | `/auth/callback` | `GET` | `state` JWT | Exchanges `code`, reads GitHub `/user`, discards GitHub token, signs `session` JWT, and returns `302` to verified redirect target (or `APP_REDIRECT_URL`) `#auth_token=<jwt>`. `400` invalid params/state, `502` GitHub error, `500` missing config. |
 | `/api/state` | `GET` | Bearer JWT | Checks origin & circuit breaker, increments daily `req_count`, and returns `{ ok, paused, user, state, updatedAt, resetsAt, shareToken, shareUrl }`. `401` invalid token, `403` bad origin, `503` paused. |
 | `/api/state` | `PUT` | Bearer JWT | Validates payload (`schemaVersion: 1`, `cd_hunt_*` keys, `<= MAX_PAYLOAD_BYTES`), enforces per-user hourly write cap (`429`) and daily circuit breaker (`503`), strips transient `sheetSync`, increments counters, upserts `user_state`, optionally syncs Column A (`Got it?`) back to Google Sheets when `GOOGLE_SERVICE_ACCOUNT_JSON` is configured, and returns `{ ok, paused, updatedAt, resetsAt, shareToken, shareUrl, sheetSync? }`. `400` invalid JSON/schema, `401` unauthorized, `403` bad origin, `413` oversized. |
-| `/api/share/<token>` | `GET` | Capability JWT (`90d` TTL) | Public read-only endpoint (`Access-Control-Allow-Origin: *`) for AI / LLM agents lacking GitHub credentials. Verifies `read_share` JWT (`401`), strips custom covers/internal fields, and returns `{ ok, user: { login }, updatedAt, activeCatalogUrl, catalogs }` or Markdown via `?format=markdown`. Also accepts `/api/share?token=<token>`. |
+| `/api/collection` | `GET` | Session JWT | Incremental delta pull (`?since_seq=<n>&limit=<1..200>`). Returns `{ ok, seq, hasMore, nextSinceSeq, releases[] }` including active records and soft-delete tombstones (`deletedAt`). |
+| `/api/collection/batch` | `POST` | Session JWT | Incremental upsert & tombstone sync (`upserts[]`, `deletes[]`). Assigns atomic monotonic `sync_seq`, enforces LWW timestamps (`conflicts[]`), counts as **1 write** per batch against hourly/daily caps, and enforces size/payload limits (`413`, `429`, `503`). |
+| `/api/collection/sheet-sync` | `POST` | Session JWT + Service Account | Appends newly owned releases as 11-column rows to a shared Google Sheet tab (`#gid=` aware, deduplicated by `ID` or normalized `Catalog Number`). |
+| `/api/share/<token>` | `GET` | Capability JWT (`90d` TTL) | Public read-only endpoint (`Access-Control-Allow-Origin: *`) for AI / LLM agents lacking GitHub credentials. Verifies `read_share` JWT (`401`), strips custom covers/internal fields, and returns Hunt state (`{ ok, user: { login }, updatedAt, activeCatalogUrl, catalogs }`, plus optional `collection[]` when `?include=collection` is passed) or Markdown via `?format=markdown`. Also accepts `/api/share?token=<token>`. |
 | `/api/status` | `GET` | Public | Returns operational health, quota usage, and Google Sheet sync availability (`{ ok, paused, reason, utcDate, resetsAt, usage, limits, sheetSync }`). `403` bad origin. |
-| `/*` | `OPTIONS` | Origin | CORS preflight (`204` if origin allowed, `403` otherwise). Returns `404`/`405` for unknown routes/methods. |
+| `/*` | `OPTIONS` | Origin | CORS preflight supporting `GET, PUT, POST, OPTIONS` (`204` if origin allowed, `403` otherwise). Returns `404`/`405` for unknown routes/methods. |
+
+### Owned Collection D1 Tables & Incremental Sync
+- **`user_sync_state`** tracks each user's monotonic `next_seq`, `hour_window`, and `hour_writes` quota counter.
+- **`owned_releases`** stores `(github_id, release_id)` JSON rows (`client_updated_at`, nullable `deleted_at` tombstone, `sync_seq`) indexed by `(github_id, sync_seq)` for paginated delta sync.
+- Run `node --test test/collection.test.js test/worker-integration.test.js` (or `node --test test/*.test.js`) from the repository root to exercise the SQLite D1-backed worker tests locally.
 
 ## 3. Configuration & Secrets
 

@@ -42,6 +42,10 @@ function createSqliteD1Database() {
               const row = stmt.get(...params);
               return row === undefined ? null : row;
             },
+            async all() {
+              const results = stmt.all(...params);
+              return { results, success: true };
+            },
             async run() {
               const info = stmt.run(...params);
               return { success: true, meta: { changes: Number(info.changes) || 0 } };
@@ -49,6 +53,20 @@ function createSqliteD1Database() {
           };
         }
       };
+    },
+    async batch(statements) {
+      db.exec('BEGIN');
+      try {
+        const out = [];
+        for (const s of statements) {
+          out.push(await s.run());
+        }
+        db.exec('COMMIT');
+        return out;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
     },
     queryRaw(sql, ...params) {
       return db.prepare(sql).all(...params);
@@ -208,7 +226,7 @@ async function attachExternalRoutes(context, appOrigin, workerBaseUrl, opts = {}
             body: JSON.stringify({
               releases: [
                 {
-                  id: 'cpca-1004-mbid-0000-000000000001',
+                  id: '10040000-0000-4000-8000-000000000001',
                   title: 'Breath of Fire III OST',
                   status: 'Official',
                   'label-info': [{ 'catalog-number': 'CPCA-1004' }]
@@ -218,14 +236,14 @@ async function attachExternalRoutes(context, appOrigin, workerBaseUrl, opts = {}
           });
           return;
         }
-        if (reqUrl.pathname === '/ws/2/release/cpca-1004-mbid-0000-000000000001') {
+        if (reqUrl.pathname === '/ws/2/release/10040000-0000-4000-8000-000000000001') {
           stateFlags.mbTrackFetchCount = (stateFlags.mbTrackFetchCount || 0) + 1;
           await route.fulfill({
             status: 200,
             contentType: 'application/json',
             headers: { 'Access-Control-Allow-Origin': '*' },
             body: JSON.stringify({
-              id: 'cpca-1004-mbid-0000-000000000001',
+              id: '10040000-0000-4000-8000-000000000001',
               title: 'Breath of Fire III OST',
               'label-info': [{ 'catalog-number': 'CPCA-1004' }],
               media: [
@@ -921,6 +939,88 @@ async function main() {
         return msg.includes('Loaded cached Google Sheet (offline)') && msg.includes('Merged 1 duplicate row (CPCA-1004)');
       });
 
+      // ── Phase 2 Collection Mode, Cross-Ref, Graduation, IndexedDB Reload, Mobile 375px & SQLite Tombstones ──
+      await pageC.click('#modeCollectionBtn');
+      await pageC.waitForSelector('#addReleaseBtn:not(.hidden)');
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '0 releases · 0 tracks');
+
+      await pageC.click('#addReleaseBtn');
+      await pageC.waitForSelector('#releaseFormModal.open');
+      await pageC.fill('#rfArtist', 'E2E Artist');
+      await pageC.fill('#rfTitle', 'E2E Collection Disc');
+      await pageC.fill('#rfCatNo', 'E2E-1001');
+      await pageC.fill('#rfCategory', 'Game');
+      await pageC.fill('#rfNotes', 'Initial E2E copy');
+      await pageC.fill('#rfTracksInput', '1. Custom E2E Track (3:33)\n2. Hidden B-Side Track (4:44)');
+      await pageC.click('#saveReleaseFormBtn');
+      await pageC.waitForSelector('#releaseFormModal', { state: 'hidden' });
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 release · 2 tracks');
+
+      const ownedSyncDeadline = Date.now() + 4500;
+      let syncedOwnedAdd = false;
+      while (Date.now() < ownedSyncDeadline) {
+        const rows = db.queryRaw("SELECT release_id, data_json, deleted_at FROM owned_releases WHERE github_id = '2002' AND release_id = 'own-e2e-1001'");
+        if (rows.length === 1 && rows[0].deleted_at === null && JSON.parse(rows[0].data_json).catNo === 'E2E-1001') {
+          syncedOwnedAdd = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(syncedOwnedAdd, true, 'Expected Collection release E2E-1001 to sync to SQLite owned_releases');
+
+      // Switch to Hunt mode -> verify Tracks Owned overlap badge renders from shared manual tracklist + graduate CPCA-1004
+      await pageC.click('#modeHuntBtn');
+      await pageC.waitForFunction(() => (document.getElementById('albumGrid')?.innerHTML || '').includes('Tracks Owned: 2/2'));
+      await pageC.click('#openCrateFlipBtn');
+      await pageC.waitForSelector('#lightboxModal.open');
+      await pageC.waitForFunction(() => (document.getElementById('lbOwnedCrossRefBox')?.innerHTML || '').includes('E2E-1001'));
+      await pageC.click('#lbGraduateBtn');
+      await pageC.waitForSelector('#releaseFormModal.open');
+      await pageC.click('#saveReleaseFormBtn');
+      await pageC.waitForSelector('#releaseFormModal', { state: 'hidden' });
+      await pageC.click('#closeLightboxBtn');
+      await pageC.waitForFunction(() => (document.getElementById('albumGrid')?.innerHTML || '').includes('✓ Owned'));
+
+      // Switch to Collection -> reload page with ?mode=collection (offline IndexedDB restore) & assert zero 375px mobile overflow
+      await pageC.click('#modeCollectionBtn');
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent.startsWith('2 releases'));
+      await pageC.reload({ waitUntil: 'domcontentloaded' });
+      await pageC.waitForSelector('#addReleaseBtn:not(.hidden)');
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent.startsWith('2 releases'));
+      await pageC.waitForFunction(() => (document.getElementById('albumGrid')?.innerHTML || '').includes('E2E-1001'));
+
+      await pageC.setViewportSize({ width: 375, height: 812 });
+      const colMobileOverflow = await pageC.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+      assert.equal(colMobileOverflow, false, 'Mobile 375px Collection mode must not overflow horizontally');
+      await pageC.setViewportSize({ width: 1280, height: 800 });
+
+      // Edit first release & soft-delete second release -> verify tombstone synced to SQLite
+      await pageC.click('#openCrateFlipBtn');
+      await pageC.waitForSelector('#lightboxModal.open');
+      await pageC.click('#lbEditReleaseBtn');
+      await pageC.waitForSelector('#releaseFormModal.open');
+      await pageC.fill('#rfNotes', 'Edited E2E note');
+      await pageC.click('#saveReleaseFormBtn');
+      await pageC.waitForSelector('#releaseFormModal', { state: 'hidden' });
+      await pageC.click('#lbDeleteReleaseBtn');
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent.startsWith('1 release'));
+      await pageC.click('#closeLightboxBtn');
+
+      const delDeadline = Date.now() + 4500;
+      let sawTombstone = false;
+      while (Date.now() < delDeadline) {
+        const rows = db.queryRaw("SELECT deleted_at FROM owned_releases WHERE github_id = '2002' AND deleted_at IS NOT NULL");
+        if (rows.length === 1) {
+          sawTombstone = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(sawTombstone, true, 'Expected Collection soft-delete to persist deleted_at tombstone in SQLite');
+
+      await pageC.click('#modeHuntBtn');
+      await pageC.waitForSelector('#openCatalogLoaderBtn:not(.hidden)');
+
       // Local .csv upload via real <input type="file"> + Sign-out keeps local progress
       await pageC.click('#openCatalogLoaderBtn');
       await pageC.waitForSelector('#catalogLoaderScreen:not(.hidden)');
@@ -949,7 +1049,7 @@ async function main() {
       await ctxC.close();
     }
 
-    console.log('✓ Browser E2E checks passed (desktop + 375px mobile, OAuth, multi-device SQLite sync, search/filters + track search, Crate Flip cover-only swipe, jacket search, Track List MB/IndexedDB persistence/paste override, backup modal, Google Sheet + dedup + write-back, /api/share, offline CSV cache, local CSV upload, sign-out, keepalive flush)');
+    console.log('✓ Browser E2E checks passed (desktop + 375px mobile Hunt & Collection, OAuth, multi-device SQLite sync, Collection IndexedDB reload + tombstones + graduation + Owned cross-ref badges, search/filters + track search, Crate Flip cover-only swipe, jacket search, Track List MB/IndexedDB persistence/paste override, backup modal, Google Sheet + dedup + write-back, /api/share, offline CSV cache, local CSV upload, sign-out, keepalive flush)');
   } finally {
     await browser.close();
     await Promise.all([

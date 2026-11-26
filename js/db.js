@@ -7,9 +7,46 @@
   'use strict';
 
   const DB_NAME = 'disk_crate_db_v1';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
   const STORE_TRACK_CACHE = 'track_cache';
   const STORE_MANUAL_TRACKS = 'manual_tracks';
+  const STORE_OWNED_RELEASES = 'owned_releases';
+  const STORE_SYNC_META = 'sync_meta';
+
+  function normalizeCatNo(raw) {
+    return String(raw || '').trim().replace(/[～〜]/g, '~').toUpperCase();
+  }
+
+  function normalizeBarcode(raw) {
+    return String(raw || '').replace(/[\s-]+/g, '').trim();
+  }
+
+  function normalizeOwnedRecord(record) {
+    const clean = cloneRecord(record);
+    clean.id = String(clean.id).trim();
+    if (clean.catNo !== undefined) {
+      clean.catNo = normalizeCatNo(clean.catNo);
+    }
+    if (clean.barcode !== undefined) {
+      clean.barcode = normalizeBarcode(clean.barcode);
+    }
+    clean.dirty = clean.dirty ? 1 : 0;
+    if (clean.deletedAt === undefined) {
+      clean.deletedAt = null;
+    }
+    return clean;
+  }
+
+  function ensureStoreIndex(store, indexName, keyPath) {
+    if (!store || typeof store.createIndex !== 'function') return;
+    const exists =
+      store.indexNames &&
+      typeof store.indexNames.contains === 'function' &&
+      store.indexNames.contains(indexName);
+    if (!exists) {
+      store.createIndex(indexName, keyPath, { unique: false });
+    }
+  }
 
   function cloneRecord(value) {
     if (value === undefined || value === null) return value;
@@ -34,7 +71,9 @@
 
     const memoryStores = {
       [STORE_TRACK_CACHE]: new Map(),
-      [STORE_MANUAL_TRACKS]: new Map()
+      [STORE_MANUAL_TRACKS]: new Map(),
+      [STORE_OWNED_RELEASES]: new Map(),
+      [STORE_SYNC_META]: new Map()
     };
 
     let usingFallback = !idbFactory || typeof idbFactory.open !== 'function';
@@ -80,6 +119,22 @@
           if (!db.objectStoreNames.contains(STORE_MANUAL_TRACKS)) {
             db.createObjectStore(STORE_MANUAL_TRACKS, { keyPath: 'releaseKey' });
           }
+          let ownedStore = null;
+          if (!db.objectStoreNames.contains(STORE_OWNED_RELEASES)) {
+            ownedStore = db.createObjectStore(STORE_OWNED_RELEASES, { keyPath: 'id' });
+          } else if (req.transaction && typeof req.transaction.objectStore === 'function') {
+            ownedStore = req.transaction.objectStore(STORE_OWNED_RELEASES);
+          }
+          if (ownedStore) {
+            ensureStoreIndex(ownedStore, 'by_catNo', 'catNo');
+            ensureStoreIndex(ownedStore, 'by_barcode', 'barcode');
+            ensureStoreIndex(ownedStore, 'by_category', 'category');
+            ensureStoreIndex(ownedStore, 'by_dirty', 'dirty');
+            ensureStoreIndex(ownedStore, 'by_deletedAt', 'deletedAt');
+          }
+          if (!db.objectStoreNames.contains(STORE_SYNC_META)) {
+            db.createObjectStore(STORE_SYNC_META, { keyPath: 'key' });
+          }
         };
 
         req.onsuccess = function () {
@@ -116,8 +171,8 @@
           const store = tx.objectStore(storeName);
           let resultVal;
 
-          const req = idbExecutor(store);
-          if (req) {
+          const req = idbExecutor(store, function (val) { resultVal = val; });
+          if (req && !Array.isArray(req)) {
             req.onsuccess = function () {
               resultVal = req.result;
             };
@@ -206,6 +261,189 @@
       });
     }
 
+    function queryOwnedByIndexOrScan(indexName, keyValue) {
+      return withStore(
+        STORE_OWNED_RELEASES,
+        'readonly',
+        function (store) {
+          if (typeof store.index === 'function') {
+            try {
+              const idx = store.index(indexName);
+              if (idx && typeof idx.getAll === 'function') {
+                return idx.getAll(keyValue);
+              }
+            } catch (err) {}
+          }
+          if (typeof store.getAll === 'function') {
+            return store.getAll();
+          }
+          return null;
+        },
+        function (map) {
+          return Array.from(map.values()).map(cloneRecord);
+        }
+      ).then(function (res) {
+        return Array.isArray(res) ? res : [];
+      });
+    }
+
+    function getOwnedRelease(id) {
+      const key = String(id || '').trim();
+      if (!key) return Promise.resolve(null);
+      return withStore(
+        STORE_OWNED_RELEASES,
+        'readonly',
+        function (store) { return store.get(key); },
+        function (map) { return map.has(key) ? cloneRecord(map.get(key)) : null; }
+      ).then(function (val) {
+        return val === undefined ? null : val;
+      });
+    }
+
+    function putOwnedRelease(record) {
+      if (!record || !record.id) {
+        return Promise.resolve(null);
+      }
+      const clean = normalizeOwnedRecord(record);
+      return withStore(
+        STORE_OWNED_RELEASES,
+        'readwrite',
+        function (store) { return store.put(clean); },
+        function (map) {
+          map.set(clean.id, clean);
+          return clean.id;
+        }
+      ).then(function () {
+        return clean;
+      });
+    }
+
+    function putOwnedReleasesBatch(records) {
+      const list = Array.isArray(records) ? records.filter(function (r) { return r && r.id; }) : [];
+      if (list.length === 0) return Promise.resolve([]);
+      const cleaned = list.map(normalizeOwnedRecord);
+      return withStore(
+        STORE_OWNED_RELEASES,
+        'readwrite',
+        function (store, setResult) {
+          for (let i = 0; i < cleaned.length; i++) {
+            store.put(cleaned[i]);
+          }
+          setResult(cleaned);
+          return null;
+        },
+        function (map) {
+          for (let i = 0; i < cleaned.length; i++) {
+            map.set(cleaned[i].id, cleaned[i]);
+          }
+          return cleaned;
+        }
+      ).then(function () {
+        return cleaned;
+      });
+    }
+
+    function deleteOwnedReleaseHard(id) {
+      const key = String(id || '').trim();
+      if (!key) return Promise.resolve(false);
+      return withStore(
+        STORE_OWNED_RELEASES,
+        'readwrite',
+        function (store) { return store.delete(key); },
+        function (map) { return map.delete(key); }
+      ).then(function () {
+        return true;
+      });
+    }
+
+    function getAllOwnedReleases(opts) {
+      const includeDeleted = !!(opts && opts.includeDeleted);
+      return getAllRecords(STORE_OWNED_RELEASES).then(function (all) {
+        if (includeDeleted) return all;
+        return all.filter(function (r) {
+          return r && (r.deletedAt === null || r.deletedAt === undefined);
+        });
+      });
+    }
+
+    function getDirtyOwnedReleases() {
+      return queryOwnedByIndexOrScan('by_dirty', 1).then(function (rows) {
+        return rows.filter(function (r) { return r && r.dirty === 1; });
+      });
+    }
+
+    function getOwnedReleasesByCatNo(catNo) {
+      const norm = normalizeCatNo(catNo);
+      if (!norm) return Promise.resolve([]);
+      return queryOwnedByIndexOrScan('by_catNo', norm).then(function (rows) {
+        return rows.filter(function (r) {
+          return r && (r.deletedAt === null || r.deletedAt === undefined) && normalizeCatNo(r.catNo) === norm;
+        });
+      });
+    }
+
+    function getOwnedReleasesByBarcode(barcode) {
+      const norm = normalizeBarcode(barcode);
+      if (!norm) return Promise.resolve([]);
+      return queryOwnedByIndexOrScan('by_barcode', norm).then(function (rows) {
+        return rows.filter(function (r) {
+          return r && (r.deletedAt === null || r.deletedAt === undefined) && normalizeBarcode(r.barcode) === norm;
+        });
+      });
+    }
+
+    function clearOwnedReleases() {
+      return withStore(
+        STORE_OWNED_RELEASES,
+        'readwrite',
+        function (store) { return store.clear(); },
+        function (map) { map.clear(); }
+      );
+    }
+
+    function getSyncMeta(key) {
+      const cleanKey = String(key || '').trim();
+      if (!cleanKey) return Promise.resolve(null);
+      return withStore(
+        STORE_SYNC_META,
+        'readonly',
+        function (store) { return store.get(cleanKey); },
+        function (map) { return map.has(cleanKey) ? cloneRecord(map.get(cleanKey)) : null; }
+      ).then(function (row) {
+        return row && Object.prototype.hasOwnProperty.call(row, 'value') ? row.value : null;
+      });
+    }
+
+    function putSyncMeta(key, value) {
+      const cleanKey = String(key || '').trim();
+      if (!cleanKey) return Promise.resolve(null);
+      const entry = { key: cleanKey, value: cloneRecord(value) };
+      return withStore(
+        STORE_SYNC_META,
+        'readwrite',
+        function (store) { return store.put(entry); },
+        function (map) {
+          map.set(cleanKey, entry);
+          return cleanKey;
+        }
+      ).then(function () {
+        return cloneRecord(value);
+      });
+    }
+
+    function deleteSyncMeta(key) {
+      const cleanKey = String(key || '').trim();
+      if (!cleanKey) return Promise.resolve(false);
+      return withStore(
+        STORE_SYNC_META,
+        'readwrite',
+        function (store) { return store.delete(cleanKey); },
+        function (map) { return map.delete(cleanKey); }
+      ).then(function () {
+        return true;
+      });
+    }
+
     async function clearTrackStores() {
       await withStore(
         STORE_TRACK_CACHE,
@@ -242,6 +480,18 @@
       deleteManualTracks: function (releaseKey) { return deleteRecord(STORE_MANUAL_TRACKS, releaseKey); },
       getAllManualTracks: function () { return getAllRecords(STORE_MANUAL_TRACKS); },
       clearTrackStores: clearTrackStores,
+      getOwnedRelease: getOwnedRelease,
+      putOwnedRelease: putOwnedRelease,
+      putOwnedReleasesBatch: putOwnedReleasesBatch,
+      deleteOwnedReleaseHard: deleteOwnedReleaseHard,
+      getAllOwnedReleases: getAllOwnedReleases,
+      getDirtyOwnedReleases: getDirtyOwnedReleases,
+      getOwnedReleasesByCatNo: getOwnedReleasesByCatNo,
+      getOwnedReleasesByBarcode: getOwnedReleasesByBarcode,
+      clearOwnedReleases: clearOwnedReleases,
+      getSyncMeta: getSyncMeta,
+      putSyncMeta: putSyncMeta,
+      deleteSyncMeta: deleteSyncMeta,
       close: close
     };
   }
@@ -253,6 +503,8 @@
       DB_VERSION: DB_VERSION,
       STORE_TRACK_CACHE: STORE_TRACK_CACHE,
       STORE_MANUAL_TRACKS: STORE_MANUAL_TRACKS,
+      STORE_OWNED_RELEASES: STORE_OWNED_RELEASES,
+      STORE_SYNC_META: STORE_SYNC_META,
       createDbClient: createDbClient
     },
     defaultClient

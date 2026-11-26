@@ -20,7 +20,11 @@ When continuing development on `disk-crate`, strictly maintain these architectur
    - All styling uses embedded CSS custom properties (`:root`) in `css/styles.css` and responsive CSS Grid/Flexbox.
 2. **Sandbox-Safe Storage Layer (`js/storage.js` & `js/db.js`):**
    - `window.localStorage` calls are wrapped in `try/catch` with a fallback `memoryStore` object so sandboxed iframes never throw `SecurityError`.
-   - `js/db.js` wraps IndexedDB (`disk_crate_db_v1`: `track_cache` and `manual_tracks` stores keyed by `releaseKey`) with an automatic deep-cloned in-memory fallback when IndexedDB is unavailable or restricted.
+   - `js/db.js` wraps IndexedDB (`disk_crate_db_v1`, schema version `2`: `track_cache` and `manual_tracks` keyed by `releaseKey`, `owned_releases` with `by_catNo`/`by_barcode`/`by_category`/`by_dirty`/`by_deletedAt` indexes, and `sync_meta`) with an automatic deep-cloned in-memory fallback when IndexedDB is unavailable or restricted.
+3. **Owned Collection Mode & Hunt Cross-Referencing (`js/collection.js`, `schemas/collection.v1.schema.json`):**
+   - Switches cleanly between **Hunt** mode and local-first **Collection** mode (`Hunt | Collection`), with MusicBrainz/iTunes release lookup, custom cover variants, lossless JSON export/import (`Merge` / `Replace`), and 11-column Owned Google Sheet CSV export + two-way tab append (`#gid=`).
+   - Incrementally syncs Owned releases via `GET /api/collection` and `POST /api/collection/batch` (`sync_seq` deltas, soft-delete tombstones, LWW conflict detection, and `keepalive` background flush).
+   - Cross-references Hunt cards against Owned releases via `regCatNo`, `barcode`, `mbid`, normalized `artist|title`, and shared tracklist keys (`✓ Owned`, `In Collection`, `Tracks Owned: K/N`), with 1-click single & batch graduation to Owned.
 3. **Instant First Paint + Viewport Lazy Loading:**
    - All loaded catalog cards render immediately on load using offline data-URI Japanese Jewel Case + Obi Strip SVGs (`buildJewelCaseDataURI`).
    - Official album jackets load asynchronously via `IntersectionObserver` (`rootMargin: '250px 0px'`) and a 3-worker concurrency queue (`MAX_WORKERS = 3`).

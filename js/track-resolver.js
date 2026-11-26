@@ -90,7 +90,9 @@
 
     const editions = Array.isArray(entry.mbEditions) ? entry.mbEditions : [];
     const firstEdCat = editions[0] && editions[0].catno ? editions[0].catno : '';
-    const regCat = !entry.digitalOnly ? (cleanCatalogCode(entry.regCatNo) || cleanCatalogCode(firstEdCat)) : '';
+    const regCat = !entry.digitalOnly
+      ? (cleanCatalogCode(entry.regCatNo) || cleanCatalogCode(entry.catNo) || cleanCatalogCode(firstEdCat))
+      : '';
     if (regCat) {
       return 'catno:' + regCat;
     }
@@ -521,6 +523,28 @@
     return titleOk && artistOk;
   }
 
+  function mapItunesSongsToTracks(results, item, isDigital) {
+    const songRows = (Array.isArray(results) ? results : []).filter(function (r) {
+      return r && (r.wrapperType === 'track' || r.kind === 'song') && r.trackName;
+    });
+    if (songRows.length === 0) return [];
+    return normalizeTracksList(songRows.map(function (r, idx) {
+      const entry = {
+        disc: Number.isInteger(r.discNumber) && r.discNumber >= 1 ? r.discNumber : 1,
+        mediaType: isDigital ? 'Digital' : 'CD',
+        number: Number.isInteger(r.trackNumber) && r.trackNumber >= 1 ? r.trackNumber : (idx + 1),
+        title: String(r.trackName).trim()
+      };
+      if (r.artistName && !isSameReleaseArtist(r.artistName, item)) {
+        entry.artist = String(r.artistName).trim();
+      }
+      if (typeof r.trackTimeMillis === 'number' && Number.isFinite(r.trackTimeMillis) && r.trackTimeMillis >= 0) {
+        entry.durationMs = Math.round(r.trackTimeMillis);
+      }
+      return entry;
+    }));
+  }
+
   /**
    * Fallback tracklist lookup via Apple iTunes Search & Lookup API (country=jp primary).
    * @param {object} item
@@ -594,28 +618,10 @@
         const res = await fetchFn(lookupUrl);
         if (res.ok) {
           const data = await res.json();
-          const results = Array.isArray(data && data.results) ? data.results : [];
-          const songRows = results.filter(function (r) {
-            return r && (r.wrapperType === 'track' || r.kind === 'song') && r.trackName;
-          });
-          if (songRows.length > 0) {
-            const mapped = songRows.map(function (r, idx) {
-              const entry = {
-                disc: Number.isInteger(r.discNumber) && r.discNumber >= 1 ? r.discNumber : 1,
-                mediaType: item.digitalOnly ? 'Digital' : 'CD',
-                number: Number.isInteger(r.trackNumber) && r.trackNumber >= 1 ? r.trackNumber : (idx + 1),
-                title: String(r.trackName).trim()
-              };
-              if (r.artistName && !isSameReleaseArtist(r.artistName, item)) {
-                entry.artist = String(r.artistName).trim();
-              }
-              if (typeof r.trackTimeMillis === 'number' && Number.isFinite(r.trackTimeMillis) && r.trackTimeMillis >= 0) {
-                entry.durationMs = Math.round(r.trackTimeMillis);
-              }
-              return entry;
-            });
+          const mappedTracks = mapItunesSongsToTracks(data && data.results, item, !!item.digitalOnly);
+          if (mappedTracks.length > 0) {
             return {
-              tracks: normalizeTracksList(mapped),
+              tracks: mappedTracks,
               trackSource: 'itunes',
               sourceDetail: String(bestAlbum.collectionName || ('iTunes ' + bestCountry.toUpperCase())).trim(),
               mbid: ''
@@ -961,6 +967,171 @@
     };
   }
 
+  const CATALOG_NUMBER_QUERY_REGEX = /^[A-Z]{2,6}-\d{3,6}(?:[~～〜]\d+)?$/i;
+
+  function extractMbCatNoString(rel) {
+    const labels = Array.isArray(rel && rel['label-info']) ? rel['label-info'] : [];
+    for (let i = 0; i < labels.length; i++) {
+      const cat = labels[i] && labels[i]['catalog-number'] ? String(labels[i]['catalog-number']).trim() : '';
+      if (cat && !/^\[?none\]?$/i.test(cat)) {
+        return cat.replace(/[～〜]/g, '~').toUpperCase();
+      }
+    }
+    return '';
+  }
+
+  function extractMbEditionLabel(rel) {
+    const disambig = String((rel && rel.disambiguation) || '').trim();
+    if (disambig) return disambig;
+    const media = Array.isArray(rel && rel.media) ? rel.media : [];
+    const formats = [];
+    for (let i = 0; i < media.length; i++) {
+      const fmt = media[i] && media[i].format ? String(media[i].format).trim() : '';
+      if (fmt) formats.push(fmt);
+    }
+    return formats.length > 0 ? formats.join('+') : '通常盤 Regular';
+  }
+
+  /**
+   * Look up candidate physical/digital releases from MusicBrainz (with iTunes fallback)
+   * by JAN/EAN barcode digits, catalog number, or free-text query.
+   * @param {string} rawQuery
+   * @param {{ fetchImpl?: typeof fetch, queue?: { schedule: Function }, maxCandidates?: number }} [opts]
+   * @returns {Promise<Array<object>>}
+   */
+  async function lookupReleaseCandidates(rawQuery, opts) {
+    const query = String(rawQuery || '').trim();
+    if (!query) return [];
+
+    const options = opts || {};
+    const fetchFn = options.fetchImpl || (root && root.fetch) || (typeof fetch !== 'undefined' ? fetch : null);
+    if (!fetchFn) return [];
+
+    const queue = options.queue || defaultMbQueue;
+    const maxCandidates = Number.isInteger(options.maxCandidates) && options.maxCandidates > 0
+      ? options.maxCandidates
+      : 4;
+
+    async function fetchMbJson(url) {
+      return queue.schedule(async function () {
+        const res = await fetchFn(url, { headers: { Accept: 'application/json' } });
+        if (!res.ok) return null;
+        return res.json();
+      });
+    }
+
+    const digitsOnly = query.replace(/[\s-]+/g, '');
+    const isBarcode = VALID_BARCODE_REGEX.test(digitsOnly);
+    const isCatNo = !isBarcode && CATALOG_NUMBER_QUERY_REGEX.test(query.replace(/[～〜]/g, '~'));
+
+    const mbQueries = [];
+    if (isBarcode) {
+      mbQueries.push('barcode:' + digitsOnly);
+    } else if (isCatNo) {
+      const normCat = cleanCatalogCode(query);
+      mbQueries.push('catno:' + normCat);
+      if (normCat.indexOf('~') !== -1) {
+        const base = normCat.split('~')[0].trim();
+        if (base) mbQueries.push('catno:' + base);
+      }
+    } else {
+      mbQueries.push(query);
+    }
+
+    const candidates = [];
+    const seenIds = new Set();
+
+    for (let q = 0; q < mbQueries.length && candidates.length === 0; q++) {
+      try {
+        const searchUrl = 'https://musicbrainz.org/ws/2/release/?query=' +
+          encodeURIComponent(mbQueries[q]) + '&fmt=json&limit=' + maxCandidates;
+        const data = await fetchMbJson(searchUrl);
+        const releases = Array.isArray(data && data.releases) ? data.releases : [];
+
+        for (let i = 0; i < releases.length && candidates.length < maxCandidates; i++) {
+          const summary = releases[i];
+          if (!summary || !summary.id || seenIds.has(summary.id)) continue;
+          seenIds.add(summary.id);
+
+          let fullRel = null;
+          try {
+            fullRel = await fetchMbJson(
+              'https://musicbrainz.org/ws/2/release/' + encodeURIComponent(summary.id) +
+              '?inc=recordings+artist-credits+media&fmt=json'
+            );
+          } catch (err) {}
+
+          const rel = fullRel || summary;
+          const artistCredit = formatArtistCredit(rel['artist-credit']) || 'Unknown Artist';
+          const titleStr = String(rel.title || '').trim() || 'Untitled Release';
+          const catNoStr = extractMbCatNoString(rel) || (isCatNo ? cleanCatalogCode(query) : '');
+          const barcodeDigits = cleanBarcodeDigits(rel.barcode) || (isBarcode ? digitsOnly : '');
+          const tempItem = { artist: artistCredit, title: titleStr, regCatNo: catNoStr };
+          const tracks = fullRel ? mapMbReleaseToTracks(fullRel, tempItem) : [];
+
+          candidates.push({
+            artist: artistCredit,
+            artistJa: CJK_CHAR_REGEX.test(artistCredit) ? artistCredit : '',
+            title: titleStr,
+            titleJa: CJK_CHAR_REGEX.test(titleStr) ? titleStr : '',
+            catNo: catNoStr,
+            editionLabel: extractMbEditionLabel(rel),
+            barcode: barcodeDigits,
+            mbid: String(rel.id || summary.id),
+            tracks: tracks,
+            trackSource: tracks.length > 0 ? 'musicbrainz' : null,
+            coverUrl: 'https://coverartarchive.org/release/' + encodeURIComponent(String(rel.id || summary.id)) + '/front-500'
+          });
+        }
+      } catch (err) {
+        // Fall through to next query or iTunes
+      }
+    }
+
+    if (candidates.length === 0 && !isBarcode) {
+      try {
+        const searchTerm = isCatNo ? cleanCatalogCode(query) : query;
+        const res = await fetchFn(
+          'https://itunes.apple.com/search?term=' + encodeURIComponent(searchTerm) + '&country=jp&entity=album&limit=' + maxCandidates
+        );
+        if (res.ok) {
+          const data = await res.json();
+          const results = Array.isArray(data && data.results) ? data.results : [];
+          for (let i = 0; i < results.length && candidates.length < maxCandidates; i++) {
+            const album = results[i];
+            if (!album || !album.collectionName || !album.collectionId) continue;
+            let tracks = [];
+            try {
+              const lookupRes = await fetchFn(
+                'https://itunes.apple.com/lookup?id=' + encodeURIComponent(String(album.collectionId)) + '&entity=song&country=jp'
+              );
+              if (lookupRes.ok) {
+                const lookupData = await lookupRes.json();
+                tracks = mapItunesSongsToTracks(lookupData && lookupData.results, { artist: album.artistName || '' }, false);
+              }
+            } catch (err) {}
+
+            candidates.push({
+              artist: String(album.artistName || 'Unknown Artist').trim(),
+              artistJa: CJK_CHAR_REGEX.test(album.artistName || '') ? String(album.artistName).trim() : '',
+              title: String(album.collectionName).trim(),
+              titleJa: CJK_CHAR_REGEX.test(album.collectionName || '') ? String(album.collectionName).trim() : '',
+              catNo: isCatNo ? cleanCatalogCode(query) : '',
+              editionLabel: classifyItunesEdition(album.collectionName, false).label,
+              barcode: '',
+              mbid: '',
+              tracks: tracks,
+              trackSource: tracks.length > 0 ? 'itunes' : null,
+              coverUrl: album.artworkUrl100 ? String(album.artworkUrl100).replace('100x100bb', '600x600bb') : ''
+            });
+          }
+        }
+      } catch (err) {}
+    }
+
+    return candidates;
+  }
+
   const trackResolverApi = {
     DEFAULT_MB_MIN_INTERVAL_MS: DEFAULT_MB_MIN_INTERVAL_MS,
     deriveTrackReleaseKey: deriveTrackReleaseKey,
@@ -971,6 +1142,7 @@
     tryMusicBrainzTracks: tryMusicBrainzTracks,
     tryItunesTracks: tryItunesTracks,
     fetchTracksForItem: fetchTracksForItem,
+    lookupReleaseCandidates: lookupReleaseCandidates,
     parseTracklistText: parseTracklistText,
     formatTracklistForEdit: formatTracklistForEdit,
     classifyTrackVariant: classifyTrackVariant,

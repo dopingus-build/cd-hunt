@@ -31,6 +31,6 @@ Use [`docs/AGENT_CATALOG_GUIDE.md`](../../../docs/AGENT_CATALOG_GUIDE.md) as the
 5. Validate JSON with `validateCatalog` in [`js/validate.js`](../../../js/validate.js) and run `node --test test/*.test.js` before committing.
 
 ### 3. Shop Availability & Stock Scouting
-1. Filter targets to unacquired items (`Got it? = FALSE` or `!acquired`).
+1. Filter targets to unacquired items (`Got it? = FALSE` or `!acquired`) and, when the user provides a Disk Crate Agent Link with `&include=collection` (`?format=markdown&include=collection`), cross-check their Owned Collection first so you do not recommend releases or tracks they already own.
 2. Search Japanese retailers (`suruga-ya.jp`, `order.mandarake.co.jp`, `shop.lashinbang.com`, `shopping.bookoff.co.jp`, `tower.jp`) by exact catalog numbers (`regCatNo` first, then alternate edition codes) and Japanese artist/title strings.
 3. Report edition match (`通常盤` vs. `初回盤`), mail-order vs. physical branch availability, and current price vs. target used price.

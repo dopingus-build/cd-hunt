@@ -4,7 +4,7 @@ A mobile-first, zero-dependency web application (formerly **CD Hunt**) for hunti
 
 Catalog metadata lives externally (such as the companion flat repository [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata), which hosts `index.json` and `2026-japan.json`). Users can pick a built-in preset, paste a direct JSON file URL or bare GitHub metadata repository URL, or load a local `.json` file from their device.
 
-> **Planned Roadmap:** Architecture specifications for upcoming Owned Releases Collection and Opt-In Camera Scanner features live in [`docs/plans/OVERVIEW.md`](./docs/plans/OVERVIEW.md) (Phases 0–1 implemented; Phases 2–3 not yet implemented).
+> **Roadmap Status:** Architecture specifications for Owned Releases Collection and the upcoming Opt-In Camera Scanner live in [`docs/plans/OVERVIEW.md`](./docs/plans/OVERVIEW.md) (Phases 0–2 implemented; Phase 3 Opt-In Camera Scanner remains planned and is not yet implemented).
 
 ## Key Features
 
@@ -40,11 +40,13 @@ disk-crate/
 │   ├── cover-resolver.js          # Offline SVG obi generator + MusicBrainz/iTunes cover lookup
 │   ├── track-resolver.js          # Multi-disc MusicBrainz/iTunes track resolver, paste parser & variant matcher
 │   ├── config.js                  # Static frontend sync endpoint config (window.DiskCrate.config)
-│   ├── sync.js                    # GitHub session JWT handling, state merge, & cloud sync client
-│   ├── sheet-adapter.js           # Canonical 9-column Google Sheet CSV parser & hybrid overlay merger
-│   └── app.js                     # App state, catalog loader, rendering, modals, & sync wiring
+│   ├── collection.js              # Owned Collection domain model, Hunt↔Owned matcher, graduation, JSON/CSV I/O
+│   ├── sync.js                    # GitHub session JWT handling, Hunt state merge, & incremental Collection sync
+│   ├── sheet-adapter.js           # 9-column Hunt CSV overlay & 11-column Owned Collection CSV parser/exporter
+│   └── app.js                     # App state, Hunt & Collection modes, rendering, modals, & sync wiring
 ├── schemas/
-│   └── catalog.v1.schema.json     # JSON Schema (Draft 2020-12) for schemaVersion: 1 catalogs
+│   ├── catalog.v1.schema.json     # JSON Schema (Draft 2020-12) for schemaVersion: 1 Hunt catalogs
+│   └── collection.v1.schema.json  # JSON Schema (Draft 2020-12) for schemaVersion: 1 Owned Collection backups
 ├── docs/
 │   ├── HANDOVER.md                # Project context & architectural rules
 │   ├── METADATA.md                # Catalog & repository index specification
@@ -59,12 +61,13 @@ disk-crate/
 ├── worker/
 │   ├── README.md                  # Worker API reference, deployment runbook, & Pages config
 │   ├── wrangler.toml              # Cloudflare Worker config, limits, & public [vars]
-│   ├── schema.sql                 # Cloudflare D1 SQLite schema (user_state & daily_usage)
+│   ├── schema.sql                 # Cloudflare D1 SQLite schema (user_state, daily_usage, user_sync_state, owned_releases)
 │   ├── index.mjs                  # ESM entrypoint re-exporting worker/index.js
 │   └── index.js                   # Zero-scope GitHub OAuth, JWT auth, D1 API & circuit breaker
 └── test/
     ├── catalog-validation.test.js # Unit tests for validator, storage, cover resolver, & sync
     ├── tracks.test.js             # Unit tests for track schema, IndexedDB wrapper, resolver, & matcher
+    ├── collection.test.js         # Unit tests for Owned Collection schema, CRUD, CSV/JSON I/O, sync, & cross-ref
     ├── catalog-integration.test.js # Integration tests for index.html, presets, tracks, UI, & cloud sync
     ├── cloud-sync-system.test.js  # Full-stack system tests (Frontend VM <-> HTTP Worker <-> SQLite)
     ├── worker-sync.test.js        # Worker unit tests (JWT, CORS, OAuth, rate limits, pause guard)

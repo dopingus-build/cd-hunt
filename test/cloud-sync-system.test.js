@@ -18,6 +18,7 @@ const TRACK_RESOLVER_PATH = path.join(ROOT_DIR, 'js', 'track-resolver.js');
 const CONFIG_PATH = path.join(ROOT_DIR, 'js', 'config.js');
 const SYNC_PATH = path.join(ROOT_DIR, 'js', 'sync.js');
 const SHEET_ADAPTER_PATH = path.join(ROOT_DIR, 'js', 'sheet-adapter.js');
+const COLLECTION_PATH = path.join(ROOT_DIR, 'js', 'collection.js');
 const APP_PATH = path.join(ROOT_DIR, 'js', 'app.js');
 const SCHEMA_PATH = path.join(ROOT_DIR, 'worker', 'schema.sql');
 const SAMPLE_CATALOG_PATH = path.join(ROOT_DIR, 'docs', 'sample-catalog.json');
@@ -38,6 +39,10 @@ function createSqliteD1Database() {
               const row = stmt.get(...params);
               return row === undefined ? null : row;
             },
+            async all() {
+              const results = stmt.all(...params);
+              return { results, success: true };
+            },
             async run() {
               const info = stmt.run(...params);
               return { success: true, meta: { changes: Number(info.changes) || 0 } };
@@ -45,6 +50,20 @@ function createSqliteD1Database() {
           };
         }
       };
+    },
+    async batch(statements) {
+      db.exec('BEGIN');
+      try {
+        const out = [];
+        for (const s of statements) {
+          out.push(await s.run());
+        }
+        db.exec('COMMIT');
+        return out;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
     },
     queryRaw(sql, ...params) {
       return db.prepare(sql).all(...params);
@@ -398,7 +417,9 @@ async function bootSystemClient(sys, {
   initialStorage = {},
   syncDebounceMs = 20,
   coverMocks = null,
-  imageImpl = null
+  imageImpl = null,
+  indexedDBImpl = null,
+  offlineRef = null
 } = {}) {
   const html = fs.readFileSync(HTML_PATH, 'utf8');
   const { elements, docListeners, winListeners, documentStub } = createDomHarness(html);
@@ -444,6 +465,9 @@ async function bootSystemClient(sys, {
     }
 
     const method = String(init.method || 'GET').toUpperCase();
+    if (offlineRef && offlineRef.offline && urlStr.startsWith(sys.workerBaseUrl)) {
+      throw new Error('Simulated offline network');
+    }
     const headers = Object.assign({}, init.headers || {});
     if (urlStr.startsWith(sys.workerBaseUrl) && !headers.Origin) {
       headers.Origin = origin;
@@ -469,6 +493,7 @@ async function bootSystemClient(sys, {
     Image: imageImpl || NoopImage,
     FileReader: class {},
     IntersectionObserver: TrackingIntersectionObserver,
+    indexedDB: indexedDBImpl,
     setTimeout,
     clearTimeout,
     encodeURIComponent,
@@ -511,7 +536,7 @@ async function bootSystemClient(sys, {
   ns.config.syncApiUrl = sys.workerBaseUrl;
   ns.config.syncDebounceMs = syncDebounceMs;
   ns.config.mbTrackMinIntervalMs = 0;
-  for (const filePath of [SYNC_PATH, SHEET_ADAPTER_PATH, APP_PATH]) {
+  for (const filePath of [SYNC_PATH, SHEET_ADAPTER_PATH, COLLECTION_PATH, APP_PATH]) {
     vm.runInContext(fs.readFileSync(filePath, 'utf8'), context, { filename: filePath });
   }
 
@@ -521,6 +546,7 @@ async function bootSystemClient(sys, {
   await settle();
 
   return {
+    window: context,
     elements,
     localStorage,
     locationObj,
@@ -1732,5 +1758,286 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     await client.settle(120);
     assert.equal(batchUpdates.length, beforeToggle + 1);
     assert.deepEqual(batchUpdates[batchUpdates.length - 1].data, [{ range: 'A2', values: [['TRUE']] }]);
+  });
+
+  function makeDeviceIdb(backing) {
+    const state = backing || { stores: new Map() };
+    function makeReq(executor) {
+      const req = { result: undefined, error: null, onsuccess: null, onerror: null };
+      queueMicrotask(() => {
+        try { executor(req); } catch (err) { req.error = err; if (req.onerror) req.onerror({ target: req }); }
+      });
+      return req;
+    }
+    return {
+      open() {
+        const req = { result: null, error: null, onsuccess: null, onerror: null, onupgradeneeded: null };
+        queueMicrotask(() => {
+          const dbObj = {
+            objectStoreNames: { contains: (s) => state.stores.has(s) },
+            createObjectStore: (s, opts) => {
+              if (!state.stores.has(s)) state.stores.set(s, { keyPath: opts.keyPath, rows: new Map() });
+              return { indexNames: { contains: () => true }, createIndex: () => {} };
+            },
+            transaction: (storeName) => {
+              const storeMeta = state.stores.get(storeName);
+              const tx = { error: null, oncomplete: null, onerror: null, onabort: null };
+              const storeApi = {
+                get: (k) => makeReq((r) => { r.result = storeMeta.rows.has(k) ? JSON.parse(JSON.stringify(storeMeta.rows.get(k))) : undefined; if (r.onsuccess) r.onsuccess({ target: r }); }),
+                put: (v) => makeReq((r) => { storeMeta.rows.set(v[storeMeta.keyPath], JSON.parse(JSON.stringify(v))); r.result = v[storeMeta.keyPath]; if (r.onsuccess) r.onsuccess({ target: r }); }),
+                delete: (k) => makeReq((r) => { storeMeta.rows.delete(k); if (r.onsuccess) r.onsuccess({ target: r }); }),
+                getAll: () => makeReq((r) => { r.result = Array.from(storeMeta.rows.values()).map((v) => JSON.parse(JSON.stringify(v))); if (r.onsuccess) r.onsuccess({ target: r }); }),
+                clear: () => makeReq((r) => { storeMeta.rows.clear(); if (r.onsuccess) r.onsuccess({ target: r }); })
+              };
+              tx.objectStore = () => storeApi;
+              setTimeout(() => { if (tx.oncomplete) tx.oncomplete({ target: tx }); }, 0);
+              return tx;
+            }
+          };
+          req.result = dbObj;
+          req.transaction = { objectStore: () => ({ indexNames: { contains: () => true }, createIndex: () => {} }) };
+          if (req.onupgradeneeded) req.onupgradeneeded({ target: { result: dbObj } });
+          if (req.onsuccess) req.onsuccess({ target: req });
+        });
+        return req;
+      }
+    };
+  }
+
+  it('isolates Hunt track_cache & manual_tracks from SQLite user_state while syncing Owned Collection tracks incrementally via /api/collection/batch', async (t) => {
+    const sys = await startFullSystem();
+    t.after(() => sys.close());
+
+    const aliceHash = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
+      'code_alice'
+    );
+    const backing = { stores: new Map() };
+    const sampleUrl = 'https://raw.githubusercontent.com/alice/cd-metadata/main/sample.json';
+    const client = await bootSystemClient(sys, {
+      hash: aliceHash,
+      search: '?catalog=' + encodeURIComponent(sampleUrl),
+      syncDebounceMs: 10,
+      indexedDBImpl: makeDeviceIdb(backing),
+      coverMocks: async (url) => {
+        if (url.includes('musicbrainz.org/ws/2/release/?query=catno%3AKSCL-737')) {
+          return new Response(
+            JSON.stringify({ releases: [{ id: '55555555-5555-4555-8555-555555555555', title: 'Sol-fa', status: 'Official', 'label-info': [{ 'catalog-number': 'KSCL-737' }] }] }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (url.includes('musicbrainz.org/ws/2/release/55555555-5555-4555-8555-555555555555')) {
+          return new Response(
+            JSON.stringify({
+              id: '55555555-5555-4555-8555-555555555555',
+              title: 'Sol-fa',
+              'label-info': [{ 'catalog-number': 'KSCL-737' }],
+              media: [{ position: 1, format: 'CD', tracks: [{ position: 1, title: 'Hunt Only MB Track', length: 200000 }] }]
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+    });
+
+    await client.settle(80);
+    const putBaseline = client.requestLog.filter((r) => r.method === 'PUT' && r.url.endsWith('/api/state')).length;
+    const writesBaseline = sys.db.queryRaw('SELECT write_count FROM daily_usage')[0].write_count;
+    const userStateBefore = sys.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+    const stateJsonBefore = userStateBefore[0] ? userStateBefore[0].state_json : null;
+
+    // Fetch MusicBrainz tracks & save manual track override in Hunt mode -> strictly local IndexedDB, ZERO PUT /api/state
+    await client.clickElement('openCrateFlipBtn');
+    await client.clickElement('lbTracksToggleBtn');
+    await client.settle(80);
+    assert.ok(client.elements.get('lbTracksList').innerHTML.includes('Hunt Only MB Track'));
+
+    await client.clickElement('lbEditTracksBtn');
+    client.setInput('lbTrackEditorInput', '01. Strictly Local Hunt Override (3:21)');
+    await client.clickElement('saveManualTracksBtn');
+    await client.settle(80);
+
+    assert.equal(client.requestLog.filter((r) => r.method === 'PUT' && r.url.endsWith('/api/state')).length, putBaseline);
+    assert.equal(sys.db.queryRaw('SELECT write_count FROM daily_usage')[0].write_count, writesBaseline);
+    const userStateAfterHuntTracks = sys.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+    assert.equal(userStateAfterHuntTracks[0] ? userStateAfterHuntTracks[0].state_json : null, stateJsonBefore);
+    assert.equal(backing.stores.get('manual_tracks').rows.size, 1);
+
+    // Switch to Collection mode and add an owned release with tracks -> syncs via POST /api/collection/batch into SQLite owned_releases without touching user_state
+    await client.clickElement('modeCollectionBtn');
+    await client.clickElement('addReleaseBtn');
+    client.setInput('rfArtist', 'Collection Artist');
+    client.setInput('rfTitle', 'Collection Album');
+    client.setInput('rfCatNo', 'COL-9001');
+    client.setInput('rfCategory', 'Rock');
+    client.setInput('rfTracksInput', '01. Synced Collection Track (4:05)');
+    await client.clickElement('saveReleaseFormBtn');
+    await client.settle(120);
+
+    assert.equal(client.requestLog.filter((r) => r.method === 'PUT' && r.url.endsWith('/api/state')).length, putBaseline);
+    assert.equal(client.requestLog.filter((r) => r.method === 'POST' && r.url.endsWith('/api/collection/batch')).length, 1);
+    const userStateAfterCol = sys.db.queryRaw("SELECT state_json FROM user_state WHERE github_id = '1001'");
+    assert.equal(userStateAfterCol[0] ? userStateAfterCol[0].state_json : null, stateJsonBefore);
+
+    const ownedRows = sys.db.queryRaw("SELECT release_id, data_json, sync_seq FROM owned_releases WHERE github_id = '1001'");
+    assert.equal(ownedRows.length, 1);
+    assert.equal(JSON.parse(ownedRows[0].data_json).tracks[0].title, 'Synced Collection Track');
+  });
+
+  it('converges two offline devices across delayed offline scans (older clientUpdatedAt), LWW conflicts, and tombstones via SQLite sync_seq', async (t) => {
+    const sys = await startFullSystem();
+    t.after(() => sys.close());
+
+    const hashA = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
+      'code_alice'
+    );
+    const hashB = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
+      'code_alice'
+    );
+
+    const backingA = { stores: new Map() };
+    const backingB = { stores: new Map() };
+    const offlineRefA = { offline: false };
+    const offlineRefB = { offline: false };
+
+    // 1) Device A adds Release 1 and syncs (sync_seq = 1)
+    const devA = await bootSystemClient(sys, {
+      hash: hashA,
+      search: '?mode=collection',
+      syncDebounceMs: 10,
+      indexedDBImpl: makeDeviceIdb(backingA),
+      offlineRef: offlineRefA
+    });
+    await devA.clickElement('addReleaseBtn');
+    devA.setInput('rfArtist', 'Shared Artist');
+    devA.setInput('rfTitle', 'Original Release 1');
+    devA.setInput('rfCatNo', 'DEV-0001');
+    devA.setInput('rfCategory', 'OST');
+    await devA.clickElement('saveReleaseFormBtn');
+    await devA.settle(120);
+
+    // 2) Device B comes online in Collection mode and pulls Release 1 (lastSyncSeq = 1)
+    const devB = await bootSystemClient(sys, {
+      hash: hashB,
+      search: '?mode=collection',
+      syncDebounceMs: 10,
+      indexedDBImpl: makeDeviceIdb(backingB),
+      offlineRef: offlineRefB
+    });
+    await devB.settle(100);
+    assert.equal(devB.elements.get('progressBadge').textContent, '1 release · 0 tracks');
+
+    // 3) Both devices go offline
+    offlineRefA.offline = true;
+    offlineRefB.offline = true;
+
+    // Seed Device B offline mutations:
+    // - Delayed scan (Release 2) with an OLDER clientUpdatedAt=1000
+    // - Stale edit to Release 1 with an OLDER clientUpdatedAt=1200
+    const dbModLocal = require('../js/db.js');
+    const clientDbA = dbModLocal.createDbClient({ indexedDBImpl: makeDeviceIdb(backingA) });
+    const clientDbB = dbModLocal.createDbClient({ indexedDBImpl: makeDeviceIdb(backingB) });
+    const syncModLocal = require('../js/sync.js');
+
+    const r1FromB = await clientDbB.getOwnedRelease('own-dev-0001');
+    await clientDbB.putOwnedRelease({
+      id: 'own-dev-0002',
+      artist: 'Device B Offline Artist',
+      title: 'Delayed Offline Scan Release 2',
+      category: 'Rock',
+      catNo: 'OFF-0002',
+      createdAt: 1000,
+      clientUpdatedAt: 1000,
+      syncSeq: null,
+      deletedAt: null,
+      dirty: 1
+    });
+    await clientDbB.putOwnedRelease(
+      Object.assign({}, r1FromB, {
+        title: 'Stale Device B Title (Lost LWW)',
+        clientUpdatedAt: 1200,
+        dirty: 1
+      })
+    );
+
+    // Device A offline mutations with NEWER clientUpdatedAt values:
+    const r1FromA = await clientDbA.getOwnedRelease('own-dev-0001');
+    await clientDbA.putOwnedRelease(
+      Object.assign({}, r1FromA, {
+        title: 'Winner Device A Title (Newer)',
+        clientUpdatedAt: Date.now() + 10000,
+        dirty: 1
+      })
+    );
+    await clientDbA.putOwnedRelease({
+      id: 'own-dev-0003',
+      artist: 'Device A Temp',
+      title: 'Release 3 To Soft-Delete',
+      category: 'OST',
+      catNo: 'TMP-0003',
+      createdAt: Date.now() + 11000,
+      clientUpdatedAt: Date.now() + 11000,
+      syncSeq: null,
+      deletedAt: null,
+      dirty: 1
+    });
+
+    // 4) Device A reconnects first and syncs -> SQLite has R1 (Winner) & R3
+    offlineRefA.offline = false;
+    const tokA = devA.localStorage.getItem('cd_hunt_sync_token_v1');
+    const syncResA1 = await syncModLocal.syncOwnedCollection(clientDbA, sys.workerBaseUrl, tokA, async (u, init) => {
+      const headers = Object.assign({}, init && init.headers ? init.headers : {}, { Origin: 'https://dopingus-build.github.io' });
+      return fetch(u, Object.assign({}, init, { headers }));
+    });
+    assert.equal(syncResA1.ok, true);
+    assert.equal(syncResA1.pushedCount, 2);
+
+    // 5) Device B reconnects -> pushes delayed R2 (t=1000 accepted with syncSeq=4!), LWW resolves R1 to Winner, and pulls R3
+    offlineRefB.offline = false;
+    const tokB = devB.localStorage.getItem('cd_hunt_sync_token_v1');
+    const syncResB1 = await syncModLocal.syncOwnedCollection(clientDbB, sys.workerBaseUrl, tokB, async (u, init) => {
+      const headers = Object.assign({}, init && init.headers ? init.headers : {}, { Origin: 'https://dopingus-build.github.io' });
+      return fetch(u, Object.assign({}, init, { headers }));
+    });
+    assert.equal(syncResB1.ok, true);
+    assert.equal(syncResB1.pushedCount, 1); // Delayed R2 (already saw R1 newer during pull, so R2 was pushed and got syncSeq=4!)
+    assert.equal((await clientDbB.getOwnedRelease('own-dev-0001')).title, 'Winner Device A Title (Newer)');
+
+    // 6) Device A soft-deletes R3 and syncs -> pulls Device B's delayed R2 (despite t=1000 < Device A's clock!) and removes R3 on Device B
+    const r3OnA = await clientDbA.getOwnedRelease('own-dev-0003');
+    const delTs = Date.now() + 20000;
+    await clientDbA.putOwnedRelease(
+      Object.assign({}, r3OnA, {
+        deletedAt: delTs,
+        clientUpdatedAt: delTs,
+        dirty: 1
+      })
+    );
+    const syncResA2 = await syncModLocal.syncOwnedCollection(clientDbA, sys.workerBaseUrl, tokA, async (u, init) => {
+      const headers = Object.assign({}, init && init.headers ? init.headers : {}, { Origin: 'https://dopingus-build.github.io' });
+      return fetch(u, Object.assign({}, init, { headers }));
+    });
+    assert.equal(syncResA2.ok, true);
+
+    const syncResB2 = await syncModLocal.syncOwnedCollection(clientDbB, sys.workerBaseUrl, tokB, async (u, init) => {
+      const headers = Object.assign({}, init && init.headers ? init.headers : {}, { Origin: 'https://dopingus-build.github.io' });
+      return fetch(u, Object.assign({}, init, { headers }));
+    });
+    assert.equal(syncResB2.ok, true);
+
+    // Both devices now have zero dirty items and identical active releases { own-dev-0001, own-dev-0002 }
+    assert.equal((await clientDbA.getDirtyOwnedReleases()).length, 0);
+    assert.equal((await clientDbB.getDirtyOwnedReleases()).length, 0);
+
+    const activeA = (await clientDbA.getAllOwnedReleases()).map((r) => `${r.id}:${r.title}`).sort();
+    const activeB = (await clientDbB.getAllOwnedReleases()).map((r) => `${r.id}:${r.title}`).sort();
+    assert.deepEqual(activeA, [
+      'own-dev-0001:Winner Device A Title (Newer)',
+      'own-dev-0002:Delayed Offline Scan Release 2'
+    ]);
+    assert.deepEqual(activeB, activeA);
   });
 });

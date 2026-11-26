@@ -26,6 +26,7 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
       '<script src="./js/config.js"></script>',
       '<script src="./js/sync.js"></script>',
       '<script src="./js/sheet-adapter.js"></script>',
+      '<script src="./js/collection.js"></script>',
       '<script src="./js/app.js"></script>'
     ];
     let lastIdx = -1;
@@ -46,6 +47,7 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
     for (const assetPath of [
       'js/sync.js',
       'js/sheet-adapter.js',
+      'js/collection.js',
       'js/app.js',
       'js/validate.js',
       'js/storage.js',
@@ -85,7 +87,7 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
 
     const methods = preflightRes.headers.get('access-control-allow-methods') || '';
     const allowHeaders = preflightRes.headers.get('access-control-allow-headers') || '';
-    assert.ok(methods.includes('GET') && methods.includes('PUT'));
+    assert.ok(methods.includes('GET') && methods.includes('PUT') && methods.includes('POST'));
     assert.ok(allowHeaders.toLowerCase().includes('authorization') && allowHeaders.toLowerCase().includes('content-type'));
 
     const blockedRes = await fetch(`${WORKER_URL}/api/status`, {
@@ -117,7 +119,7 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
     assert.equal(badRedirectRes.status, 400);
   });
 
-  it('rejects unauthenticated and invalid Bearer requests to /api/state with 401', async () => {
+  it('rejects unauthenticated and invalid Bearer requests to /api/state and /api/collection* with 401', async () => {
     const missingAuthRes = await fetch(`${WORKER_URL}/api/state`, {
       headers: { Origin: SITE_ORIGIN }
     });
@@ -130,6 +132,18 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
       }
     });
     assert.equal(invalidAuthRes.status, 401);
+
+    const missingColRes = await fetch(`${WORKER_URL}/api/collection`, {
+      headers: { Origin: SITE_ORIGIN }
+    });
+    assert.equal(missingColRes.status, 401);
+
+    const missingBatchRes = await fetch(`${WORKER_URL}/api/collection/batch`, {
+      method: 'POST',
+      headers: { Origin: SITE_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: [] })
+    });
+    assert.equal(missingBatchRes.status, 401);
   });
 
   it('allows cross-origin GET /api/share/* from external origins and rejects invalid share tokens with 401', async () => {

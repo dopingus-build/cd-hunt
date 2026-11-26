@@ -804,6 +804,16 @@
     if (source.recommendedShops && !target.recommendedShops) target.recommendedShops = source.recommendedShops;
     if (source.artistJa && !target.artistJa) target.artistJa = source.artistJa;
     if (source.titleJa && !target.titleJa) target.titleJa = source.titleJa;
+    if (source.barcode && !target.barcode) target.barcode = source.barcode;
+    if (source.mbid && !target.mbid) target.mbid = source.mbid;
+    if (source.trackSource && !target.trackSource) target.trackSource = source.trackSource;
+    if (
+      Array.isArray(source.tracks) &&
+      source.tracks.length > 0 &&
+      (!Array.isArray(target.tracks) || target.tracks.length === 0)
+    ) {
+      target.tracks = cloneJson(source.tracks);
+    }
     if (Array.isArray(source.mbEditions) && source.mbEditions.length > 0) {
       const existingEditions = Array.isArray(target.mbEditions) ? target.mbEditions : [];
       const seenEd = new Set(
@@ -981,13 +991,192 @@
     return out;
   }
 
+  const OWNED_SHEET_HEADERS = [
+    'Catalog Number',
+    'Edition',
+    'Category',
+    'Artist',
+    'Title',
+    'Barcode',
+    'Purchase Price',
+    'Purchase Shop',
+    'Purchase Date',
+    'Track Count',
+    'Notes'
+  ];
+
+  function mapOwnedSheetColumns(headerRow) {
+    const map = {};
+    for (let i = 0; i < headerRow.length; i++) {
+      const key = normalizeHeaderKey(headerRow[i]);
+      if (!key) continue;
+      if (key === 'catalog number' || key === 'catno' || key === 'cat no' || key.indexOf('catalog') !== -1) {
+        if (map.catNo === undefined) map.catNo = i;
+      } else if (key === 'edition' || key === 'edition label') {
+        if (map.editionLabel === undefined) map.editionLabel = i;
+      } else if (key === 'category' || key.indexOf('aisle') !== -1) {
+        if (map.category === undefined) map.category = i;
+      } else if (key === 'artist' || key.indexOf('artist') !== -1) {
+        if (map.artist === undefined) map.artist = i;
+      } else if (key === 'title' || key.indexOf('title') !== -1 || key.indexOf('release') !== -1) {
+        if (map.title === undefined) map.title = i;
+      } else if (key === 'barcode' || key === 'jan' || key === 'ean') {
+        if (map.barcode === undefined) map.barcode = i;
+      } else if (key === 'purchase price' || key.indexOf('price') !== -1) {
+        if (map.purchasePrice === undefined) map.purchasePrice = i;
+      } else if (key === 'purchase shop' || key.indexOf('shop') !== -1 || key === 'store') {
+        if (map.purchaseShop === undefined) map.purchaseShop = i;
+      } else if (key === 'purchase date' || key === 'date') {
+        if (map.purchaseDate === undefined) map.purchaseDate = i;
+      } else if (key === 'track count' || key === 'tracks') {
+        if (map.trackCount === undefined) map.trackCount = i;
+      } else if (key === 'notes' || key === 'note') {
+        if (map.notes === undefined) map.notes = i;
+      }
+    }
+    return map;
+  }
+
+  function findOwnedHeaderRowIndex(rows) {
+    for (let i = 0; i < rows.length; i++) {
+      const joined = rows[i].map(normalizeHeaderKey);
+      const hasCatNo = joined.some(function (k) {
+        return k === 'catalog number' || k === 'catno' || k === 'cat no';
+      });
+      const hasTitleOrArtist = joined.some(function (k) {
+        return k === 'title' || k === 'artist' || k.indexOf('title') !== -1;
+      });
+      if (hasCatNo && hasTitleOrArtist) return i;
+    }
+    return -1;
+  }
+
+  /**
+   * Parse CSV text from the 11-column Owned Collection Google Sheet into candidate OwnedRelease updates.
+   * @param {string} csvText
+   * @returns {{ items: Array<object>, skippedRows: number }}
+   */
+  function parseOwnedSheetCsv(csvText) {
+    const rows = parseCsv(csvText);
+    const headerIdx = findOwnedHeaderRowIndex(rows);
+    if (headerIdx === -1) {
+      throw new Error('Could not find Owned Collection header row (Catalog Number / Artist / Title)');
+    }
+
+    const colMap = mapOwnedSheetColumns(rows[headerIdx]);
+    if (colMap.catNo === undefined || colMap.title === undefined) {
+      throw new Error('Owned Collection Sheet header must contain Catalog Number and Title columns');
+    }
+
+    const items = [];
+    let skippedRows = 0;
+
+    for (let r = headerIdx + 1; r < rows.length; r++) {
+      const row = rows[r];
+      const cell = function (idx) {
+        return idx !== undefined && idx < row.length ? String(row[idx] || '').trim() : '';
+      };
+
+      const rawCatNo = cell(colMap.catNo);
+      const rawArtist = cell(colMap.artist);
+      const rawTitle = cell(colMap.title);
+      if (
+        normalizeHeaderKey(rawCatNo) === 'catalog number' &&
+        normalizeHeaderKey(rawTitle) === 'title'
+      ) {
+        continue;
+      }
+
+      const normCatNo = normalizeCatCode(rawCatNo);
+      if (!normCatNo || (!rawArtist && !rawTitle)) {
+        skippedRows++;
+        continue;
+      }
+
+      const artistSplit = splitBilingualParen(rawArtist || 'Unknown Artist');
+      const titleSplit = splitBilingualParen(rawTitle || 'Untitled Release');
+      const editionLabel = cell(colMap.editionLabel);
+      const category = cell(colMap.category) || 'Uncategorized';
+      const rawBarcode = cell(colMap.barcode).replace(/[\s-]+/g, '').trim();
+      const purchasePrice = cell(colMap.purchasePrice);
+      const purchaseShop = cell(colMap.purchaseShop);
+      const purchaseDate = cell(colMap.purchaseDate);
+      const notes = cell(colMap.notes);
+
+      const entry = {
+        catNo: normCatNo,
+        editionLabel: editionLabel,
+        category: category,
+        artist: artistSplit.en || rawArtist || 'Unknown Artist',
+        title: titleSplit.en || rawTitle || 'Untitled Release',
+        barcode: rawBarcode,
+        purchasePrice: purchasePrice,
+        purchaseShop: purchaseShop,
+        purchaseDate: purchaseDate,
+        notes: notes
+      };
+      if (artistSplit.ja) entry.artistJa = artistSplit.ja;
+      if (titleSplit.ja) entry.titleJa = titleSplit.ja;
+      items.push(entry);
+    }
+
+    return { items: items, skippedRows: skippedRows };
+  }
+
+  /**
+   * Build the 11-column 2D cell matrix for syncing Owned Releases to Google Sheets.
+   * @param {Array<object>} ownedReleases
+   * @returns {string[][]}
+   */
+  function buildOwnedSheetRows(ownedReleases) {
+    const active = (Array.isArray(ownedReleases) ? ownedReleases : []).filter(function (r) {
+      return r && (r.deletedAt === null || r.deletedAt === undefined);
+    });
+    const sorted = active.slice().sort(function (a, b) {
+      const catCmp = String(a.category || '').localeCompare(String(b.category || ''));
+      if (catCmp !== 0) return catCmp;
+      const artCmp = String(a.artist || '').localeCompare(String(b.artist || ''));
+      if (artCmp !== 0) return artCmp;
+      const titleCmp = String(a.title || '').localeCompare(String(b.title || ''));
+      if (titleCmp !== 0) return titleCmp;
+      return String(a.catNo || '').localeCompare(String(b.catNo || ''));
+    });
+
+    const rows = [OWNED_SHEET_HEADERS.slice()];
+    sorted.forEach(function (item) {
+      const artist = item.artistJa && String(item.artist || '').indexOf(item.artistJa) === -1
+        ? item.artist + ' (' + item.artistJa + ')'
+        : String(item.artist || '');
+      const title = item.titleJa && String(item.title || '').indexOf(item.titleJa) === -1
+        ? item.title + ' (' + item.titleJa + ')'
+        : String(item.title || '');
+      const trackCount = Array.isArray(item.tracks) ? String(item.tracks.length) : '0';
+      rows.push([
+        String(item.catNo || ''),
+        String(item.editionLabel || ''),
+        String(item.category || ''),
+        artist,
+        title,
+        String(item.barcode || ''),
+        String(item.purchasePrice || ''),
+        String(item.purchaseShop || ''),
+        String(item.purchaseDate || ''),
+        trackCount,
+        String(item.notes || '')
+      ]);
+    });
+    return rows;
+  }
+
   const sheetAdapterApi = {
     parseCsv: parseCsv,
     isGoogleSheetCsvUrl: isGoogleSheetCsvUrl,
     parseGoogleSheetCsv: parseGoogleSheetCsv,
     detectCatalogDuplicates: detectCatalogDuplicates,
     mergeCatalogWithSheet: mergeCatalogWithSheet,
-    buildChecklistByCatNo: buildChecklistByCatNo
+    buildChecklistByCatNo: buildChecklistByCatNo,
+    parseOwnedSheetCsv: parseOwnedSheetCsv,
+    buildOwnedSheetRows: buildOwnedSheetRows
   };
 
   if (root) {

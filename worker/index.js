@@ -17,6 +17,26 @@ const SHARE_TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60;
 const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 const SHEET_CAT_CODE_REGEX = /\b([A-Z]{2,6}-\d{3,6}(?:[~～〜]\d+)?)\b/g;
 const STORAGE_PREFIX_REGEX = /^cd_hunt_[a-z0-9_]+_[0-9a-f]{8}$/;
+const RELEASE_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+const VALID_BARCODE_REGEX = /^\d{8,14}$/;
+const VALID_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const VALID_TRACK_SOURCES = new Set(['catalog', 'manual', 'musicbrainz', 'itunes']);
+const VALID_MEDIA_TYPES = new Set(['CD', 'BD', 'DVD', 'Digital']);
+const PROHIBITED_DOMAINS = ['vgmdb.net', 'wikia.nocookie.net', 'fandom.com', 'cdjapan.co.jp'];
+const MAX_COLLECTION_BATCH_ITEMS = 100;
+const OWNED_SHEET_HEADERS = [
+  'Catalog Number',
+  'Edition',
+  'Category',
+  'Artist',
+  'Title',
+  'Barcode',
+  'Purchase Price',
+  'Purchase Shop',
+  'Purchase Date',
+  'Track Count',
+  'Notes'
+];
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -225,7 +245,7 @@ function buildCorsHeaders(request, env) {
   const reqOrigin = request && request.headers ? request.headers.get('Origin') : null;
   const allowedDefault = getAllowedOrigins(env)[0];
   const headers = {
-    'Access-Control-Allow-Methods': 'GET, PUT, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, PUT, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400'
   };
@@ -327,6 +347,203 @@ function validateSyncPayload(payload) {
   return { valid: true };
 }
 
+function findProhibitedDomain(value) {
+  if (typeof value === 'string') {
+    const lower = value.toLowerCase();
+    for (let i = 0; i < PROHIBITED_DOMAINS.length; i++) {
+      if (lower.indexOf(PROHIBITED_DOMAINS[i]) !== -1) {
+        return PROHIBITED_DOMAINS[i];
+      }
+    }
+    return null;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const hit = findProhibitedDomain(value[i]);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (isPlainObject(value)) {
+    const values = Object.values(value);
+    for (let i = 0; i < values.length; i++) {
+      const hit = findProhibitedDomain(values[i]);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+function validateOwnedTracks(tracks, prefix) {
+  if (tracks === undefined) return null;
+  if (!Array.isArray(tracks)) {
+    return prefix + '.tracks must be an array';
+  }
+  for (let i = 0; i < tracks.length; i++) {
+    const tr = tracks[i];
+    const trPrefix = prefix + '.tracks[' + i + ']';
+    if (!isPlainObject(tr)) return trPrefix + ' must be an object';
+    if (!Number.isInteger(tr.number) || tr.number < 1) return trPrefix + '.number must be an integer >= 1';
+    if (typeof tr.title !== 'string' || tr.title.trim().length === 0) {
+      return trPrefix + '.title must be a non-empty string';
+    }
+    if (tr.disc !== undefined && (!Number.isInteger(tr.disc) || tr.disc < 1)) {
+      return trPrefix + '.disc must be an integer >= 1';
+    }
+    if (tr.mediaType !== undefined && (typeof tr.mediaType !== 'string' || !VALID_MEDIA_TYPES.has(tr.mediaType))) {
+      return trPrefix + '.mediaType must be one of CD, BD, DVD, Digital';
+    }
+    if (tr.durationMs !== undefined && (!Number.isInteger(tr.durationMs) || tr.durationMs < 0)) {
+      return trPrefix + '.durationMs must be a non-negative integer';
+    }
+    for (const f of ['titleJa', 'artist', 'notes']) {
+      if (tr[f] !== undefined && typeof tr[f] !== 'string') {
+        return trPrefix + '.' + f + ' must be a string';
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Validate a client-submitted incremental owned-collection batch payload.
+ * @param {unknown} payload
+ * @returns {{ valid: boolean, error?: string }}
+ */
+function validateCollectionBatchPayload(payload) {
+  if (!isPlainObject(payload)) {
+    return { valid: false, error: 'Payload must be a plain JSON object' };
+  }
+  if (!Array.isArray(payload.items)) {
+    return { valid: false, error: 'items must be an array' };
+  }
+  if (payload.items.length > MAX_COLLECTION_BATCH_ITEMS) {
+    return { valid: false, error: 'items batch exceeds maximum size of ' + MAX_COLLECTION_BATCH_ITEMS };
+  }
+
+  for (let i = 0; i < payload.items.length; i++) {
+    const item = payload.items[i];
+    const prefix = 'items[' + i + ']';
+    if (!isPlainObject(item)) {
+      return { valid: false, error: prefix + ' must be an object' };
+    }
+    if (typeof item.id !== 'string' || !RELEASE_ID_REGEX.test(item.id)) {
+      return { valid: false, error: prefix + '.id must match /^[a-zA-Z0-9_-]{1,128}$/' };
+    }
+    if (typeof item.clientUpdatedAt !== 'number' || !Number.isFinite(item.clientUpdatedAt) || item.clientUpdatedAt <= 0) {
+      return { valid: false, error: prefix + '.clientUpdatedAt must be a positive finite number' };
+    }
+    if (
+      item.deletedAt !== undefined &&
+      item.deletedAt !== null &&
+      (typeof item.deletedAt !== 'number' || !Number.isFinite(item.deletedAt) || item.deletedAt < 0)
+    ) {
+      return { valid: false, error: prefix + '.deletedAt must be null or a non-negative finite number' };
+    }
+
+    const isTombstone = item.deletedAt !== undefined && item.deletedAt !== null;
+    if (isTombstone) {
+      continue;
+    }
+
+    for (const reqField of ['artist', 'title', 'category', 'catNo']) {
+      if (typeof item[reqField] !== 'string' || item[reqField].trim().length === 0) {
+        return { valid: false, error: prefix + '.' + reqField + ' must be a non-empty string' };
+      }
+    }
+    for (const optField of ['artistJa', 'titleJa', 'editionLabel', 'accent', 'purchasePrice', 'purchaseShop', 'purchaseDate', 'notes']) {
+      if (item[optField] !== undefined && typeof item[optField] !== 'string') {
+        return { valid: false, error: prefix + '.' + optField + ' must be a string' };
+      }
+    }
+    if (item.barcode !== undefined) {
+      if (typeof item.barcode !== 'string') {
+        return { valid: false, error: prefix + '.barcode must be a string' };
+      }
+      const digits = item.barcode.replace(/[\s-]+/g, '').trim();
+      if (digits.length > 0 && !VALID_BARCODE_REGEX.test(digits)) {
+        return { valid: false, error: prefix + '.barcode must contain 8 to 14 digits' };
+      }
+    }
+    if (item.mbid !== undefined) {
+      if (typeof item.mbid !== 'string') {
+        return { valid: false, error: prefix + '.mbid must be a string' };
+      }
+      const trimmedMbid = item.mbid.trim();
+      if (trimmedMbid.length > 0 && !VALID_UUID_REGEX.test(trimmedMbid)) {
+        return { valid: false, error: prefix + '.mbid must be a valid UUID' };
+      }
+    }
+    if (item.trackSource !== undefined) {
+      if (typeof item.trackSource !== 'string' || !VALID_TRACK_SOURCES.has(item.trackSource)) {
+        return { valid: false, error: prefix + '.trackSource must be one of catalog, manual, musicbrainz, itunes' };
+      }
+    }
+    const trackErr = validateOwnedTracks(item.tracks, prefix);
+    if (trackErr) {
+      return { valid: false, error: trackErr };
+    }
+    if (item.customCovers !== undefined && item.customCovers !== null) {
+      if (!isPlainObject(item.customCovers) || !Array.isArray(item.customCovers.variants)) {
+        return { valid: false, error: prefix + '.customCovers must be null or contain a variants array' };
+      }
+      for (let v = 0; v < item.customCovers.variants.length; v++) {
+        const variant = item.customCovers.variants[v];
+        if (!isPlainObject(variant) || typeof variant.url !== 'string' || variant.url.trim().length === 0) {
+          return { valid: false, error: prefix + '.customCovers.variants[' + v + '].url must be a non-empty string' };
+        }
+      }
+    }
+    if (item.selectedVariant !== undefined && item.selectedVariant !== null) {
+      if (!isPlainObject(item.selectedVariant) || typeof item.selectedVariant.url !== 'string' || item.selectedVariant.url.trim().length === 0) {
+        return { valid: false, error: prefix + '.selectedVariant must be null or contain a non-empty url' };
+      }
+    }
+    if (
+      item.createdAt !== undefined &&
+      (typeof item.createdAt !== 'number' || !Number.isFinite(item.createdAt) || item.createdAt < 0)
+    ) {
+      return { valid: false, error: prefix + '.createdAt must be a non-negative finite number' };
+    }
+    const badDomain = findProhibitedDomain(item);
+    if (badDomain) {
+      return { valid: false, error: prefix + ' contains prohibited hotlinked domain "' + badDomain + '"' };
+    }
+  }
+
+  return { valid: true };
+}
+
+function sanitizeOwnedItemForStorage(raw) {
+  if (!isPlainObject(raw)) return {};
+  const copy = JSON.parse(JSON.stringify(raw));
+  delete copy.dirty;
+  delete copy.syncSeq;
+  if (typeof copy.catNo === 'string') {
+    copy.catNo = copy.catNo.trim().replace(/[～〜]/g, '~').toUpperCase();
+  }
+  if (typeof copy.barcode === 'string') {
+    copy.barcode = copy.barcode.replace(/[\s-]+/g, '').trim();
+  }
+  return copy;
+}
+
+function parseOwnedDbRow(row) {
+  let parsed = {};
+  if (row && typeof row.data_json === 'string') {
+    try {
+      const candidate = JSON.parse(row.data_json);
+      if (isPlainObject(candidate)) parsed = candidate;
+    } catch (err) {}
+  }
+  return Object.assign({}, parsed, {
+    id: String(row.release_id),
+    clientUpdatedAt: Number(row.client_updated_at) || 0,
+    deletedAt: row.deleted_at === null || row.deleted_at === undefined ? null : Number(row.deleted_at),
+    syncSeq: Number(row.sync_seq) || 0
+  });
+}
+
 function getLimits(env) {
   return {
     dailyReqLimit: parsePositiveInt(env && env.DAILY_REQ_LIMIT, DEFAULT_DAILY_REQ_LIMIT),
@@ -354,16 +571,23 @@ async function getDailyUsage(db, utcDate) {
   };
 }
 
-async function incrementDailyUsage(db, utcDate, isWrite) {
-  await db
+function buildIncrementDailyUsageStmt(db, utcDate, isWriteOrDelta) {
+  const writeDelta =
+    typeof isWriteOrDelta === 'number'
+      ? Math.max(0, Math.floor(isWriteOrDelta))
+      : (isWriteOrDelta ? 1 : 0);
+  return db
     .prepare(
       'INSERT INTO daily_usage (utc_date, req_count, write_count) VALUES (?, 1, ?) ' +
       'ON CONFLICT(utc_date) DO UPDATE SET ' +
       'req_count = req_count + 1, ' +
       'write_count = write_count + excluded.write_count'
     )
-    .bind(utcDate, isWrite ? 1 : 0)
-    .run();
+    .bind(utcDate, writeDelta);
+}
+
+async function incrementDailyUsage(db, utcDate, isWriteOrDelta) {
+  await buildIncrementDailyUsageStmt(db, utcDate, isWriteOrDelta).run();
 }
 
 function checkCircuitBreaker(usage, env, isWrite) {
@@ -490,6 +714,35 @@ async function getGoogleServiceAccountToken(sa, env, nowMs) {
   return data.access_token;
 }
 
+async function resolveSheetTabInfo(sheetsBase, sheetId, sheetUrl, accessToken, fetchFn) {
+  let rangePrefix = '';
+  let tabTitle = null;
+  const gid = extractSheetGidFromUrl(sheetUrl);
+  if (gid !== null) {
+    const metaUrl =
+      sheetsBase +
+      '/v4/spreadsheets/' +
+      encodeURIComponent(sheetId) +
+      '?fields=sheets.properties(sheetId,title)';
+    const metaRes = await fetchFn(metaUrl, {
+      method: 'GET',
+      headers: { Authorization: 'Bearer ' + accessToken }
+    });
+    if (metaRes.ok) {
+      const metaData = await metaRes.json();
+      const sheets = Array.isArray(metaData && metaData.sheets) ? metaData.sheets : [];
+      const matchedSheet = sheets.find(function (s) {
+        return s && s.properties && Number(s.properties.sheetId) === Number(gid);
+      });
+      if (matchedSheet && matchedSheet.properties && matchedSheet.properties.title) {
+        tabTitle = String(matchedSheet.properties.title);
+        rangePrefix = "'" + tabTitle.replace(/'/g, "''") + "'!";
+      }
+    }
+  }
+  return { rangePrefix: rangePrefix, tabTitle: tabTitle };
+}
+
 async function syncChecklistToGoogleSheet(sheetSyncReq, env, nowMs) {
   const sa = parseGoogleServiceAccount(env);
   if (!sa) {
@@ -515,30 +768,14 @@ async function syncChecklistToGoogleSheet(sheetSyncReq, env, nowMs) {
     const fetchFn = getFetch();
     const accessToken = await getGoogleServiceAccountToken(sa, env, nowMs);
     const sheetsBase = ((env && env.GOOGLE_SHEETS_API_BASE_URL) || 'https://sheets.googleapis.com').replace(/\/+$/, '');
-
-    let rangePrefix = '';
-    const gid = extractSheetGidFromUrl(sheetSyncReq && sheetSyncReq.googleSheetUrl);
-    if (gid !== null) {
-      const metaUrl =
-        sheetsBase +
-        '/v4/spreadsheets/' +
-        encodeURIComponent(sheetId) +
-        '?fields=sheets.properties(sheetId,title)';
-      const metaRes = await fetchFn(metaUrl, {
-        method: 'GET',
-        headers: { Authorization: 'Bearer ' + accessToken }
-      });
-      if (metaRes.ok) {
-        const metaData = await metaRes.json();
-        const sheets = Array.isArray(metaData && metaData.sheets) ? metaData.sheets : [];
-        const matchedSheet = sheets.find(function (s) {
-          return s && s.properties && Number(s.properties.sheetId) === Number(gid);
-        });
-        if (matchedSheet && matchedSheet.properties && matchedSheet.properties.title) {
-          rangePrefix = "'" + String(matchedSheet.properties.title).replace(/'/g, "''") + "'!";
-        }
-      }
-    }
+    const tabInfo = await resolveSheetTabInfo(
+      sheetsBase,
+      sheetId,
+      sheetSyncReq && sheetSyncReq.googleSheetUrl,
+      accessToken,
+      fetchFn
+    );
+    const rangePrefix = tabInfo.rangePrefix;
 
     const rangeA1 = rangePrefix + 'A1:I500';
     const encodedRange = rangePrefix ? encodeURIComponent(rangeA1) : rangeA1;
@@ -664,7 +901,15 @@ function sanitizeShareState(parsedState, rowUpdatedAt) {
   };
 }
 
-function formatShareMarkdown(login, updatedAt, sanitizedState) {
+function sanitizeOwnedForShare(row) {
+  const full = parseOwnedDbRow(row);
+  delete full.customCovers;
+  delete full.selectedVariant;
+  delete full.dirty;
+  return full;
+}
+
+function formatShareMarkdown(login, updatedAt, sanitizedState, collectionItems) {
   const updatedStr = updatedAt ? new Date(updatedAt).toISOString() : 'Not yet synced';
   const lines = [
     '# Disk Crate Live Status (@' + String(login || 'user') + ')',
@@ -689,6 +934,28 @@ function formatShareMarkdown(login, updatedAt, sanitizedState) {
       lines.push('- Acquired Count: `' + acquiredIds.length + '`');
       lines.push('- Acquired IDs (`Got it? = TRUE`): ' + (acquiredIds.length > 0 ? acquiredIds.map(function (id) { return '`' + id + '`'; }).join(', ') : '_None_'));
     });
+  }
+
+  if (Array.isArray(collectionItems)) {
+    lines.push('');
+    lines.push('## Owned Collection (' + collectionItems.length + ' ' + (collectionItems.length === 1 ? 'release' : 'releases') + ')');
+    if (collectionItems.length === 0) {
+      lines.push('', '_No synced owned releases yet._');
+    } else {
+      collectionItems.forEach(function (item) {
+        const artistStr = item.artistJa ? item.artist + ' (' + item.artistJa + ')' : item.artist;
+        const titleStr = item.titleJa ? item.title + ' (' + item.titleJa + ')' : item.title;
+        const tracks = Array.isArray(item.tracks) ? item.tracks : [];
+        const edPart = item.editionLabel ? ' · ' + item.editionLabel : '';
+        lines.push('');
+        lines.push('- **`' + item.catNo + '`**' + edPart + ' — ' + artistStr + ' — *' + titleStr + '* [`' + item.category + '`, `' + tracks.length + ' tracks`]');
+        if (tracks.length > 0) {
+          lines.push('  - Tracks: ' + tracks.map(function (t) {
+            return (t.disc && t.disc > 1 ? 'D' + t.disc + '-' : '') + t.number + '. ' + t.title;
+          }).join('; '));
+        }
+      });
+    }
   }
 
   lines.push('');
@@ -899,6 +1166,15 @@ async function handleGetState(request, env, corsHeaders, nowMs) {
   );
 }
 
+async function queryAllRows(stmt) {
+  if (typeof stmt.all === 'function') {
+    const res = await stmt.all();
+    return Array.isArray(res) ? res : (Array.isArray(res && res.results) ? res.results : []);
+  }
+  const single = await stmt.first();
+  return single ? [single] : [];
+}
+
 async function handleGetShare(request, url, rawToken, env, nowMs) {
   const publicHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -943,30 +1219,507 @@ async function handleGetShare(request, url, rawToken, env, nowMs) {
 
   const sanitized = sanitizeShareState(parsedState, row ? row.updated_at : null);
   const login = (row && row.github_login) || String(claims.login || '');
+
+  const includeParam = String(url.searchParams.get('include') || '').toLowerCase();
+  const includeCollection = includeParam === 'collection' || includeParam === 'all';
+  let sanitizedOwned = null;
+  if (includeCollection) {
+    const ownedRows = await queryAllRows(
+      env.DB
+        .prepare('SELECT release_id, data_json, client_updated_at, deleted_at, sync_seq FROM owned_releases WHERE github_id = ? AND deleted_at IS NULL ORDER BY sync_seq ASC')
+        .bind(String(claims.sub))
+    );
+    sanitizedOwned = ownedRows.map(sanitizeOwnedForShare);
+  }
+
   const formatParam = String(url.searchParams.get('format') || '').toLowerCase();
   const acceptHeader = String(request.headers.get('Accept') || '').toLowerCase();
   const wantsMarkdown = formatParam === 'markdown' || formatParam === 'md' || acceptHeader.includes('text/markdown');
 
   if (wantsMarkdown) {
-    return new Response(formatShareMarkdown(login, sanitized.updatedAt, sanitized), {
+    return new Response(formatShareMarkdown(login, sanitized.updatedAt, sanitized, sanitizedOwned), {
       status: 200,
       headers: Object.assign({ 'Content-Type': 'text/markdown; charset=utf-8' }, publicHeaders)
     });
   }
 
+  const body = {
+    ok: true,
+    user: {
+      login: String(login)
+    },
+    updatedAt: sanitized.updatedAt,
+    activeCatalogUrl: sanitized.activeCatalogUrl,
+    catalogs: sanitized.catalogs
+  };
+  if (includeCollection && sanitizedOwned) {
+    body.collection = {
+      count: sanitizedOwned.length,
+      items: sanitizedOwned
+    };
+  }
+
+  return jsonResponse(body, 200, publicHeaders);
+}
+
+async function handleGetCollection(request, url, env, corsHeaders, nowMs) {
+  const claims = await authenticateRequest(request, env, nowMs);
+  if (!claims) {
+    return jsonResponse({ ok: false, error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!env || !env.DB) {
+    return jsonResponse({ ok: false, error: 'D1 database binding is missing' }, 500, corsHeaders);
+  }
+
+  const rawSince = url.searchParams.get('since');
+  let since = 0;
+  if (rawSince !== null && rawSince !== '') {
+    if (!/^\d+$/.test(rawSince.trim())) {
+      return jsonResponse({ ok: false, error: 'since must be a non-negative integer' }, 400, corsHeaders);
+    }
+    since = parseInt(rawSince.trim(), 10);
+  }
+
+  const rawLimit = url.searchParams.get('limit');
+  let limit = 200;
+  if (rawLimit !== null && rawLimit !== '') {
+    if (!/^\d+$/.test(rawLimit.trim()) || parseInt(rawLimit.trim(), 10) < 1) {
+      return jsonResponse({ ok: false, error: 'limit must be a positive integer' }, 400, corsHeaders);
+    }
+    limit = Math.min(200, parseInt(rawLimit.trim(), 10));
+  }
+
+  const utcDate = getUtcDateString(nowMs);
+  const resetsAt = getNextUtcMidnightIso(nowMs);
+  const usage = await getDailyUsage(env.DB, utcDate);
+  const circuit = checkCircuitBreaker(usage, env, false);
+  if (circuit.paused) {
+    return jsonResponse({ ok: false, paused: true, reason: circuit.reason, resetsAt: resetsAt }, 503, corsHeaders);
+  }
+
+  await incrementDailyUsage(env.DB, utcDate, 0);
+
+  const syncState = await env.DB
+    .prepare('SELECT next_seq, hour_window, hour_writes FROM user_sync_state WHERE github_id = ?')
+    .bind(String(claims.sub))
+    .first();
+  const latestSeq = syncState ? Number(syncState.next_seq) || 0 : 0;
+
+  const rows = await queryAllRows(
+    env.DB
+      .prepare('SELECT release_id, data_json, client_updated_at, deleted_at, sync_seq FROM owned_releases WHERE github_id = ? AND sync_seq > ? ORDER BY sync_seq ASC LIMIT ?')
+      .bind(String(claims.sub), since, limit + 1)
+  );
+
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const items = pageRows.map(parseOwnedDbRow);
+  const nextCursor = items.length > 0 ? items[items.length - 1].syncSeq : Math.max(since, latestSeq);
+
   return jsonResponse(
     {
       ok: true,
-      user: {
-        login: String(login)
-      },
-      updatedAt: sanitized.updatedAt,
-      activeCatalogUrl: sanitized.activeCatalogUrl,
-      catalogs: sanitized.catalogs
+      paused: false,
+      items: items,
+      nextCursor: nextCursor,
+      hasMore: hasMore,
+      latestSeq: latestSeq,
+      resetsAt: resetsAt
     },
     200,
-    publicHeaders
+    corsHeaders
   );
+}
+
+async function handlePostCollectionBatch(request, env, corsHeaders, nowMs) {
+  const claims = await authenticateRequest(request, env, nowMs);
+  if (!claims) {
+    return jsonResponse({ ok: false, error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!env || !env.DB) {
+    return jsonResponse({ ok: false, error: 'D1 database binding is missing' }, 500, corsHeaders);
+  }
+
+  const utcDate = getUtcDateString(nowMs);
+  const resetsAt = getNextUtcMidnightIso(nowMs);
+  const limits = getLimits(env);
+  const usage = await getDailyUsage(env.DB, utcDate);
+  const circuit = checkCircuitBreaker(usage, env, true);
+  if (circuit.paused) {
+    return jsonResponse({ ok: false, paused: true, reason: circuit.reason, resetsAt: resetsAt }, 503, corsHeaders);
+  }
+
+  const rawBody = await request.text();
+  const payloadBytes = textEncoder.encode(rawBody).length;
+  if (payloadBytes > limits.maxPayloadBytes) {
+    return jsonResponse(
+      { ok: false, error: 'Payload exceeds maximum allowed size', maxBytes: limits.maxPayloadBytes },
+      413,
+      corsHeaders
+    );
+  }
+
+  let parsedBody;
+  try {
+    parsedBody = JSON.parse(rawBody);
+  } catch (err) {
+    return jsonResponse({ ok: false, error: 'Request body must be valid JSON' }, 400, corsHeaders);
+  }
+
+  const validation = validateCollectionBatchPayload(parsedBody);
+  if (!validation.valid) {
+    return jsonResponse({ ok: false, error: validation.error }, 400, corsHeaders);
+  }
+
+  const hourWindow = getHourWindow(nowMs);
+  const existingSync = await env.DB
+    .prepare('SELECT next_seq, hour_window, hour_writes FROM user_sync_state WHERE github_id = ?')
+    .bind(String(claims.sub))
+    .first();
+
+  if (
+    existingSync &&
+    Number(existingSync.hour_window) === hourWindow &&
+    Number(existingSync.hour_writes) >= limits.userHourlyWriteLimit
+  ) {
+    const retryAfter = getRetryAfterSeconds(nowMs);
+    return jsonResponse(
+      {
+        ok: false,
+        error: 'rate_limit_exceeded',
+        retryAfterSeconds: retryAfter
+      },
+      429,
+      Object.assign({ 'Retry-After': String(retryAfter) }, corsHeaders)
+    );
+  }
+
+  let nextSeq = existingSync ? Number(existingSync.next_seq) || 0 : 0;
+  if (parsedBody.items.length === 0) {
+    await incrementDailyUsage(env.DB, utcDate, 0);
+    return jsonResponse(
+      {
+        ok: true,
+        paused: false,
+        accepted: [],
+        conflicts: [],
+        latestSeq: nextSeq,
+        resetsAt: resetsAt
+      },
+      200,
+      corsHeaders
+    );
+  }
+
+  // Deduplicate duplicate IDs within a single batch, keeping newest clientUpdatedAt
+  const dedupedById = new Map();
+  for (let i = 0; i < parsedBody.items.length; i++) {
+    const it = parsedBody.items[i];
+    const prev = dedupedById.get(it.id);
+    if (!prev || Number(it.clientUpdatedAt) >= Number(prev.clientUpdatedAt)) {
+      dedupedById.set(it.id, it);
+    }
+  }
+
+  const accepted = [];
+  const conflicts = [];
+  const upsertStmts = [];
+
+  for (const item of dedupedById.values()) {
+    const existingRow = await env.DB
+      .prepare('SELECT release_id, data_json, client_updated_at, deleted_at, sync_seq FROM owned_releases WHERE github_id = ? AND release_id = ?')
+      .bind(String(claims.sub), String(item.id))
+      .first();
+
+    if (existingRow && Number(existingRow.client_updated_at) > Number(item.clientUpdatedAt)) {
+      conflicts.push({
+        id: String(item.id),
+        reason: 'stale_client_timestamp',
+        serverItem: parseOwnedDbRow(existingRow)
+      });
+      continue;
+    }
+
+    nextSeq += 1;
+    const isTombstone = item.deletedAt !== undefined && item.deletedAt !== null;
+    const deletedAtVal = isTombstone ? Number(item.deletedAt) : null;
+    const cleanData = isTombstone
+      ? { id: String(item.id), deletedAt: deletedAtVal, clientUpdatedAt: Number(item.clientUpdatedAt) }
+      : sanitizeOwnedItemForStorage(item);
+
+    upsertStmts.push(
+      env.DB
+        .prepare(
+          'INSERT INTO owned_releases (github_id, release_id, data_json, client_updated_at, deleted_at, sync_seq) ' +
+          'VALUES (?, ?, ?, ?, ?, ?) ' +
+          'ON CONFLICT(github_id, release_id) DO UPDATE SET ' +
+          'data_json = excluded.data_json, ' +
+          'client_updated_at = excluded.client_updated_at, ' +
+          'deleted_at = excluded.deleted_at, ' +
+          'sync_seq = excluded.sync_seq'
+        )
+        .bind(
+          String(claims.sub),
+          String(item.id),
+          JSON.stringify(cleanData),
+          Number(item.clientUpdatedAt),
+          deletedAtVal,
+          nextSeq
+        )
+    );
+
+    accepted.push({
+      id: String(item.id),
+      syncSeq: nextSeq,
+      clientUpdatedAt: Number(item.clientUpdatedAt),
+      deletedAt: deletedAtVal
+    });
+  }
+
+  if (accepted.length === 0) {
+    await incrementDailyUsage(env.DB, utcDate, 0);
+    return jsonResponse(
+      {
+        ok: true,
+        paused: false,
+        accepted: accepted,
+        conflicts: conflicts,
+        latestSeq: nextSeq,
+        resetsAt: resetsAt
+      },
+      200,
+      corsHeaders
+    );
+  }
+
+  const syncStateStmt = env.DB
+    .prepare(
+      'INSERT INTO user_sync_state (github_id, next_seq, hour_window, hour_writes) ' +
+      'VALUES (?, ?, ?, 1) ' +
+      'ON CONFLICT(github_id) DO UPDATE SET ' +
+      'next_seq = excluded.next_seq, ' +
+      'hour_window = excluded.hour_window, ' +
+      'hour_writes = CASE ' +
+      'WHEN user_sync_state.hour_window = excluded.hour_window THEN user_sync_state.hour_writes + 1 ' +
+      'ELSE 1 END'
+    )
+    .bind(String(claims.sub), nextSeq, hourWindow);
+
+  const dailyStmt = buildIncrementDailyUsageStmt(env.DB, utcDate, 1 + accepted.length);
+  const allStatements = [syncStateStmt].concat(upsertStmts, [dailyStmt]);
+
+  if (typeof env.DB.batch === 'function') {
+    await env.DB.batch(allStatements);
+  } else {
+    for (let s = 0; s < allStatements.length; s++) {
+      await allStatements[s].run();
+    }
+  }
+
+  return jsonResponse(
+    {
+      ok: true,
+      paused: false,
+      accepted: accepted,
+      conflicts: conflicts,
+      latestSeq: nextSeq,
+      resetsAt: resetsAt
+    },
+    200,
+    corsHeaders
+  );
+}
+
+function buildOwnedSheetRowsForWorker(items) {
+  const sorted = (Array.isArray(items) ? items : []).slice().sort(function (a, b) {
+    const catCmp = String(a.category || '').localeCompare(String(b.category || ''));
+    if (catCmp !== 0) return catCmp;
+    const artCmp = String(a.artist || '').localeCompare(String(b.artist || ''));
+    if (artCmp !== 0) return artCmp;
+    const titleCmp = String(a.title || '').localeCompare(String(b.title || ''));
+    if (titleCmp !== 0) return titleCmp;
+    return String(a.catNo || '').localeCompare(String(b.catNo || ''));
+  });
+
+  const rows = [OWNED_SHEET_HEADERS];
+  sorted.forEach(function (item) {
+    const artist = item.artistJa && String(item.artist || '').indexOf(item.artistJa) === -1
+      ? item.artist + ' (' + item.artistJa + ')'
+      : String(item.artist || '');
+    const title = item.titleJa && String(item.title || '').indexOf(item.titleJa) === -1
+      ? item.title + ' (' + item.titleJa + ')'
+      : String(item.title || '');
+    const trackCount = Array.isArray(item.tracks) ? String(item.tracks.length) : '0';
+    rows.push([
+      String(item.catNo || ''),
+      String(item.editionLabel || ''),
+      String(item.category || ''),
+      artist,
+      title,
+      String(item.barcode || ''),
+      String(item.purchasePrice || ''),
+      String(item.purchaseShop || ''),
+      String(item.purchaseDate || ''),
+      trackCount,
+      String(item.notes || '')
+    ]);
+  });
+  return rows;
+}
+
+async function handlePostCollectionSheetSync(request, env, corsHeaders, nowMs) {
+  const claims = await authenticateRequest(request, env, nowMs);
+  if (!claims) {
+    return jsonResponse({ ok: false, error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!env || !env.DB) {
+    return jsonResponse({ ok: false, error: 'D1 database binding is missing' }, 500, corsHeaders);
+  }
+
+  const utcDate = getUtcDateString(nowMs);
+  const resetsAt = getNextUtcMidnightIso(nowMs);
+  const limits = getLimits(env);
+  const usage = await getDailyUsage(env.DB, utcDate);
+  const circuit = checkCircuitBreaker(usage, env, true);
+  if (circuit.paused) {
+    return jsonResponse({ ok: false, paused: true, reason: circuit.reason, resetsAt: resetsAt }, 503, corsHeaders);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch (err) {
+    return jsonResponse({ ok: false, error: 'Request body must be valid JSON' }, 400, corsHeaders);
+  }
+  const sheetUrl = body && typeof body.googleSheetUrl === 'string' ? body.googleSheetUrl.trim() : '';
+  const sheetId = extractSheetIdFromUrl(sheetUrl);
+  if (!sheetId) {
+    return jsonResponse({ ok: false, error: 'Valid googleSheetUrl is required' }, 400, corsHeaders);
+  }
+
+  const hourWindow = getHourWindow(nowMs);
+  const existingSync = await env.DB
+    .prepare('SELECT next_seq, hour_window, hour_writes FROM user_sync_state WHERE github_id = ?')
+    .bind(String(claims.sub))
+    .first();
+
+  if (
+    existingSync &&
+    Number(existingSync.hour_window) === hourWindow &&
+    Number(existingSync.hour_writes) >= limits.userHourlyWriteLimit
+  ) {
+    const retryAfter = getRetryAfterSeconds(nowMs);
+    return jsonResponse(
+      {
+        ok: false,
+        error: 'rate_limit_exceeded',
+        retryAfterSeconds: retryAfter
+      },
+      429,
+      Object.assign({ 'Retry-After': String(retryAfter) }, corsHeaders)
+    );
+  }
+
+  const sa = parseGoogleServiceAccount(env);
+  if (!sa) {
+    return jsonResponse(
+      { ok: false, skipped: true, reason: 'service_account_not_configured', resetsAt: resetsAt },
+      200,
+      corsHeaders
+    );
+  }
+
+  const ownedRows = await queryAllRows(
+    env.DB
+      .prepare('SELECT release_id, data_json, client_updated_at, deleted_at, sync_seq FROM owned_releases WHERE github_id = ? AND deleted_at IS NULL ORDER BY sync_seq ASC')
+      .bind(String(claims.sub))
+  );
+  const activeItems = ownedRows.map(parseOwnedDbRow);
+  const sheetRows = buildOwnedSheetRowsForWorker(activeItems);
+
+  try {
+    const fetchFn = getFetch();
+    const accessToken = await getGoogleServiceAccountToken(sa, env, nowMs);
+    const sheetsBase = ((env && env.GOOGLE_SHEETS_API_BASE_URL) || 'https://sheets.googleapis.com').replace(/\/+$/, '');
+    const tabInfo = await resolveSheetTabInfo(sheetsBase, sheetId, sheetUrl, accessToken, fetchFn);
+    const rangePrefix = tabInfo.rangePrefix;
+
+    const clearA1 = rangePrefix + 'A1:K5000';
+    const encodedClear = rangePrefix ? encodeURIComponent(clearA1) : clearA1;
+    const clearUrl = sheetsBase + '/v4/spreadsheets/' + encodeURIComponent(sheetId) + '/values/' + encodedClear + ':clear';
+    const clearRes = await fetchFn(clearUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + accessToken,
+        'Content-Type': 'application/json'
+      },
+      body: '{}'
+    });
+    if (!clearRes.ok) {
+      throw new Error('Google Sheets clear failed (HTTP ' + clearRes.status + ')');
+    }
+
+    const writeA1 = rangePrefix + 'A1:K' + sheetRows.length;
+    const encodedWrite = rangePrefix ? encodeURIComponent(writeA1) : writeA1;
+    const writeUrl =
+      sheetsBase +
+      '/v4/spreadsheets/' +
+      encodeURIComponent(sheetId) +
+      '/values/' +
+      encodedWrite +
+      '?valueInputOption=USER_ENTERED';
+    const writeRes = await fetchFn(writeUrl, {
+      method: 'PUT',
+      headers: {
+        Authorization: 'Bearer ' + accessToken,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        range: writeA1,
+        majorDimension: 'ROWS',
+        values: sheetRows
+      })
+    });
+    if (!writeRes.ok) {
+      throw new Error('Google Sheets update failed (HTTP ' + writeRes.status + ')');
+    }
+
+    const currentSeq = existingSync ? Number(existingSync.next_seq) || 0 : 0;
+    await env.DB
+      .prepare(
+        'INSERT INTO user_sync_state (github_id, next_seq, hour_window, hour_writes) ' +
+        'VALUES (?, ?, ?, 1) ' +
+        'ON CONFLICT(github_id) DO UPDATE SET ' +
+        'hour_window = excluded.hour_window, ' +
+        'hour_writes = CASE ' +
+        'WHEN user_sync_state.hour_window = excluded.hour_window THEN user_sync_state.hour_writes + 1 ' +
+        'ELSE 1 END'
+      )
+      .bind(String(claims.sub), currentSeq, hourWindow)
+      .run();
+    await incrementDailyUsage(env.DB, utcDate, 1);
+
+    return jsonResponse(
+      {
+        ok: true,
+        writtenRows: activeItems.length,
+        tabTitle: tabInfo.tabTitle,
+        resetsAt: resetsAt
+      },
+      200,
+      corsHeaders
+    );
+  } catch (err) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: err && err.message ? err.message : String(err),
+        resetsAt: resetsAt
+      },
+      502,
+      corsHeaders
+    );
+  }
 }
 
 async function handlePutState(request, env, corsHeaders, nowMs) {
@@ -1141,6 +1894,21 @@ async function handleFetch(request, env) {
     return jsonResponse({ ok: false, error: 'Method not allowed' }, 405, corsHeaders);
   }
 
+  if (url.pathname === '/api/collection') {
+    if (method === 'GET') return handleGetCollection(request, url, env, corsHeaders, nowMs);
+    return jsonResponse({ ok: false, error: 'Method not allowed' }, 405, corsHeaders);
+  }
+
+  if (url.pathname === '/api/collection/batch') {
+    if (method === 'POST') return handlePostCollectionBatch(request, env, corsHeaders, nowMs);
+    return jsonResponse({ ok: false, error: 'Method not allowed' }, 405, corsHeaders);
+  }
+
+  if (url.pathname === '/api/collection/sheet-sync') {
+    if (method === 'POST') return handlePostCollectionSheetSync(request, env, corsHeaders, nowMs);
+    return jsonResponse({ ok: false, error: 'Method not allowed' }, 405, corsHeaders);
+  }
+
   return jsonResponse({ ok: false, error: 'Not found' }, 404, corsHeaders);
 }
 
@@ -1149,6 +1917,7 @@ module.exports = {
   signToken: signToken,
   verifyToken: verifyToken,
   validateSyncPayload: validateSyncPayload,
+  validateCollectionBatchPayload: validateCollectionBatchPayload,
   getAllowedOrigins: getAllowedOrigins,
   getUtcDateString: getUtcDateString,
   getNextUtcMidnightIso: getNextUtcMidnightIso,

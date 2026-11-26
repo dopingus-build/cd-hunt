@@ -268,3 +268,14 @@ See [`sample-catalog.json`](./sample-catalog.json) for a ready-to-use JSON file,
   ]
 }
 ```
+
+---
+
+## 7. Owned Collection Format (`schemas/collection.v1.schema.json` & 11-Column CSV)
+
+In **Collection** mode (`?mode=collection`), Disk Crate stores the user's Owned Releases database locally in IndexedDB (`disk_crate_db_v1` / `owned_releases`) and supports lossless JSON snapshots conforming to [`schemas/collection.v1.schema.json`](../schemas/collection.v1.schema.json) (`schemaVersion: 1`, `exportedAt`, `ownedSheetUrl`, `releases[]`).
+
+- **Core `OwnedRelease` fields:** `id`, `artist`, `title`, `category`, `catNo`, `createdAt`, `clientUpdatedAt`, plus optional `artistJa`, `titleJa`, `editionLabel`, `barcode`, `mbid`, `accent`, `tracks[]`, `trackSource`, `customCovers`, `selectedVariant`, `purchasePrice`, `purchaseShop`, `purchaseDate`, `notes`, `syncSeq`, and soft-delete tombstone `deletedAt`.
+- **11-Column Owned Sheet CSV:** Exportable/importable via **Collection → JSON / Sheet Backup** using exact header order:
+  `ID | Category | Artist | Title | Catalog Number | Edition | Barcode | Purchase Price | Purchase Shop | Purchase Date | Notes`
+  Re-importing an Owned Sheet merges metadata non-destructively (preserving existing `tracks[]`, `mbid`, `customCovers`, and `selectedVariant`).

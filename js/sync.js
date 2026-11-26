@@ -660,6 +660,375 @@
     }
   }
 
+  function sanitizeOutgoingCollectionItem(item) {
+    if (!item || typeof item !== 'object') return null;
+    if (item.deletedAt !== undefined && item.deletedAt !== null) {
+      return {
+        id: String(item.id),
+        clientUpdatedAt: Number(item.clientUpdatedAt) || Date.now(),
+        deletedAt: Number(item.deletedAt)
+      };
+    }
+    const copy = JSON.parse(JSON.stringify(item));
+    delete copy.dirty;
+    delete copy.syncSeq;
+    return copy;
+  }
+
+  function chunkCollectionItems(items, maxItemsPerBatch, maxBytesPerBatch) {
+    const limitItems = maxItemsPerBatch || 50;
+    const limitBytes = maxBytesPerBatch || 98304;
+    const chunks = [];
+    let current = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const clean = sanitizeOutgoingCollectionItem(items[i]);
+      if (!clean) continue;
+      const candidate = current.concat([clean]);
+      const jsonStr = JSON.stringify({ items: candidate });
+      const byteLen = typeof TextEncoder === 'function' ? new TextEncoder().encode(jsonStr).length : jsonStr.length * 2;
+      if (current.length > 0 && (candidate.length > limitItems || byteLen > limitBytes)) {
+        chunks.push(current);
+        current = [clean];
+      } else {
+        current = candidate;
+      }
+    }
+    if (current.length > 0) chunks.push(current);
+    return chunks;
+  }
+
+  async function pullCollectionPage(syncApiUrl, token, sinceSeq, limit, fetchFn) {
+    const fn = fetchFn || (root && root.fetch) || (typeof fetch === 'function' ? fetch : null);
+    const base = cleanConfigSyncUrl(syncApiUrl);
+    if (!fn || !base || !token) return { ok: false, offline: true };
+
+    const since = Number.isInteger(sinceSeq) && sinceSeq >= 0 ? sinceSeq : 0;
+    const lim = Number.isInteger(limit) && limit > 0 ? Math.min(200, limit) : 200;
+
+    try {
+      const url = base + '/api/collection?since=' + encodeURIComponent(String(since)) + '&limit=' + encodeURIComponent(String(lim));
+      const res = await fn(url, {
+        method: 'GET',
+        headers: {
+          Authorization: 'Bearer ' + token
+        }
+      });
+      if (res.status === 401) return { ok: false, unauthorized: true };
+      const body = await res.json().catch(function () { return {}; });
+      if (res.status === 503 || (body && body.paused)) {
+        return {
+          ok: false,
+          paused: true,
+          reason: (body && body.reason) || 'daily_free_tier_limit_reached',
+          resetsAt: (body && body.resetsAt) || null
+        };
+      }
+      if (!res.ok) {
+        return { ok: false, error: (body && body.error) || ('HTTP ' + res.status) };
+      }
+      return {
+        ok: true,
+        paused: false,
+        items: Array.isArray(body.items) ? body.items : [],
+        nextCursor: Number(body.nextCursor) || since,
+        hasMore: Boolean(body.hasMore),
+        latestSeq: Number(body.latestSeq) || 0,
+        resetsAt: body.resetsAt || null
+      };
+    } catch (err) {
+      return { ok: false, offline: true, error: err && err.message ? err.message : String(err) };
+    }
+  }
+
+  async function pullAllCollectionDeltas(syncApiUrl, token, startSeq, fetchFn) {
+    let cursor = Number.isInteger(startSeq) && startSeq >= 0 ? startSeq : 0;
+    let latestSeq = cursor;
+    let resetsAt = null;
+    const items = [];
+
+    for (let pageIdx = 0; pageIdx < 200; pageIdx++) {
+      const page = await pullCollectionPage(syncApiUrl, token, cursor, 200, fetchFn);
+      if (!page.ok) {
+        return Object.assign({}, page, { items: items, lastCursor: cursor });
+      }
+      if (page.items.length > 0) {
+        for (let i = 0; i < page.items.length; i++) {
+          items.push(page.items[i]);
+        }
+      }
+      if (typeof page.nextCursor === 'number' && page.nextCursor > cursor) {
+        cursor = page.nextCursor;
+      }
+      if (typeof page.latestSeq === 'number' && page.latestSeq > latestSeq) {
+        latestSeq = page.latestSeq;
+      }
+      if (page.resetsAt) resetsAt = page.resetsAt;
+      if (!page.hasMore || page.items.length === 0) break;
+    }
+
+    return {
+      ok: true,
+      paused: false,
+      items: items,
+      lastCursor: cursor,
+      latestSeq: latestSeq,
+      resetsAt: resetsAt
+    };
+  }
+
+  async function pushCollectionBatch(syncApiUrl, token, items, fetchFn, options) {
+    const fn = typeof fetchFn === 'function'
+      ? fetchFn
+      : ((root && root.fetch) || (typeof fetch === 'function' ? fetch : null));
+    const opts = options && typeof options === 'object'
+      ? options
+      : (typeof fetchFn !== 'function' && fetchFn && typeof fetchFn === 'object' ? fetchFn : {});
+    const base = cleanConfigSyncUrl(syncApiUrl);
+    if (!fn || !base || !token) return { ok: false, offline: true };
+
+    const outgoing = (Array.isArray(items) ? items : []).map(sanitizeOutgoingCollectionItem).filter(Boolean);
+    try {
+      const fetchInit = {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + token,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ items: outgoing })
+      };
+      if (opts.keepalive) {
+        fetchInit.keepalive = true;
+      }
+      const res = await fn(base + '/api/collection/batch', fetchInit);
+      if (res.status === 401) return { ok: false, unauthorized: true };
+      if (res.status === 413) return { ok: false, payloadTooLarge: true };
+      const body = await res.json().catch(function () { return {}; });
+      if (res.status === 429) {
+        return {
+          ok: false,
+          rateLimited: true,
+          retryAfterSeconds: (body && body.retryAfterSeconds) || 60
+        };
+      }
+      if (res.status === 503 || (body && body.paused)) {
+        return {
+          ok: false,
+          paused: true,
+          reason: (body && body.reason) || 'daily_free_tier_limit_reached',
+          resetsAt: (body && body.resetsAt) || null
+        };
+      }
+      if (!res.ok) {
+        return { ok: false, error: (body && body.error) || ('HTTP ' + res.status) };
+      }
+      return {
+        ok: true,
+        paused: false,
+        accepted: Array.isArray(body.accepted) ? body.accepted : [],
+        conflicts: Array.isArray(body.conflicts) ? body.conflicts : [],
+        latestSeq: Number(body.latestSeq) || 0,
+        resetsAt: body.resetsAt || null
+      };
+    } catch (err) {
+      return { ok: false, offline: true, error: err && err.message ? err.message : String(err) };
+    }
+  }
+
+  async function applyPulledServerItems(dbClient, pulledItems) {
+    if (!dbClient || !Array.isArray(pulledItems) || pulledItems.length === 0) return 0;
+    const allExisting = await dbClient.getAllOwnedReleases({ includeDeleted: true });
+    const existingById = new Map();
+    allExisting.forEach(function (r) {
+      if (r && r.id) existingById.set(r.id, r);
+    });
+
+    const toWrite = [];
+    for (let i = 0; i < pulledItems.length; i++) {
+      const srv = pulledItems[i];
+      if (!srv || !srv.id) continue;
+      const local = existingById.get(srv.id);
+      if (!local || local.dirty !== 1 || Number(srv.clientUpdatedAt) > Number(local.clientUpdatedAt || 0)) {
+        toWrite.push(Object.assign({}, srv, { dirty: 0 }));
+      }
+    }
+    if (toWrite.length > 0) {
+      await dbClient.putOwnedReleasesBatch(toWrite);
+    }
+    return toWrite.length;
+  }
+
+  async function syncOwnedCollection(dbClient, syncApiUrl, token, fetchFn, options) {
+    if (!dbClient || !syncApiUrl || !token) return { ok: false, offline: true };
+    const nowMs = Date.now();
+    const existingMeta = (await dbClient.getSyncMeta('collectionSync')) || {};
+    const startSeq = Number(existingMeta.lastSyncSeq) || 0;
+
+    let currentSeq = startSeq;
+    let totalPulled = 0;
+    let totalPushed = 0;
+    let totalConflicts = 0;
+    let resetsAt = null;
+    let hasConcurrentGap = false;
+
+    const pullRes = await pullAllCollectionDeltas(syncApiUrl, token, startSeq, fetchFn);
+    if (!pullRes.ok) {
+      return pullRes;
+    }
+    totalPulled += await applyPulledServerItems(dbClient, pullRes.items);
+    if (pullRes.latestSeq > currentSeq) currentSeq = pullRes.latestSeq;
+    if (pullRes.lastCursor > currentSeq) currentSeq = pullRes.lastCursor;
+    if (pullRes.resetsAt) resetsAt = pullRes.resetsAt;
+
+    const dirtyList = (await dbClient.getDirtyOwnedReleases()).slice().sort(function (a, b) {
+      return (Number(a.clientUpdatedAt) || 0) - (Number(b.clientUpdatedAt) || 0);
+    });
+
+    const dirtyById = new Map();
+    dirtyList.forEach(function (d) {
+      if (d && d.id) dirtyById.set(d.id, d);
+    });
+
+    if (dirtyList.length > 0) {
+      const chunks = chunkCollectionItems(dirtyList, 50, 98304);
+      for (let c = 0; c < chunks.length; c++) {
+        const seqBeforePush = currentSeq;
+        const pushRes = await pushCollectionBatch(syncApiUrl, token, chunks[c], fetchFn, options);
+        if (!pushRes.ok) {
+          await dbClient.putSyncMeta('collectionSync', {
+            lastSyncSeq: currentSeq,
+            lastPulledAt: nowMs,
+            lastPushedAt: existingMeta.lastPushedAt || 0,
+            lastOwnedSheetUrl: existingMeta.lastOwnedSheetUrl || ''
+          });
+          return Object.assign({}, pushRes, { pulledCount: totalPulled, pushedCount: totalPushed });
+        }
+
+        if (pushRes.resetsAt) resetsAt = pushRes.resetsAt;
+        const toAck = [];
+        let minAcceptedSeq = Infinity;
+        let maxAcceptedSeq = 0;
+
+        pushRes.accepted.forEach(function (acc) {
+          if (!acc || !acc.id) return;
+          totalPushed++;
+          const accSeq = Number(acc.syncSeq) || 0;
+          if (accSeq > 0) {
+            if (accSeq < minAcceptedSeq) minAcceptedSeq = accSeq;
+            if (accSeq > maxAcceptedSeq) maxAcceptedSeq = accSeq;
+          }
+          const orig = dirtyById.get(acc.id);
+          if (orig && (Number(orig.clientUpdatedAt) || 0) <= (Number(acc.clientUpdatedAt) || 0)) {
+            toAck.push(
+              Object.assign({}, orig, {
+                syncSeq: accSeq,
+                deletedAt: acc.deletedAt === undefined ? orig.deletedAt : acc.deletedAt,
+                dirty: 0
+              })
+            );
+          }
+        });
+
+        pushRes.conflicts.forEach(function (conf) {
+          if (!conf) return;
+          totalConflicts++;
+          if (conf.serverItem && conf.serverItem.id) {
+            toAck.push(Object.assign({}, conf.serverItem, { dirty: 0 }));
+          }
+        });
+
+        if (toAck.length > 0) {
+          await dbClient.putOwnedReleasesBatch(toAck);
+        }
+
+        if (pushRes.accepted.length > 0) {
+          if (minAcceptedSeq > seqBeforePush + 1 || maxAcceptedSeq < pushRes.latestSeq) {
+            hasConcurrentGap = true;
+          } else if (pushRes.latestSeq > currentSeq) {
+            currentSeq = pushRes.latestSeq;
+          }
+        } else if (pushRes.latestSeq > currentSeq) {
+          hasConcurrentGap = true;
+        }
+      }
+    }
+
+    if (hasConcurrentGap) {
+      const followUp = await pullAllCollectionDeltas(syncApiUrl, token, currentSeq, fetchFn);
+      if (followUp.ok) {
+        totalPulled += await applyPulledServerItems(dbClient, followUp.items);
+        if (followUp.latestSeq > currentSeq) currentSeq = followUp.latestSeq;
+        if (followUp.lastCursor > currentSeq) currentSeq = followUp.lastCursor;
+      }
+    }
+
+    const updatedMeta = {
+      lastSyncSeq: currentSeq,
+      lastPulledAt: nowMs,
+      lastPushedAt: dirtyList.length > 0 ? nowMs : (existingMeta.lastPushedAt || 0),
+      lastOwnedSheetUrl: existingMeta.lastOwnedSheetUrl || ''
+    };
+    await dbClient.putSyncMeta('collectionSync', updatedMeta);
+
+    return {
+      ok: true,
+      paused: false,
+      pulledCount: totalPulled,
+      pushedCount: totalPushed,
+      conflictCount: totalConflicts,
+      latestSeq: currentSeq,
+      resetsAt: resetsAt
+    };
+  }
+
+  async function pushOwnedSheetSync(syncApiUrl, token, googleSheetUrl, fetchFn) {
+    const fn = fetchFn || (root && root.fetch) || (typeof fetch === 'function' ? fetch : null);
+    const base = cleanConfigSyncUrl(syncApiUrl);
+    if (!fn || !base || !token) return { ok: false, offline: true };
+
+    try {
+      const res = await fn(base + '/api/collection/sheet-sync', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + token,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ googleSheetUrl: googleSheetUrl })
+      });
+      if (res.status === 401) return { ok: false, unauthorized: true };
+      const body = await res.json().catch(function () { return {}; });
+      if (res.status === 429) {
+        return {
+          ok: false,
+          rateLimited: true,
+          retryAfterSeconds: (body && body.retryAfterSeconds) || 60
+        };
+      }
+      if (res.status === 503 || (body && body.paused)) {
+        return {
+          ok: false,
+          paused: true,
+          reason: (body && body.reason) || 'daily_free_tier_limit_reached',
+          resetsAt: (body && body.resetsAt) || null
+        };
+      }
+      if (body && body.skipped) {
+        return { ok: false, skipped: true, reason: body.reason || 'skipped' };
+      }
+      if (!res.ok || !body.ok) {
+        return { ok: false, error: (body && body.error) || ('HTTP ' + res.status) };
+      }
+      return {
+        ok: true,
+        writtenRows: Number(body.writtenRows) || 0,
+        tabTitle: body.tabTitle || null,
+        resetsAt: body.resetsAt || null
+      };
+    } catch (err) {
+      return { ok: false, offline: true, error: err && err.message ? err.message : String(err) };
+    }
+  }
+
   const syncApi = {
     SYNC_TOKEN_KEY: SYNC_TOKEN_KEY,
     SYNC_API_OVERRIDE_KEY: SYNC_API_OVERRIDE_KEY,
@@ -678,7 +1047,12 @@
     applySyncedStateToStorage: applySyncedStateToStorage,
     mergeAndApplyCloudState: mergeAndApplyCloudState,
     pullCloudState: pullCloudState,
-    pushCloudState: pushCloudState
+    pushCloudState: pushCloudState,
+    pullCollectionPage: pullCollectionPage,
+    pullAllCollectionDeltas: pullAllCollectionDeltas,
+    pushCollectionBatch: pushCollectionBatch,
+    syncOwnedCollection: syncOwnedCollection,
+    pushOwnedSheetSync: pushOwnedSheetSync
   };
 
   if (root) {
