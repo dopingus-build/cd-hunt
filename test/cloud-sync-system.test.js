@@ -2040,4 +2040,196 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     ]);
     assert.deepEqual(activeB, activeA);
   });
+
+  it('syncs Owned custom covers across devices via visibilitychange keepalive while stripping covers from /api/share?include=collection', async (t) => {
+    const sys = await startFullSystem();
+    t.after(() => sys.close());
+
+    const hashA = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
+      'code_alice'
+    );
+    const hashB = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
+      'code_alice'
+    );
+
+    const backingA = { stores: new Map() };
+    const backingB = { stores: new Map() };
+    const devA = await bootSystemClient(sys, {
+      hash: hashA,
+      search: '?mode=collection',
+      syncDebounceMs: 4000,
+      indexedDBImpl: makeDeviceIdb(backingA)
+    });
+
+    await devA.clickElement('addReleaseBtn');
+    devA.setInput('rfArtist', 'Cover Sync Artist');
+    devA.setInput('rfTitle', 'Custom Jacket Release');
+    devA.setInput('rfCatNo', 'COV-1001');
+    devA.setInput('rfCategory', 'Game');
+    await devA.clickElement('saveReleaseFormBtn');
+
+    await devA.clickElement('openCrateFlipBtn');
+    await devA.clickElement('lbToggleCustomBtn');
+    devA.setInput('customCoverInput', 'https://custom.example/owned-jacket.jpg');
+    devA.setInput('customCoverLabel', 'Custom Owned Obi');
+    await devA.clickElement('saveCustomCoverBtn');
+    await devA.clickElement('closeLightboxBtn');
+
+    // Immediate visibilitychange('hidden') must flush via keepalive: true before 4s debounce
+    await devA.triggerVisibilityChange('hidden');
+    await devA.settle(80);
+
+    const batchLogs = devA.requestLog.filter((r) => r.method === 'POST' && r.url.endsWith('/api/collection/batch'));
+    assert.equal(batchLogs.length, 1);
+    assert.equal(batchLogs[0].keepalive, true);
+    assert.equal(batchLogs[0].status, 200);
+
+    const sqlRows = sys.db.queryRaw("SELECT data_json FROM owned_releases WHERE github_id = '1001' AND release_id = 'own-cov-1001'");
+    assert.equal(sqlRows.length, 1);
+    const parsedSql = JSON.parse(sqlRows[0].data_json);
+    assert.equal(parsedSql.customCovers.variants[0].url, 'https://custom.example/owned-jacket.jpg');
+    assert.equal(parsedSql.selectedVariant.url, 'https://custom.example/owned-jacket.jpg');
+
+    // Agent Link copies &include=collection URL; /api/share strips customCovers & selectedVariant
+    await devA.clickElement('copyAgentLinkBtn');
+    const shareMdUrl = devA.copiedTexts.find((u) => u.includes('/api/share/'));
+    assert.ok(shareMdUrl && shareMdUrl.endsWith('?format=markdown&include=collection'));
+
+    const shareMdRes = await fetch(shareMdUrl, { headers: { Origin: 'https://agent.example' } });
+    assert.equal(shareMdRes.status, 200);
+    const shareMdText = await shareMdRes.text();
+    assert.ok(shareMdText.includes('COV-1001'));
+    assert.equal(shareMdText.includes('owned-jacket.jpg'), false);
+
+    const shareJsonUrl = shareMdUrl.replace('?format=markdown&include=collection', '?include=collection');
+    const shareJson = await (await fetch(shareJsonUrl, { headers: { Origin: 'https://agent.example' } })).json();
+    assert.equal(shareJson.collection.count, 1);
+    assert.equal(shareJson.collection.items[0].catNo, 'COV-1001');
+    assert.equal(shareJson.collection.items[0].customCovers, undefined);
+    assert.equal(shareJson.collection.items[0].selectedVariant, undefined);
+
+    // Device B comes online and receives the custom cover cleanly
+    const devB = await bootSystemClient(sys, {
+      hash: hashB,
+      search: '?mode=collection',
+      syncDebounceMs: 20,
+      indexedDBImpl: makeDeviceIdb(backingB)
+    });
+    await devB.settle(100);
+
+    const dbModLocal = require('../js/db.js');
+    const clientDbB = dbModLocal.createDbClient({ indexedDBImpl: makeDeviceIdb(backingB) });
+    const devBCopy = await clientDbB.getOwnedRelease('own-cov-1001');
+    assert.equal(devBCopy.customCovers.variants[0].url, 'https://custom.example/owned-jacket.jpg');
+    assert.equal(devBCopy.selectedVariant.url, 'https://custom.example/owned-jacket.jpg');
+  });
+
+  it('preserves dirty Owned releases across 429 rate limits, 503 PAUSE_SYNC, and offline drops, then converges cleanly on recovery', async (t) => {
+    const sys = await startFullSystem({ USER_HOURLY_WRITE_LIMIT: '1' });
+    t.after(() => sys.close());
+
+    const hashA = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
+      'code_alice'
+    );
+    const backing = { stores: new Map() };
+    const offlineRef = { offline: false };
+    const dbModLocal = require('../js/db.js');
+    const clientDb = dbModLocal.createDbClient({ indexedDBImpl: makeDeviceIdb(backing) });
+
+    let client = await bootSystemClient(sys, {
+      hash: hashA,
+      search: '?mode=collection',
+      syncDebounceMs: 10,
+      indexedDBImpl: makeDeviceIdb(backing),
+      offlineRef
+    });
+
+    // 1) Release 1 succeeds (consumes USER_HOURLY_WRITE_LIMIT = 1)
+    await client.clickElement('addReleaseBtn');
+    client.setInput('rfArtist', 'Recovery Artist');
+    client.setInput('rfTitle', 'Release 1');
+    client.setInput('rfCatNo', 'REC-001');
+    client.setInput('rfCategory', 'Rock');
+    await client.clickElement('saveReleaseFormBtn');
+    await client.settle(120);
+    assert.equal(sys.db.queryRaw("SELECT release_id FROM owned_releases WHERE github_id = '1001'").length, 1);
+
+    // 2) Release 2 hits 429 hourly cap -> stays dirty: 1 locally without loss
+    await client.clickElement('addReleaseBtn');
+    client.setInput('rfArtist', 'Recovery Artist');
+    client.setInput('rfTitle', 'Release 2');
+    client.setInput('rfCatNo', 'REC-002');
+    client.setInput('rfCategory', 'Rock');
+    await client.clickElement('saveReleaseFormBtn');
+    await client.settle(120);
+    assert.ok(client.elements.get('syncStatusPill').textContent.includes('Rate limited — saved locally'));
+    assert.equal(sys.db.queryRaw("SELECT release_id FROM owned_releases WHERE github_id = '1001'").length, 1);
+    assert.equal((await clientDb.getDirtyOwnedReleases()).length, 1);
+
+    // Raise cap & reboot/reload client -> flushes REC-002 cleanly
+    sys.workerEnv.USER_HOURLY_WRITE_LIMIT = '20';
+    client = await bootSystemClient(sys, {
+      initialStorage: client.localStorage.snapshot(),
+      search: '?mode=collection',
+      syncDebounceMs: 10,
+      indexedDBImpl: makeDeviceIdb(backing),
+      offlineRef
+    });
+    await client.settle(120);
+    assert.equal(sys.db.queryRaw("SELECT release_id FROM owned_releases WHERE github_id = '1001'").length, 2);
+    assert.equal((await clientDb.getDirtyOwnedReleases()).length, 0);
+
+    // 3) PAUSE_SYNC -> 503 preserves REC-003 dirty locally -> unpause & reload converges
+    sys.workerEnv.PAUSE_SYNC = 'true';
+    await client.clickElement('addReleaseBtn');
+    client.setInput('rfArtist', 'Recovery Artist');
+    client.setInput('rfTitle', 'Release 3');
+    client.setInput('rfCatNo', 'REC-003');
+    client.setInput('rfCategory', 'Rock');
+    await client.clickElement('saveReleaseFormBtn');
+    await client.settle(120);
+    assert.ok(client.elements.get('syncStatusPill').textContent.includes('Paused until 00:00 UTC'));
+    assert.equal(sys.db.queryRaw("SELECT release_id FROM owned_releases WHERE github_id = '1001'").length, 2);
+    assert.equal((await clientDb.getDirtyOwnedReleases()).length, 1);
+
+    sys.workerEnv.PAUSE_SYNC = 'false';
+    client = await bootSystemClient(sys, {
+      initialStorage: client.localStorage.snapshot(),
+      search: '?mode=collection',
+      syncDebounceMs: 10,
+      indexedDBImpl: makeDeviceIdb(backing),
+      offlineRef
+    });
+    await client.settle(120);
+    assert.equal(sys.db.queryRaw("SELECT release_id FROM owned_releases WHERE github_id = '1001'").length, 3);
+    assert.equal((await clientDb.getDirtyOwnedReleases()).length, 0);
+
+    // 4) Network drops offline -> preserves REC-004 dirty locally -> reconnect & reload converges
+    offlineRef.offline = true;
+    await client.clickElement('addReleaseBtn');
+    client.setInput('rfArtist', 'Recovery Artist');
+    client.setInput('rfTitle', 'Release 4');
+    client.setInput('rfCatNo', 'REC-004');
+    client.setInput('rfCategory', 'Rock');
+    await client.clickElement('saveReleaseFormBtn');
+    await client.settle(120);
+    assert.ok(client.elements.get('syncStatusPill').textContent.includes('Offline — saved locally'));
+    assert.equal(sys.db.queryRaw("SELECT release_id FROM owned_releases WHERE github_id = '1001'").length, 3);
+    assert.equal((await clientDb.getDirtyOwnedReleases()).length, 1);
+
+    offlineRef.offline = false;
+    client = await bootSystemClient(sys, {
+      initialStorage: client.localStorage.snapshot(),
+      search: '?mode=collection',
+      syncDebounceMs: 10,
+      indexedDBImpl: makeDeviceIdb(backing),
+      offlineRef
+    });
+    await client.settle(120);
+    assert.equal(sys.db.queryRaw("SELECT release_id FROM owned_releases WHERE github_id = '1001'").length, 4);
+    assert.equal((await clientDb.getDirtyOwnedReleases()).length, 0);
+  });
 });

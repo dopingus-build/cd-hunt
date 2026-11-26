@@ -886,6 +886,31 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
     assert.equal(sharePausedRes.status, 503);
     assert.equal(sharePausedRes.headers.get('access-control-allow-origin'), '*');
     assert.equal((await sharePausedRes.json()).paused, true);
+
+    const colGetPausedRes = await fetch(`${env.workerBaseUrl}/api/collection`, {
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}` }
+    });
+    assert.equal(colGetPausedRes.status, 503);
+    assert.equal((await colGetPausedRes.json()).paused, true);
+
+    const colBatchPausedRes = await fetch(`${env.workerBaseUrl}/api/collection/batch`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items: [{ id: 'own-paused-1', artist: 'A', title: 'B', category: 'OST', catNo: 'PAU-1', clientUpdatedAt: 1000 }]
+      })
+    });
+    assert.equal(colBatchPausedRes.status, 503);
+    assert.equal((await colBatchPausedRes.json()).paused, true);
+    assert.equal(env.db.queryRaw("SELECT release_id FROM owned_releases WHERE github_id = '1001'").length, 0);
+
+    const colSheetPausedRes = await fetch(`${env.workerBaseUrl}/api/collection/sheet-sync`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ googleSheetUrl: 'https://docs.google.com/spreadsheets/d/ownedSheet01/edit' })
+    });
+    assert.equal(colSheetPausedRes.status, 503);
+    assert.equal((await colSheetPausedRes.json()).paused, true);
   });
 
   it('syncs incremental owned_releases via GET /api/collection & POST /api/collection/batch with atomic sync_seq, tombstones, LWW conflicts, tenant isolation, and limits', async (t) => {
@@ -1154,5 +1179,65 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
     assert.equal(sheetWrites[0].body.values[1][0], 'SRCL-12539');
     assert.equal(sheetWrites[0].body.values[1][3], 'yama (ヤマ)');
     assert.equal(sheetWrites[0].body.values[1][9], '1');
+  });
+
+  it('pushes and pulls 255 Owned releases across chunked batches (50/batch) and paginated deltas (200/page) in SQLite', async (t) => {
+    const env = await startIntegrationServers();
+    t.after(() => env.close());
+
+    const { token: aliceToken } = await env.loginViaHttp('code_alice');
+    const dbMod = require('../js/db.js');
+    const collectionMod = require('../js/collection.js');
+    const syncMod = require('../js/sync.js');
+
+    const localDb = dbMod.createDbClient({ indexedDBImpl: null });
+    const seedRecords = [];
+    for (let i = 1; i <= 255; i++) {
+      const padded = String(i).padStart(4, '0');
+      seedRecords.push(
+        collectionMod.createOwnedRelease({
+          id: `own-scale-${padded}`,
+          artist: `Scale Artist ${i}`,
+          title: `Scale Release ${i}`,
+          category: i % 2 === 0 ? 'Game' : 'Anime',
+          catNo: `SCL-${padded}`,
+          dirty: 1
+        }, 10000 + i)
+      );
+    }
+    await localDb.putOwnedReleasesBatch(seedRecords);
+
+    let postCount = 0;
+    let getCount = 0;
+    const countingFetch = async (url, init = {}) => {
+      const m = String(init.method || 'GET').toUpperCase();
+      if (m === 'POST' && String(url).endsWith('/api/collection/batch')) postCount++;
+      if (m === 'GET' && String(url).includes('/api/collection')) getCount++;
+      const headers = Object.assign({}, init.headers || {}, { Origin: ALLOWED_ORIGIN });
+      return fetch(url, Object.assign({}, init, { headers }));
+    };
+
+    const pushSyncRes = await syncMod.syncOwnedCollection(localDb, env.workerBaseUrl, aliceToken, countingFetch);
+    assert.equal(pushSyncRes.ok, true);
+    assert.equal(pushSyncRes.pushedCount, 255);
+    assert.equal(postCount, 6); // 50 + 50 + 50 + 50 + 50 + 5
+
+    const aggRows = env.db.queryRaw(
+      "SELECT COUNT(*) AS cnt, MIN(sync_seq) AS minSeq, MAX(sync_seq) AS maxSeq FROM owned_releases WHERE github_id = '1001'"
+    );
+    assert.equal(aggRows[0].cnt, 255);
+    assert.equal(aggRows[0].minSeq, 1);
+    assert.equal(aggRows[0].maxSeq, 255);
+
+    const syncMetaRow = env.db.queryRaw("SELECT next_seq, hour_writes FROM user_sync_state WHERE github_id = '1001'");
+    assert.equal(syncMetaRow[0].next_seq, 255);
+    assert.equal(syncMetaRow[0].hour_writes, 6); // 1 write counted per batch, not 255
+
+    getCount = 0;
+    const pullAllRes = await syncMod.pullAllCollectionDeltas(env.workerBaseUrl, aliceToken, 0, countingFetch);
+    assert.equal(pullAllRes.ok, true);
+    assert.equal(getCount, 2); // page 1 (200) + page 2 (55)
+    assert.equal(pullAllRes.items.length, 255);
+    assert.equal(pullAllRes.latestSeq, 255);
   });
 });

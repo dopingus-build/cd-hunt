@@ -286,7 +286,10 @@ async function attachExternalRoutes(context, appOrigin, workerBaseUrl, opts = {}
         return;
       }
 
-      if (reqUrl.href === 'https://custom.e2e.example/itunes-600x600bb.svg') {
+      if (
+        reqUrl.href === 'https://custom.e2e.example/itunes-600x600bb.svg' ||
+        reqUrl.href === 'https://custom.e2e.example/owned-cover.svg'
+      ) {
         await route.fulfill({
           status: 200,
           contentType: 'image/svg+xml',
@@ -939,10 +942,24 @@ async function main() {
         return msg.includes('Loaded cached Google Sheet (offline)') && msg.includes('Merged 1 duplicate row (CPCA-1004)');
       });
 
-      // ── Phase 2 Collection Mode, Cross-Ref, Graduation, IndexedDB Reload, Mobile 375px & SQLite Tombstones ──
+      // ── Phase 2 Collection Mode, MB Lookup, Cross-Ref, Graduation, Custom Cover Keepalive, Merge, Quick Filters & Tombstones ──
       await pageC.click('#modeCollectionBtn');
       await pageC.waitForSelector('#addReleaseBtn:not(.hidden)');
       await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '0 releases · 0 tracks');
+
+      // MusicBrainz release lookup inside #releaseFormModal -> applies candidate catNo & tracks, then cancels cleanly
+      stateFlags.mbOffline = false;
+      await pageC.click('#addReleaseBtn');
+      await pageC.waitForSelector('#releaseFormModal.open');
+      await pageC.fill('#releaseLookupInput', 'CPCA-1004');
+      await pageC.click('#releaseLookupBtn');
+      await pageC.waitForSelector('.lookup-cand-btn[data-lookup-idx="0"]');
+      await pageC.click('.lookup-cand-btn[data-lookup-idx="0"]');
+      assert.equal(await pageC.inputValue('#rfCatNo'), 'CPCA-1004');
+      assert.ok((await pageC.inputValue('#rfTracksInput')).includes("Ryu's Theme"));
+      await pageC.click('#cancelReleaseFormBtn');
+      await pageC.waitForSelector('#releaseFormModal', { state: 'hidden' });
+      stateFlags.mbOffline = true;
 
       await pageC.click('#addReleaseBtn');
       await pageC.waitForSelector('#releaseFormModal.open');
@@ -994,7 +1011,77 @@ async function main() {
       assert.equal(colMobileOverflow, false, 'Mobile 375px Collection mode must not overflow horizontally');
       await pageC.setViewportSize({ width: 1280, height: 800 });
 
-      // Edit first release & soft-delete second release -> verify tombstone synced to SQLite
+      // Add custom cover in Collection Crate Flip -> flush immediately via visibilitychange keepalive -> verify SQLite + /api/share?include=collection stripping
+      await pageC.click('#openCrateFlipBtn');
+      await pageC.waitForSelector('#lightboxModal.open');
+      await pageC.click('#lbToggleCustomBtn');
+      await pageC.fill('#customCoverInput', 'https://custom.e2e.example/owned-cover.svg');
+      await pageC.selectOption('#customCoverLabel', { index: 0 });
+      await pageC.click('#saveCustomCoverBtn');
+      await pageC.click('#closeLightboxBtn');
+      await pageC.waitForFunction(() => (document.getElementById('syncStatusPill')?.textContent || '').includes('Pending...'));
+
+      await pageC.evaluate(() => {
+        Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+        delete document.visibilityState;
+      });
+
+      const coverSyncDeadline = Date.now() + 1200;
+      let syncedCustomCover = false;
+      while (Date.now() < coverSyncDeadline) {
+        const rows = db.queryRaw("SELECT data_json FROM owned_releases WHERE github_id = '2002'");
+        if (rows.some((r) => (r.data_json || '').includes('owned-cover.svg'))) {
+          syncedCustomCover = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      assert.equal(syncedCustomCover, true, 'Expected Collection custom cover keepalive flush within 1200ms');
+
+      const shareWithColJson = await (
+        await fetch(`${latestShareUrl}?include=collection`, { headers: { Origin: 'https://agent.example' } })
+      ).json();
+      assert.equal(shareWithColJson.collection.count, 2);
+      assert.equal(shareWithColJson.collection.items.some((it) => it.catNo === 'E2E-1001'), true);
+      assert.equal(JSON.stringify(shareWithColJson).includes('owned-cover.svg'), false);
+
+      // Backup Modal: Copy Collection Agent Link + JSON Merge import (adds trackless/noteless E2E-MRG-1 -> 3 releases)
+      await pageC.click('#collectionBackupBtn');
+      await pageC.waitForSelector('#collectionBackupModal.open');
+      await pageC.click('#copyCollectionAgentLinkBtn');
+      await pageC.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Copied Agent Collection status link'));
+      await pageC.fill(
+        '#collectionBackupTextarea',
+        JSON.stringify({
+          schemaVersion: 1,
+          items: [{ id: 'own-e2e-mrg-1', artist: 'Merge Artist', title: 'Merge Album', category: 'Rock', catNo: 'E2E-MRG-1' }]
+        })
+      );
+      await pageC.click('#importCollectionMergeBtn');
+      await pageC.waitForSelector('#collectionBackupModal', { state: 'hidden' });
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent.startsWith('3 releases'));
+
+      // Exercise Collection Quick Filters (#collectionQuickFilters)
+      await pageC.click('#collectionQuickFilters [data-filter="missing-tracks"]');
+      await pageC.waitForFunction(() => {
+        const html = document.getElementById('albumGrid')?.innerHTML || '';
+        return html.includes('E2E-MRG-1') && !html.includes('E2E-1001');
+      });
+      await pageC.click('#collectionQuickFilters [data-filter="has-notes"]');
+      await pageC.waitForFunction(() => {
+        const html = document.getElementById('albumGrid')?.innerHTML || '';
+        return html.includes('E2E-1001') && !html.includes('E2E-MRG-1');
+      });
+      await pageC.click('#collectionQuickFilters [data-filter="has-tracks"]');
+      await pageC.waitForFunction(() => {
+        const html = document.getElementById('albumGrid')?.innerHTML || '';
+        return html.includes('E2E-1001') && !html.includes('E2E-MRG-1');
+      });
+      await pageC.click('#collectionQuickFilters [data-filter="all"]');
+      await pageC.waitForFunction(() => (document.getElementById('albumGrid')?.innerHTML || '').includes('E2E-MRG-1'));
+
+      // Edit first release & soft-delete active release -> verify tombstone synced to SQLite
       await pageC.click('#openCrateFlipBtn');
       await pageC.waitForSelector('#lightboxModal.open');
       await pageC.click('#lbEditReleaseBtn');
@@ -1002,8 +1089,9 @@ async function main() {
       await pageC.fill('#rfNotes', 'Edited E2E note');
       await pageC.click('#saveReleaseFormBtn');
       await pageC.waitForSelector('#releaseFormModal', { state: 'hidden' });
+      assert.ok((await pageC.textContent('#lbCatalogText')).includes('CPCA-1004'));
       await pageC.click('#lbDeleteReleaseBtn');
-      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent.startsWith('1 release'));
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent.startsWith('2 releases'));
       await pageC.click('#closeLightboxBtn');
 
       const delDeadline = Date.now() + 4500;
@@ -1020,6 +1108,15 @@ async function main() {
 
       await pageC.click('#modeHuntBtn');
       await pageC.waitForSelector('#openCatalogLoaderBtn:not(.hidden)');
+
+      // Batch Graduate (#batchGraduateBtn) on checked un-owned Hunt items sheet-cpca-1004 (soft-deleted earlier) and sheet-kscl-737
+      await pageC.click('.check-btn[data-action="toggle-acq"][data-id="sheet-kscl-737"]');
+      await pageC.waitForSelector('#batchGraduateBtn:not(.hidden)');
+      assert.equal(await pageC.textContent('#batchGraduateBtn'), 'Move Found to Collection (2)');
+      await pageC.click('#batchGraduateBtn');
+      await pageC.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Added 2 releases to Owned Collection'));
+      await pageC.waitForSelector('#batchGraduateBtn', { state: 'hidden' });
+      await pageC.waitForFunction(() => (document.getElementById('albumGrid')?.innerHTML || '').includes('✓ Owned'));
 
       // Local .csv upload via real <input type="file"> + Sign-out keeps local progress
       await pageC.click('#openCatalogLoaderBtn');

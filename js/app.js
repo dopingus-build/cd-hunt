@@ -1119,8 +1119,15 @@
 
   async function upsertLocalOwnedState(savedRecord) {
     if (!savedRecord || !savedRecord.id) return;
-    const nextAll = ownedAllReleases.filter(function (r) { return r && r.id !== savedRecord.id; });
-    nextAll.push(savedRecord);
+    let replaced = false;
+    const nextAll = ownedAllReleases.map(function (r) {
+      if (r && r.id === savedRecord.id) {
+        replaced = true;
+        return savedRecord;
+      }
+      return r;
+    });
+    if (!replaced) nextAll.push(savedRecord);
     ownedAllReleases = nextAll;
     ownedReleases = nextAll.filter(function (r) {
       return r && (r.deletedAt === null || r.deletedAt === undefined);

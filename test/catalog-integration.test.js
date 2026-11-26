@@ -3527,4 +3527,284 @@ describe('Phase 2 Owned Collection, Cross-Referencing, Graduation & Shared relea
     assert.equal(app.elements.get('progressBadge').textContent, '1 release · 0 tracks');
     assert.ok(app.elements.get('albumGrid').innerHTML.includes('REP-001'));
   });
+
+  it('supports batch graduation (#batchGraduateBtn), Collection quick filters, owned custom cover persistence, and JSON Merge import + validation errors', async () => {
+    const sharedBacking = { stores: new Map() };
+    const huntCatalog = {
+      schemaVersion: 1,
+      meta: { title: 'Batch Grad Catalog' },
+      items: [
+        {
+          id: 'p1',
+          category: 'Anime',
+          artist: 'Artist 1',
+          title: 'Already Owned Disc',
+          regCatNo: 'OWN-001',
+          catalog: 'OWN-001',
+          kana: 'ア',
+          filing: 'Shelf A',
+          price: '¥500',
+          tracks: [{ disc: 1, mediaType: 'CD', number: 1, title: 'Owned Track 1' }]
+        },
+        {
+          id: 'p2',
+          category: 'Game',
+          artist: 'Artist 2',
+          title: 'Graduate With Cover & Tracks',
+          regCatNo: 'GRAD-002',
+          catalog: 'GRAD-002',
+          kana: 'カ',
+          filing: 'Shelf B',
+          price: '¥1,200',
+          tracks: [{ disc: 1, mediaType: 'CD', number: 1, title: 'Battle Theme' }]
+        },
+        {
+          id: 'p3',
+          category: 'Rock',
+          artist: 'Artist 3',
+          title: 'Trackless Graduate',
+          regCatNo: 'GRAD-003',
+          catalog: 'GRAD-003',
+          kana: 'サ',
+          filing: 'Shelf C',
+          price: '¥800'
+        },
+        {
+          id: 'd1',
+          digitalOnly: true,
+          category: 'Digital-Only',
+          artist: 'Digital Artist',
+          title: 'Digital Track',
+          regCatNo: 'DIGITAL-ONLY',
+          catalog: 'DIGITAL-ONLY',
+          kana: 'ハ',
+          filing: 'Digital',
+          price: 'Digital Only'
+        }
+      ]
+    };
+
+    const app = await bootApp({
+      catalogObject: huntCatalog,
+      indexedDBImpl: makeMockIDBFactoryLocal(sharedBacking)
+    });
+
+    // Seed p1 (OWN-001) in Collection beforehand
+    await app.clickElement('modeCollectionBtn');
+    await app.clickElement('addReleaseBtn');
+    await app.inputText('rfArtist', 'Artist 1');
+    await app.inputText('rfTitle', 'Already Owned Disc');
+    await app.inputText('rfCatNo', 'OWN-001');
+    await app.inputText('rfCategory', 'Anime');
+    await app.inputText('rfNotes', 'Bought in Osaka');
+    await app.clickElement('saveReleaseFormBtn');
+    assert.equal(app.elements.get('progressBadge').textContent, '1 release · 0 tracks');
+
+    // Back in Hunt mode: add a custom cover on p2, then check off p1, p2, p3, and digital d1
+    await app.clickElement('modeHuntBtn');
+    app.triggerDocumentClick('open-lb', { 'data-lb-idx': '1' });
+    await app.flush();
+    await app.clickElement('lbToggleCustomBtn');
+    await app.inputText('customCoverInput', 'https://custom.example/hunt-grad-cover.jpg');
+    await app.inputText('customCoverLabel', 'Usually Custom');
+    await app.clickElement('saveCustomCoverBtn');
+    await app.clickElement('closeLightboxBtn');
+
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'p1' });
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'p2' });
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'p3' });
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'd1' });
+    await app.flush();
+
+    // Only p2 and p3 are un-owned physical items -> Move Found to Collection (2)
+    assert.equal(app.elements.get('batchGraduateBtn').classList.contains('hidden'), false);
+    assert.equal(app.elements.get('batchGraduateBtn').textContent, 'Move Found to Collection (2)');
+
+    await app.clickElement('batchGraduateBtn');
+    assert.ok(app.elements.get('toast').textContent.includes('Added 2 releases to Owned Collection'));
+    assert.equal(app.elements.get('batchGraduateBtn').classList.contains('hidden'), true);
+
+    // Switch to Collection -> verify 3 total releases (p1 not duplicated, d1 skipped, p2 kept cover + tracks)
+    await app.clickElement('modeCollectionBtn');
+    assert.equal(app.elements.get('progressBadge').textContent, '3 releases · 1 track');
+
+    const dbClient = app.window.DiskCrate.db.createDbClient({
+      indexedDBImpl: makeMockIDBFactoryLocal(sharedBacking)
+    });
+    const allOwnedAfterGrad = await dbClient.getAllOwnedReleases();
+    const grad2Row = allOwnedAfterGrad.find((r) => r.catNo === 'GRAD-002');
+    assert.ok(grad2Row, 'GRAD-002 must exist in IndexedDB owned_releases');
+    assert.equal(grad2Row.tracks[0].title, 'Battle Theme');
+    assert.equal(grad2Row.customCovers.variants[0].url, 'https://custom.example/hunt-grad-cover.jpg');
+
+    // Quick filters: has-tracks, missing-tracks, has-notes, all
+    app.triggerDocumentClick('set-col-filter', { 'data-filter': 'has-tracks' });
+    await app.flush();
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('GRAD-002'));
+    assert.equal(app.elements.get('albumGrid').innerHTML.includes('GRAD-003'), false);
+
+    app.triggerDocumentClick('set-col-filter', { 'data-filter': 'missing-tracks' });
+    await app.flush();
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('OWN-001'));
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('GRAD-003'));
+    assert.equal(app.elements.get('albumGrid').innerHTML.includes('GRAD-002'), false);
+
+    app.triggerDocumentClick('set-col-filter', { 'data-filter': 'has-notes' });
+    await app.flush();
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('OWN-001'));
+    assert.equal(app.elements.get('albumGrid').innerHTML.includes('GRAD-003'), false);
+
+    app.triggerDocumentClick('set-col-filter', { 'data-filter': 'all' });
+    await app.flush();
+
+    // Add and then remove custom cover directly in Collection Crate Flip -> persists cleanly to IndexedDB
+    const grad3RowBefore = (await dbClient.getAllOwnedReleases()).find((r) => r.catNo === 'GRAD-003');
+    app.triggerDocumentClick('open-lb', { 'data-lb-catno': 'GRAD-003', 'data-lb-idx': '0' });
+    // Ensure we open GRAD-003 cleanly by filtering search first so idx 0 is GRAD-003
+    await app.inputText('searchInput', 'GRAD-003');
+    await app.clickElement('openCrateFlipBtn');
+    await app.clickElement('lbToggleCustomBtn');
+    await app.inputText('customCoverInput', 'https://custom.example/col-only-cover.jpg');
+    await app.inputText('customCoverLabel', 'Direct Collection Cover');
+    await app.clickElement('saveCustomCoverBtn');
+    await app.flush();
+
+    const grad3WithCover = await dbClient.getOwnedRelease(grad3RowBefore.id);
+    assert.equal(grad3WithCover.customCovers.variants[0].url, 'https://custom.example/col-only-cover.jpg');
+    assert.equal(grad3WithCover.selectedVariant.url, 'https://custom.example/col-only-cover.jpg');
+
+    app.triggerDocumentClick('del-var', { 'data-id': grad3RowBefore.id, 'data-idx': '0' });
+    await app.flush();
+    const grad3AfterDel = await dbClient.getOwnedRelease(grad3RowBefore.id);
+    assert.equal(grad3AfterDel.customCovers, undefined);
+
+    await app.clickElement('closeLightboxBtn');
+    await app.clickElement('clearSearchBtn');
+
+    // Collection Backup modal: invalid JSON & schema validation errors, then valid Merge import
+    await app.clickElement('collectionBackupBtn');
+    await app.inputText('collectionBackupTextarea', '{ broken json');
+    await app.clickElement('importCollectionMergeBtn');
+    assert.equal(app.elements.get('toast').textContent, 'Invalid JSON format');
+
+    await app.inputText('collectionBackupTextarea', JSON.stringify({ schemaVersion: 99, items: [] }));
+    await app.clickElement('importCollectionMergeBtn');
+    assert.ok(app.elements.get('toast').textContent.startsWith('Validation failed:'));
+
+    await app.inputText(
+      'collectionBackupTextarea',
+      JSON.stringify({
+        schemaVersion: 1,
+        items: [{ id: 'own-mrg-001', artist: 'Merge Artist', title: 'Merge Album', category: 'Rock', catNo: 'MRG-001' }]
+      })
+    );
+    await app.clickElement('importCollectionMergeBtn');
+    assert.equal(app.elements.get('collectionBackupModal').classList.contains('open'), false);
+    assert.ok(app.elements.get('toast').textContent.includes('Collection import (merge): +1 added'));
+    assert.equal(app.elements.get('progressBadge').textContent, '4 releases · 1 track');
+    assert.ok(app.elements.get('albumGrid').innerHTML.includes('MRG-001'));
+  });
+
+  it('copies Collection Agent Link (&include=collection) and flushes debounced Collection writes immediately with keepalive on visibilitychange and pagehide', async () => {
+    const sharedBacking = { stores: new Map() };
+    const sampleCatalog = JSON.parse(fs.readFileSync(SAMPLE_CATALOG_PATH, 'utf8'));
+    const catalogUrl = 'https://cdn.example/sample-catalog.json';
+    const jwt = makeFakeSyncJwt({ login: 'alice' });
+    const shareUrl = 'https://cd-hunt-sync.tndo.workers.dev/api/share/tok_alice_123';
+    const batchCalls = [];
+
+    const app = await bootApp({
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      syncDebounceMs: 5000,
+      savedCatalogUrl: catalogUrl,
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      indexedDBImpl: makeMockIDBFactoryLocal(sharedBacking),
+      fetchImpl: async (url, init = {}) => {
+        const method = String(init.method || 'GET').toUpperCase();
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/state' && method === 'GET') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                user: { login: 'alice' },
+                updatedAt: 1000,
+                shareUrl,
+                state: { schemaVersion: 1, updatedAt: 1000, activeCatalogUrl: catalogUrl, catalogs: {} }
+              };
+            }
+          };
+        }
+        if (String(url).startsWith('https://cd-hunt-sync.tndo.workers.dev/api/collection') && method === 'GET') {
+          return { ok: true, status: 200, async json() { return { ok: true, paused: false, items: [], hasMore: false, latestSeq: 0 }; } };
+        }
+        if (url === 'https://cd-hunt-sync.tndo.workers.dev/api/collection/batch' && method === 'POST') {
+          const parsed = JSON.parse(init.body);
+          batchCalls.push({ keepalive: init.keepalive, count: parsed.items.length, ids: parsed.items.map((x) => x.id) });
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                ok: true,
+                paused: false,
+                accepted: parsed.items.map((x, i) => ({
+                  id: x.id,
+                  syncSeq: batchCalls.length * 10 + i + 1,
+                  clientUpdatedAt: x.clientUpdatedAt,
+                  deletedAt: x.deletedAt || null
+                })),
+                conflicts: [],
+                latestSeq: batchCalls.length * 10 + parsed.items.length
+              };
+            }
+          };
+        }
+        if (url === catalogUrl) {
+          return { ok: true, status: 200, async json() { return sampleCatalog; } };
+        }
+        return { ok: true, status: 200, async json() { return { schemaVersion: 1, catalogs: [] }; } };
+      }
+    });
+
+    // Hunt mode Agent Link -> ?format=markdown without include=collection
+    await app.clickElement('copyAgentLinkBtn');
+    assert.equal(app.copiedTexts[0], `${shareUrl}?format=markdown`);
+
+    // Collection mode Agent Link -> &include=collection
+    await app.clickElement('modeCollectionBtn');
+    await app.clickElement('copyAgentLinkBtn');
+    assert.equal(app.copiedTexts[1], `${shareUrl}?format=markdown&include=collection`);
+
+    // Backup modal Copy Collection Agent Link button
+    await app.clickElement('collectionBackupBtn');
+    await app.clickElement('copyCollectionAgentLinkBtn');
+    assert.equal(app.copiedTexts[2], `${shareUrl}?format=markdown&include=collection`);
+    assert.equal(app.elements.get('toast').textContent, 'Copied Agent Collection status link');
+    await app.clickElement('closeCollectionBackupBtn');
+
+    // Add first Owned release (schedules 5s debounce -> 0 immediate POSTs) -> visibilitychange('hidden') flushes with keepalive: true
+    await app.clickElement('addReleaseBtn');
+    await app.inputText('rfArtist', 'Flush Artist 1');
+    await app.inputText('rfTitle', 'Flush Album 1');
+    await app.inputText('rfCatNo', 'FLSH-001');
+    await app.clickElement('saveReleaseFormBtn');
+    assert.equal(batchCalls.length, 0);
+
+    await app.triggerVisibilityChange('hidden');
+    assert.equal(batchCalls.length, 1);
+    assert.equal(batchCalls[0].keepalive, true);
+
+    // Add second Owned release -> pagehide flushes immediately with keepalive: true
+    await app.clickElement('addReleaseBtn');
+    await app.inputText('rfArtist', 'Flush Artist 2');
+    await app.inputText('rfTitle', 'Flush Album 2');
+    await app.inputText('rfCatNo', 'FLSH-002');
+    await app.clickElement('saveReleaseFormBtn');
+    assert.equal(batchCalls.length, 1);
+
+    await app.triggerPageHide();
+    assert.equal(batchCalls.length, 2);
+    assert.equal(batchCalls[1].keepalive, true);
+  });
 });
