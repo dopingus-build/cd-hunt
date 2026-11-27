@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 
 const SITE_URL = process.env.SITE_URL || 'https://dopingus-build.github.io/disk-crate/';
 const WORKER_URL = (process.env.WORKER_URL || 'https://cd-hunt-sync.tndo.workers.dev').replace(/\/+$/, '');
@@ -16,6 +17,11 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
     assert.ok(html.includes('id="githubSignOutBtn"'), 'Expected #githubSignOutBtn in live HTML');
     assert.ok(html.includes('id="syncStatusPill"'), 'Expected #syncStatusPill in live HTML');
     assert.ok(html.includes('id="sheetSyncBotBanner"'), 'Expected #sheetSyncBotBanner in live HTML');
+    assert.ok(html.includes('id="openScannerBtn"'), 'Expected opt-in #openScannerBtn in live HTML');
+
+    for (const eagerPath of ['scanner-manager.js', 'scanner-ui.js', 'scanner-worker.js', 'scanner.css']) {
+      assert.equal(html.includes(eagerPath), false, `index.html must not statically load ${eagerPath} on startup`);
+    }
 
     const orderedScripts = [
       '<script src="./js/validate.js"></script>',
@@ -54,11 +60,39 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
       'js/db.js',
       'js/cover-resolver.js',
       'js/track-resolver.js',
-      'css/styles.css'
+      'js/scanner-manager.js',
+      'js/scanner-ui.js',
+      'js/scanner-worker.js',
+      'css/styles.css',
+      'css/scanner.css'
     ]) {
       const res = await fetch(new URL(assetPath, SITE_URL));
       assert.equal(res.status, 200, `Expected ${assetPath} to return HTTP 200`);
     }
+  });
+
+  it('serves same-origin /scanner-assets/v1/manifest.json and verified engine-shell.wasm on GitHub Pages', async () => {
+    const manifestUrl = new URL('scanner-assets/v1/manifest.json', SITE_URL);
+    const mfRes = await fetch(manifestUrl);
+    assert.equal(mfRes.status, 200, `Expected ${manifestUrl} to return HTTP 200`);
+    const manifest = await mfRes.json();
+    assert.equal(manifest.schemaVersion, 1);
+    assert.ok(Array.isArray(manifest.packs));
+
+    const shellPack = manifest.packs.find((p) => p && p.id === 'engine-shell');
+    assert.ok(shellPack && shellPack.available && Array.isArray(shellPack.files) && shellPack.files.length === 1);
+    const wasmMeta = shellPack.files[0];
+
+    const wasmUrl = new URL(`scanner-assets/v1/${wasmMeta.path}`, SITE_URL);
+    const wasmRes = await fetch(wasmUrl);
+    assert.equal(wasmRes.status, 200, `Expected ${wasmUrl} to return HTTP 200`);
+    const ctype = (wasmRes.headers.get('content-type') || '').toLowerCase();
+    assert.ok(ctype.includes('application/wasm'), `Expected application/wasm content-type, got: ${ctype}`);
+
+    const wasmBuf = Buffer.from(await wasmRes.arrayBuffer());
+    assert.equal(wasmBuf.length, wasmMeta.bytes);
+    const actualSha = crypto.createHash('sha256').update(wasmBuf).digest('hex');
+    assert.equal(actualSha, wasmMeta.sha256);
   });
 
   it('responds cleanly on Worker /api/status with CORS headers and quota metadata', async () => {

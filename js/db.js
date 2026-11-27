@@ -459,6 +459,24 @@
       );
     }
 
+    async function clearScannerCoverIndex() {
+      const storeName = 'scanner_cover_index';
+      const mem = memoryStores[storeName];
+      if (mem) mem.clear();
+      if (usingFallback) return false;
+      const database = await openDb();
+      if (!database || !database.objectStoreNames || !database.objectStoreNames.contains(storeName)) {
+        return false;
+      }
+      await withStore(
+        storeName,
+        'readwrite',
+        function (store) { return store.clear(); },
+        function (map) { map.clear(); }
+      );
+      return true;
+    }
+
     function close() {
       if (dbInstance && typeof dbInstance.close === 'function') {
         try {
@@ -480,6 +498,7 @@
       deleteManualTracks: function (releaseKey) { return deleteRecord(STORE_MANUAL_TRACKS, releaseKey); },
       getAllManualTracks: function () { return getAllRecords(STORE_MANUAL_TRACKS); },
       clearTrackStores: clearTrackStores,
+      clearScannerCoverIndex: clearScannerCoverIndex,
       getOwnedRelease: getOwnedRelease,
       putOwnedRelease: putOwnedRelease,
       putOwnedReleasesBatch: putOwnedReleasesBatch,

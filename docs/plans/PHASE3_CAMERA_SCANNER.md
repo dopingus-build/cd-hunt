@@ -1,8 +1,10 @@
 # Phase 3 Design: Opt-In In-Browser Camera Scanner Engine (WASM)
 
 > [!IMPORTANT]
-> **Status: Planned Design Specification (Not Yet Implemented)**
+> **Status: Phase 3a Completed (Stage 3a Shell & Asset Pipeline Live); Phases 3b–3c Planned (Not Yet Implemented)**
 > Phase 3 adds a continuous live-viewfinder scanner prioritizing **rapid at-home cataloging** into the Owned Collection while supporting **occasional quick in-shop Hunt/Owned lookups**. Normal page loads download **0 bytes** of scanner or WASM code until explicitly confirmed by the user.
+> - **Completed (Phase 3a):** Zero-cost lazy UI (`js/scanner-ui.js`, `css/scanner.css`), manifest + SHA-256 Cache Storage pack manager + 1-click Wipe (`js/scanner-manager.js`), single-threaded WASM Web Worker lifecycle + luminance telemetry (`js/scanner-worker.js`), local manual code fallback, and GitHub Releases (`scanner-assets-v1`) → GitHub Actions (`.github/workflows/deploy-pages.yml`) → GitHub Pages asset hosting.
+> - **Planned (Phases 3b–3c):** Stage 3b continuous barcode (`BarcodeDetector` / `zxing-wasm`) & spine CatNo OCR decoders + batch tray, and Stage 3c optional front-cover embedding matcher remain planned and are not yet implemented.
 
 ---
 

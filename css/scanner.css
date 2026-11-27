@@ -1,0 +1,275 @@
+/* Opt-In Phase 3a Camera Scanner Styles (lazily loaded only when Scan opens) */
+#scannerModal.modal-backdrop {
+  padding: 12px;
+}
+
+.scanner-dialog {
+  width: 100%;
+  max-width: 720px;
+  max-height: 92vh;
+  margin: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xl);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.scanner-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.scanner-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.scanner-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--text-main);
+}
+
+.scanner-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.scanner-panel.hidden {
+  display: none !important;
+}
+
+.scanner-gate-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.scanner-gate-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.scanner-viewfinder-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  min-height: 190px;
+  max-height: 360px;
+  background: #040406;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#scannerVideo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.scanner-reticle {
+  position: absolute;
+  pointer-events: none;
+  width: 78%;
+  height: 34%;
+  border: 2px solid rgba(56, 189, 248, 0.85);
+  border-radius: 10px;
+  box-shadow: 0 0 0 9999px rgba(9, 9, 11, 0.35);
+  transition: width 160ms ease, height 160ms ease;
+}
+
+.scanner-reticle.scanner-reticle--square {
+  width: 56%;
+  height: 76%;
+  border-color: rgba(16, 185, 129, 0.85);
+}
+
+.scanner-reticle-label {
+  position: absolute;
+  bottom: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 700;
+  color: #e4e4e7;
+  background: rgba(9, 9, 11, 0.78);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.scanner-hud-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+}
+
+.scanner-hud-status {
+  font-family: var(--font-mono);
+  color: #38bdf8;
+  font-weight: 700;
+}
+
+.scanner-error-banner {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(127, 29, 29, 0.35);
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  color: #fecaca;
+  font-size: 12px;
+}
+
+.scanner-error-banner.hidden {
+  display: none !important;
+}
+
+.scanner-controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.scanner-btn-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.scanner-pack-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scanner-pack-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  flex-wrap: wrap;
+}
+
+.scanner-pack-info {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.scanner-pack-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.scanner-pack-desc {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.scanner-stage-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  background: rgba(14, 165, 233, 0.16);
+  color: #7dd3fc;
+  border: 1px solid rgba(14, 165, 233, 0.35);
+}
+
+.scanner-stage-badge.planned {
+  background: rgba(161, 161, 170, 0.14);
+  color: #d4d4d8;
+  border-color: rgba(161, 161, 170, 0.3);
+}
+
+.scanner-manual-box {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scanner-manual-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.scanner-manual-row .drawer-input {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.scanner-match-card {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 480px) {
+  #scannerModal.modal-backdrop {
+    padding: 6px;
+  }
+  .scanner-dialog {
+    padding: 12px;
+  }
+  .scanner-viewfinder-wrap {
+    aspect-ratio: 4 / 3;
+    min-height: 160px;
+  }
+}

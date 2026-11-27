@@ -25,11 +25,15 @@ When continuing development on `disk-crate`, strictly maintain these architectur
    - Switches cleanly between **Hunt** mode and local-first **Collection** mode (`Hunt | Collection`), with MusicBrainz/iTunes release lookup, custom cover variants, lossless JSON export/import (`Merge` / `Replace`), and 11-column Owned Google Sheet CSV export + two-way tab append (`#gid=`).
    - Incrementally syncs Owned releases via `GET /api/collection` and `POST /api/collection/batch` (`sync_seq` deltas, soft-delete tombstones, LWW conflict detection, and `keepalive` background flush).
    - Cross-references Hunt cards against Owned releases via `regCatNo`, `barcode`, `mbid`, normalized `artist|title`, and shared tracklist keys (`✓ Owned`, `In Collection`, `Tracks Owned: K/N`), with 1-click single & batch graduation to Owned.
-3. **Instant First Paint + Viewport Lazy Loading:**
+4. **Opt-In Camera Scanner Engine Shell (Stage 3a, `js/scanner-manager.js`, `js/scanner-ui.js`, `js/scanner-worker.js`, `css/scanner.css`):**
+   - Zero-cost default startup: `index.html` links zero scanner CSS/JS/WASM until clicking **Scan** (`#openScannerBtn`), and no WASM bytes download until explicit confirmation in `#scannerGatePanel`.
+   - Verified packs (`engine-shell.wasm` + `manifest.json`, hosted via GitHub Releases `scanner-assets-v1` → `.github/workflows/deploy-pages.yml`; local dev via `node scripts/fetch-scanner-assets.mjs` or `?scannerAssets=`) are SHA-256 checked via Web Crypto and stored exclusively in Cache Storage `disk-crate-scanner-assets-v1`.
+   - Closing the modal or triggering **Wipe Scanner Engine & Cache** terminates `scanner-worker.js`, stops all camera `MediaStreamTrack`s, deletes `disk-crate-scanner-assets-v1`, and leaves Hunt checklists and Owned IndexedDB data untouched. (Stage 3b barcode/OCR decoders and Stage 3c cover matching remain planned.)
+5. **Instant First Paint + Viewport Lazy Loading:**
    - All loaded catalog cards render immediately on load using offline data-URI Japanese Jewel Case + Obi Strip SVGs (`buildJewelCaseDataURI`).
    - Official album jackets load asynchronously via `IntersectionObserver` (`rootMargin: '250px 0px'`) and a 3-worker concurrency queue (`MAX_WORKERS = 3`).
    - Multi-disc release track lists (`js/track-resolver.js`) resolve lazily on user request inside Crate Flip using strict 3-layer precedence (**Manual Override > Catalog JSON > Cached Auto-Fetch**: MusicBrainz `1 req/s` queue primary, Apple iTunes JP fallback with digital-edition disclaimer) without consuming cloud sync writes.
-4. **No Hotlinked Third-Party Image URLs:**
+6. **No Hotlinked Third-Party Image URLs:**
    - Do **not** hardcode URLs from VGMdb, Wikia/Fandom, or CDJapan—they aggressively block hotlinking or return wrong promo art (e.g., Steam game art instead of soundtrack CD jackets). Rely on the two-stage verified resolver or user-added custom variants.
 
 ---

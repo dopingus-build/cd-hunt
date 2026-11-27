@@ -3710,6 +3710,165 @@
         flushPendingCollectionSync({ keepalive: true });
       });
     }
+
+    // ── Phase 3a: Zero-Cost Opt-In Scanner Lazy Loader ──
+    let scannerRuntimePromise = null;
+    let scannerCssInjected = false;
+
+    function loadScriptDynamically(src) {
+      return new Promise(function (resolve, reject) {
+        const scriptEl = document.createElement('script');
+        scriptEl.src = src;
+        scriptEl.async = false;
+        scriptEl.onload = function () { resolve(); };
+        scriptEl.onerror = function () { reject(new Error('Failed to load script: ' + src)); };
+        const host = document.head || document.body;
+        if (!host || typeof host.appendChild !== 'function') {
+          reject(new Error('DOM container unavailable for dynamic script'));
+          return;
+        }
+        host.appendChild(scriptEl);
+      });
+    }
+
+    async function loadScannerRuntime() {
+      const ns = window.DiskCrate || window.CDHunt || {};
+      if (ns.scannerManager && ns.scannerUI) {
+        return { scannerManager: ns.scannerManager, scannerUI: ns.scannerUI };
+      }
+      if (!scannerRuntimePromise) {
+        scannerRuntimePromise = (async function () {
+          if (!scannerCssInjected && typeof document !== 'undefined' && typeof document.createElement === 'function') {
+            scannerCssInjected = true;
+            try {
+              const linkEl = document.createElement('link');
+              linkEl.rel = 'stylesheet';
+              linkEl.href = './css/scanner.css';
+              const cssHost = document.head || document.body;
+              if (cssHost && typeof cssHost.appendChild === 'function') {
+                cssHost.appendChild(linkEl);
+              }
+            } catch (e) {}
+          }
+          const latestNs = window.DiskCrate || window.CDHunt || {};
+          if (!latestNs.scannerManager) {
+            await loadScriptDynamically('./js/scanner-manager.js');
+          }
+          const afterMgrNs = window.DiskCrate || window.CDHunt || {};
+          if (!afterMgrNs.scannerUI) {
+            await loadScriptDynamically('./js/scanner-ui.js');
+          }
+          const finalNs = window.DiskCrate || window.CDHunt || {};
+          if (!finalNs.scannerManager || !finalNs.scannerUI) {
+            throw new Error('Scanner runtime modules failed to register');
+          }
+          return { scannerManager: finalNs.scannerManager, scannerUI: finalNs.scannerUI };
+        })().catch(function (err) {
+          scannerRuntimePromise = null;
+          throw err;
+        });
+      }
+      return scannerRuntimePromise;
+    }
+
+    function lookupCodeLocally(rawCode) {
+      const cleanRaw = String(rawCode || '').trim();
+      if (!cleanRaw) return { status: 'unknown', code: '' };
+
+      const digitsOnly = cleanRaw.replace(/[\s-]+/g, '').trim();
+      const isBarcode = /^\d{8,14}$/.test(digitsOnly);
+      const normCat = collectionMod
+        ? collectionMod.normalizeCatNo(cleanRaw)
+        : cleanRaw.toUpperCase().replace(/[～〜]/g, '~');
+
+      for (let i = 0; i < ownedReleases.length; i++) {
+        const owned = ownedReleases[i];
+        if (!owned) continue;
+        if (isBarcode && owned.barcode && owned.barcode.replace(/[\s-]+/g, '') === digitsOnly) {
+          return { status: 'owned', owned: owned };
+        }
+        const ownedCat = collectionMod
+          ? collectionMod.normalizeCatNo(owned.catNo)
+          : String(owned.catNo || '').trim().toUpperCase();
+        if (ownedCat && (ownedCat === normCat || ownedCat.split('~')[0] === normCat)) {
+          return { status: 'owned', owned: owned };
+        }
+      }
+
+      for (let j = 0; j < ALBUMS.length; j++) {
+        const hunt = ALBUMS[j];
+        if (!hunt) continue;
+        if (isBarcode && hunt.barcode && String(hunt.barcode).replace(/[\s-]+/g, '') === digitsOnly) {
+          return { status: 'hunt', hunt: hunt };
+        }
+        const codes = [];
+        if (hunt.regCatNo) codes.push(hunt.regCatNo);
+        if (Array.isArray(hunt.mbEditions)) {
+          hunt.mbEditions.forEach(function (ed) {
+            if (ed && (ed.catno || ed.catNo)) codes.push(ed.catno || ed.catNo);
+          });
+        }
+        const matched = codes.some(function (c) {
+          const nc = collectionMod ? collectionMod.normalizeCatNo(c) : String(c || '').trim().toUpperCase();
+          return nc && (nc === normCat || nc.split('~')[0] === normCat);
+        });
+        if (matched) {
+          return { status: 'hunt', hunt: hunt };
+        }
+      }
+
+      return { status: 'unknown', code: cleanRaw };
+    }
+
+    const openScannerBtn = document.getElementById('openScannerBtn');
+    if (openScannerBtn) {
+      openScannerBtn.addEventListener('click', async function () {
+        try {
+          const runtime = await loadScannerRuntime();
+          const ns = window.DiskCrate || window.CDHunt || {};
+          await runtime.scannerUI.open({
+            scannerManager: runtime.scannerManager,
+            config: ns.config || {},
+            locationSearch: window.location && window.location.search,
+            locationHref: window.location && window.location.href,
+            storage: storage,
+            db: db,
+            showToast: showToast,
+            lookupCodeLocally: lookupCodeLocally,
+            onJumpToItem: function (targetMode, targetId) {
+              if (targetMode === 'owned') {
+                if (!isCollectionMode()) setAppMode('collection');
+                collectionCategory = 'All';
+                collectionQuickFilter = 'all';
+              } else {
+                if (isCollectionMode()) setAppMode('hunt');
+                state.category = 'All';
+                state.huntingOnly = false;
+              }
+              state.search = '';
+              const si = document.getElementById('searchInput');
+              if (si) si.value = '';
+              renderCategoryPills();
+              renderAll();
+              const visible = getFilteredAlbums();
+              const idx = visible.findIndex(function (x) { return x && x.id === targetId; });
+              openLightbox(idx >= 0 ? idx : 0);
+            },
+            openAddReleaseWithCode: function (rawCode) {
+              const clean = String(rawCode || '').trim();
+              const digits = clean.replace(/[\s-]+/g, '').trim();
+              const draft = /^\d{8,14}$/.test(digits)
+                ? { barcode: digits }
+                : { catNo: clean.toUpperCase() };
+              if (!isCollectionMode()) setAppMode('collection');
+              openReleaseFormModal(draft, 'Add Scanned Release');
+            }
+          });
+        } catch (err) {
+          showToast('Unable to open scanner: ' + (err && err.message ? err.message : 'Load error'));
+        }
+      });
+    }
   }
 
   async function initApp() {

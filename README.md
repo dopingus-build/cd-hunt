@@ -4,7 +4,7 @@ A mobile-first, zero-dependency web application (formerly **CD Hunt**) for hunti
 
 Catalog metadata lives externally (such as the companion flat repository [`dopingus-build/cd-metadata`](https://github.com/dopingus-build/cd-metadata), which hosts `index.json` and `2026-japan.json`). Users can pick a built-in preset, paste a direct JSON file URL or bare GitHub metadata repository URL, or load a local `.json` file from their device.
 
-> **Roadmap Status:** Architecture specifications for Owned Releases Collection and the upcoming Opt-In Camera Scanner live in [`docs/plans/OVERVIEW.md`](./docs/plans/OVERVIEW.md) (Phases 0–2 implemented; Phase 3 Opt-In Camera Scanner remains planned and is not yet implemented).
+> **Roadmap Status:** Architecture specifications live in [`docs/plans/OVERVIEW.md`](./docs/plans/OVERVIEW.md) (Phases 0–2 & Phase 3a Opt-In Scanner Shell implemented; Phases 3b–3c WASM barcode/OCR and cover decoders remain planned and are not yet implemented).
 
 ## Key Features
 
@@ -14,6 +14,7 @@ Catalog metadata lives externally (such as the companion flat repository [`dopin
 - **Isolated Storage per Catalog:** Progress, cover caches, view mode, and banner dismissal are automatically namespaced (`deriveStoragePrefix`) so separate catalogs never collide in `localStorage`.
 - **Schema Validation (`schemaVersion: 1`):** Loaded catalogs are validated client-side by `js/validate.js` against [`schemas/catalog.v1.schema.json`](./schemas/catalog.v1.schema.json).
 - **Multi-Disc Track Lists & Track Search:** Optional `tracks[]`, `barcode`, and `mbid` schema fields, lazy on-demand MusicBrainz (`1 req/s`) / Apple iTunes track fetching cached locally in IndexedDB (`disk_crate_db_v1`), fast paste/edit manual overrides inside **Crate Flip**, and track-title search across Grid and 1-Column views (`js/db.js`, `js/track-resolver.js`).
+- **Opt-In Camera Scanner Shell (Stage 3a) & Owned Collection:** Dedicated **Collection** mode (`Hunt | Collection`) with IndexedDB storage, incremental D1 `sync_seq` sync, lossless JSON / 11-column Sheet backup, Hunt ↔ Owned overlap badges + 1-click graduation (`js/collection.js`), plus zero-cost opt-in **Scan** modal (`js/scanner-manager.js`, `js/scanner-ui.js`, `js/scanner-worker.js`) featuring SHA-256 verified Cache Storage, 1-click Wipe, live camera viewfinder, and instant local manual barcode/catalog lookup.
 - **通常盤-Priority Cover Art Resolution:** Instant offline SVG jewel-case + obi strip covers (`buildJewelCaseDataURI`), lazy two-stage resolution via MusicBrainz/Cover Art Archive (`mbEditions`) and Apple iTunes Search API (`itunesQuery` + `requiredGroups`), multi-edition carousel, and separation of `digitalOnly: true` tracks from the physical shelf-hunting counter.
 
 ## Project Structure
@@ -23,6 +24,7 @@ disk-crate/
 ├── .agents/skills/
 │   └── disk-crate-catalog/SKILL.md # Vendor-neutral agent skill for catalog & sheet curation
 ├── .github/workflows/
+│   ├── deploy-pages.yml           # Builds & publishes Pages artifact + verified scanner release assets
 │   ├── test.yml                   # CI running unit, integration, & system tests
 │   ├── e2e-browser.yml            # CI running headless Chromium browser E2E suite
 │   └── smoke-live.yml             # Post-deploy / scheduled smoke checks against live Pages + Worker
@@ -32,7 +34,8 @@ disk-crate/
 ├── README.md
 ├── index.html                     # Main app HTML shell & Catalog Loader screen
 ├── css/
-│   └── styles.css                 # Zero-CDN responsive dark UI styles
+│   ├── styles.css                 # Zero-CDN responsive dark UI styles
+│   └── scanner.css                # Lazily loaded Stage 3a opt-in scanner modal & viewfinder styles
 ├── js/
 │   ├── validate.js                # Versioned schema validator, GitHub & Google Sheets URL normalizer
 │   ├── storage.js                 # Sandbox-safe localStorage wrapper & derived key prefixing
@@ -43,6 +46,9 @@ disk-crate/
 │   ├── collection.js              # Owned Collection domain model, Hunt↔Owned matcher, graduation, JSON/CSV I/O
 │   ├── sync.js                    # GitHub session JWT handling, Hunt state merge, & incremental Collection sync
 │   ├── sheet-adapter.js           # 9-column Hunt CSV overlay & 11-column Owned Collection CSV parser/exporter
+│   ├── scanner-manager.js         # Lazily loaded Stage 3a manifest, SHA-256 Cache Storage manager & Wipe API
+│   ├── scanner-ui.js              # Lazily loaded Stage 3a gate, Engine Manager, live viewfinder & manual fallback
+│   ├── scanner-worker.js          # Isolated single-threaded WASM Web Worker runtime & frame telemetry
 │   └── app.js                     # App state, Hunt & Collection modes, rendering, modals, & sync wiring
 ├── schemas/
 │   ├── catalog.v1.schema.json     # JSON Schema (Draft 2020-12) for schemaVersion: 1 Hunt catalogs
@@ -52,10 +58,12 @@ disk-crate/
 │   ├── METADATA.md                # Catalog & repository index specification
 │   ├── AGENT_CATALOG_GUIDE.md     # Single-file AI / LLM agent guide for Google Sheets & JSON catalogs
 │   ├── CLOUD_SYNC_ARCHITECTURE.md # Architecture design for Cloudflare Worker + D1 GitHub sync
-│   ├── plans/                     # Planned architecture & phased feature specs
+│   ├── plans/                     # Architecture overview & phased design/implementation specs
 │   ├── sample-catalog-sheet.csv   # Canonical 9-column, 1-release-per-row Google Sheet template
 │   └── sample-catalog.json        # Sample schemaVersion: 1 catalog JSON template
 ├── scripts/
+│   ├── build-scanner-assets.mjs   # Zero-dep builder for engine-shell.wasm, manifest.json & release tar.gz
+│   ├── fetch-scanner-assets.mjs   # Pinned SHA-256 downloader/verifier for local dev & Actions Pages deploy
 │   ├── smoke-live.mjs             # Live GitHub Pages + Cloudflare Worker HTTP/CORS/OAuth smoke tests
 │   └── e2e-browser.mjs            # Headless Chromium E2E suite (desktop + mobile 375px + multi-device)
 ├── worker/
@@ -68,7 +76,8 @@ disk-crate/
     ├── catalog-validation.test.js # Unit tests for validator, storage, cover resolver, & sync
     ├── tracks.test.js             # Unit tests for track schema, IndexedDB wrapper, resolver, & matcher
     ├── collection.test.js         # Unit tests for Owned Collection schema, CRUD, CSV/JSON I/O, sync, & cross-ref
-    ├── catalog-integration.test.js # Integration tests for index.html, presets, tracks, UI, & cloud sync
+    ├── scanner.test.js            # Unit tests for Stage 3a manifest, SHA-256 verification, Cache Storage, Worker & Wipe
+    ├── catalog-integration.test.js # Integration tests for index.html, presets, tracks, scanner gate, UI & cloud sync
     ├── cloud-sync-system.test.js  # Full-stack system tests (Frontend VM <-> HTTP Worker <-> SQLite)
     ├── worker-sync.test.js        # Worker unit tests (JWT, CORS, OAuth, rate limits, pause guard)
     └── worker-integration.test.js # End-to-end HTTP + node:sqlite Worker integration tests

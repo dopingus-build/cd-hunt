@@ -198,7 +198,10 @@ async function bootApp({
   mbTrackMinIntervalMs = 0,
   disableIntersectionObserver = false,
   clipboardMode = 'async',
-  execCommandThrow = false
+  execCommandThrow = false,
+  cachesImpl = null,
+  workerCtor = null,
+  extraNavigator = null
 } = {}) {
   const html = readAppHtml();
   const validatorSource = readValidatorSource();
@@ -250,19 +253,59 @@ async function bootApp({
     hash,
     origin,
     pathname,
+    href: origin + pathname + search + hash,
     assign(nextUrl) {
       locationNavigations.push(nextUrl);
     }
   };
   let lastCreatedElement = null;
+  const loadedDynamicAssets = [];
+
+  function registerMarkupIds(markup) {
+    if (!markup) return;
+    const tagRegex = /<[^>]*\bid=["']([^"']+)["'][^>]*>/g;
+    let match;
+    while ((match = tagRegex.exec(markup)) !== null) {
+      const fullTag = match[0];
+      const id = match[1];
+      if (!elements.has(id)) {
+        const classMatch = fullTag.match(/\bclass=["']([^"']+)["']/);
+        const initialClasses = classMatch ? classMatch[1].split(/\s+/).filter(Boolean) : [];
+        elements.set(id, createElementStub(id, initialClasses, extractFallbackImgs));
+      }
+    }
+  }
 
   const winListeners = {};
   const documentStub = {
     title: '',
     readyState: 'complete',
     visibilityState: 'visible',
+    head: {
+      appendChild(el) {
+        if (el && el.href) {
+          loadedDynamicAssets.push(el.href);
+        }
+        if (el && el.src) {
+          loadedDynamicAssets.push(el.src);
+          const rel = String(el.src).replace(/^\.\//, '');
+          const abs = path.resolve(__dirname, '..', rel);
+          if (fs.existsSync(abs)) {
+            vm.runInContext(fs.readFileSync(abs, 'utf8'), context, { filename: abs });
+          }
+          if (typeof el.onload === 'function') el.onload();
+        }
+      }
+    },
     body: {
-      appendChild() {},
+      appendChild(el) {
+        if (el && el.id) {
+          elements.set(el.id, el);
+        }
+        if (el && el.innerHTML) {
+          registerMarkupIds(el.innerHTML);
+        }
+      },
       removeChild() {}
     },
     getElementById(id) {
@@ -371,14 +414,22 @@ async function bootApp({
     };
   }
 
+  if (extraNavigator && typeof extraNavigator === 'object') {
+    Object.assign(navigatorObj, extraNavigator);
+  }
+
   const sandbox = {
     console: { log() {}, warn() {}, error() {} },
     URL,
     URLSearchParams,
+    Response,
+    crypto: globalThis.crypto,
     atob,
     btoa,
     TextDecoder,
     TextEncoder,
+    caches: cachesImpl || undefined,
+    Worker: workerCtor || undefined,
     indexedDB: indexedDBImpl || undefined,
     Image: imageImpl || MockImage,
     FileReader: MockFileReader,
@@ -460,6 +511,7 @@ async function bootApp({
     locationNavigations,
     copiedTexts,
     observedTargets,
+    loadedDynamicAssets,
     document: documentStub,
     window: context,
     flush,
@@ -3806,5 +3858,201 @@ describe('Phase 2 Owned Collection, Cross-Referencing, Graduation & Shared relea
     await app.triggerPageHide();
     assert.equal(batchCalls.length, 2);
     assert.equal(batchCalls[1].keepalive, true);
+  });
+});
+
+describe('Phase 3a Opt-In Scanner Engine Integration', () => {
+  function makeCacheStorageMock() {
+    const buckets = new Map();
+    return {
+      async has(name) { return buckets.has(name); },
+      async open(name) {
+        if (!buckets.has(name)) buckets.set(name, new Map());
+        const map = buckets.get(name);
+        return {
+          async put(k, res) {
+            const urlKey = typeof k === 'string' ? k : k.url;
+            const buf = Buffer.from(await res.arrayBuffer());
+            map.set(urlKey, buf);
+          },
+          async match(k) {
+            const urlKey = typeof k === 'string' ? k : k.url;
+            const buf = map.get(urlKey);
+            if (!buf) return undefined;
+            return {
+              ok: true,
+              status: 200,
+              async arrayBuffer() { return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength); },
+              async json() { return JSON.parse(buf.toString('utf8')); }
+            };
+          },
+          async delete(k) {
+            return map.delete(typeof k === 'string' ? k : k.url);
+          }
+        };
+      },
+      async delete(name) { return buckets.delete(name); },
+      _buckets: buckets
+    };
+  }
+
+  it('keeps scanner runtime at 0 KB until #openScannerBtn, gates WASM download until confirmed, runs worker + manual lookup, and wipes safely without touching Hunt/Owned data', async () => {
+    const { buildEngineShellWasmBytes, buildScannerManifest } = await import('../scripts/build-scanner-assets.mjs');
+    const wasmBytes = buildEngineShellWasmBytes();
+    const manifest = buildScannerManifest(wasmBytes);
+    const scannerWorkerMod = require('../js/scanner-worker.js');
+
+    const requestedUrls = [];
+    const cachesImpl = makeCacheStorageMock();
+    const workerEvents = { inits: 0, terminated: 0 };
+
+    class MockScannerWorker {
+      constructor() {
+        this._core = scannerWorkerMod.createScannerWorkerCore();
+        this.onmessage = null;
+      }
+      postMessage(msg) {
+        if (msg && msg.type === 'init') workerEvents.inits++;
+        Promise.resolve(this._core.handleMessage(msg)).then((reply) => {
+          if (reply && typeof this.onmessage === 'function') {
+            this.onmessage({ data: reply });
+          }
+        });
+      }
+      terminate() {
+        workerEvents.terminated++;
+      }
+    }
+
+    const huntCatalog = {
+      schemaVersion: 1,
+      meta: { title: 'Scanner Integ Catalog' },
+      items: [
+        {
+          id: 'hunt-scan-01',
+          category: 'Game',
+          artist: 'Capcom',
+          title: 'Breath of Fire III OST',
+          regCatNo: 'CPCA-1004',
+          catalog: 'CPCA-1004 (通常盤)',
+          barcode: '4976219256789',
+          kana: 'カ',
+          filing: 'Shelf G1',
+          price: '¥1,500'
+        }
+      ]
+    };
+
+    const backing = { stores: new Map() };
+    const app = await bootApp({
+      catalogObject: huntCatalog,
+      cachesImpl,
+      workerCtor: MockScannerWorker,
+      indexedDBImpl: {
+        open() {
+          const req = { result: null, error: null, onsuccess: null, onerror: null, onupgradeneeded: null };
+          queueMicrotask(() => {
+            const dbObj = {
+              objectStoreNames: { contains: (s) => backing.stores.has(s) },
+              createObjectStore: (s, opts) => {
+                if (!backing.stores.has(s)) backing.stores.set(s, { keyPath: opts.keyPath, rows: new Map() });
+                return { indexNames: { contains: () => true }, createIndex: () => {} };
+              },
+              transaction: (storeName) => {
+                const storeMeta = backing.stores.get(storeName);
+                const tx = { error: null, oncomplete: null, onerror: null, onabort: null };
+                const makeReq = (exec) => {
+                  const r = { result: undefined, error: null, onsuccess: null, onerror: null };
+                  queueMicrotask(() => { exec(r); });
+                  return r;
+                };
+                tx.objectStore = () => ({
+                  get: (k) => makeReq((r) => { r.result = storeMeta.rows.get(k); if (r.onsuccess) r.onsuccess({ target: r }); }),
+                  put: (v) => makeReq((r) => { storeMeta.rows.set(v[storeMeta.keyPath], JSON.parse(JSON.stringify(v))); r.result = v[storeMeta.keyPath]; if (r.onsuccess) r.onsuccess({ target: r }); }),
+                  delete: (k) => makeReq((r) => { storeMeta.rows.delete(k); if (r.onsuccess) r.onsuccess({ target: r }); }),
+                  getAll: () => makeReq((r) => { r.result = Array.from(storeMeta.rows.values()).map((v) => JSON.parse(JSON.stringify(v))); if (r.onsuccess) r.onsuccess({ target: r }); }),
+                  clear: () => makeReq((r) => { storeMeta.rows.clear(); if (r.onsuccess) r.onsuccess({ target: r }); })
+                });
+                setTimeout(() => { if (tx.oncomplete) tx.oncomplete({ target: tx }); }, 0);
+                return tx;
+              }
+            };
+            req.result = dbObj;
+            req.transaction = { objectStore: () => ({ indexNames: { contains: () => true }, createIndex: () => {} }) };
+            if (req.onupgradeneeded) req.onupgradeneeded({ target: { result: dbObj } });
+            if (req.onsuccess) req.onsuccess({ target: req });
+          });
+          return req;
+        }
+      },
+      fetchImpl: async (url) => {
+        const u = String(url);
+        requestedUrls.push(u);
+        if (u.endsWith('scanner-assets/v1/manifest.json')) {
+          return new Response(JSON.stringify(manifest), { status: 200 });
+        }
+        if (u.endsWith('scanner-assets/v1/engine-shell.wasm')) {
+          return new Response(wasmBytes, { status: 200, headers: { 'Content-Type': 'application/wasm' } });
+        }
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200 });
+      }
+    });
+
+    // Startup: 0 dynamic scanner scripts/CSS and 0 scanner asset network requests
+    assert.equal(app.loadedDynamicAssets.length, 0);
+    assert.equal(requestedUrls.some((u) => u.includes('scanner')), false);
+
+    // Seed Owned item + mark Hunt checklist item before opening scanner
+    app.triggerDocumentClick('toggle-acq', { 'data-id': 'hunt-scan-01' });
+    await app.clickElement('modeCollectionBtn');
+    await app.clickElement('addReleaseBtn');
+    await app.inputText('rfArtist', 'Owned Scanner Artist');
+    await app.inputText('rfTitle', 'Owned Scanner Album');
+    await app.inputText('rfCatNo', 'OWN-SCN-9');
+    await app.inputText('rfBarcode', '4900000000099');
+    await app.clickElement('saveReleaseFormBtn');
+    assert.equal(app.elements.get('progressBadge').textContent, '1 release · 0 tracks');
+
+    // Click #openScannerBtn -> lazy-loads scanner JS/CSS + fetches manifest ONLY (0 WASM requests until confirmed!)
+    await app.clickElement('openScannerBtn');
+    assert.ok(app.loadedDynamicAssets.includes('./css/scanner.css'));
+    assert.ok(app.loadedDynamicAssets.includes('./js/scanner-manager.js'));
+    assert.ok(app.loadedDynamicAssets.includes('./js/scanner-ui.js'));
+    assert.equal(app.elements.get('scannerModal').classList.contains('open'), true);
+    assert.equal(app.elements.get('scannerGatePanel').classList.contains('hidden'), false);
+    assert.ok(app.elements.get('scannerGateSizeText').textContent.includes('54 B'));
+    assert.equal(requestedUrls.some((u) => u.endsWith('engine-shell.wasm')), false);
+    assert.equal(await cachesImpl.has('disk-crate-scanner-assets-v1'), false);
+
+    // Confirm download -> downloads & verifies WASM, opens viewfinder, boots WASM worker
+    await app.clickElement('scannerConfirmDownloadBtn');
+    await app.flush();
+    assert.equal(requestedUrls.some((u) => u.endsWith('engine-shell.wasm')), true);
+    assert.equal(await cachesImpl.has('disk-crate-scanner-assets-v1'), true);
+    assert.equal(workerEvents.inits, 1);
+    assert.equal(app.elements.get('scannerViewfinderPanel').classList.contains('hidden'), false);
+    assert.ok(app.elements.get('scannerHudStatus').textContent.includes('ping 301'));
+
+    // Manual lookup matches both Hunt catalog # and Owned barcode locally
+    await app.inputText('scannerManualInput', 'CPCA-1004');
+    await app.clickElement('scannerManualSubmitBtn');
+    assert.ok(app.elements.get('scannerManualResult').innerHTML.includes('On Hunt List'));
+    assert.ok(app.elements.get('scannerManualResult').innerHTML.includes('Breath of Fire III OST'));
+
+    await app.inputText('scannerManualInput', '4900000000099');
+    await app.clickElement('scannerManualSubmitBtn');
+    assert.ok(app.elements.get('scannerManualResult').innerHTML.includes('Already Owned'));
+
+    // Switch to Engine Manager -> Wipe Scanner Engine & Cache -> Worker terminated & Cache cleared, Owned & Hunt intact
+    await app.clickElement('scannerViewManagerBtn');
+    assert.equal(app.elements.get('scannerManagerPanel').classList.contains('hidden'), false);
+    await app.clickElement('scannerWipeBtn');
+    assert.equal(workerEvents.terminated, 1);
+    assert.equal(await cachesImpl.has('disk-crate-scanner-assets-v1'), false);
+
+    await app.clickElement('closeScannerModalBtn');
+    assert.equal(app.elements.get('progressBadge').textContent, '1 release · 0 tracks');
+    await app.clickElement('modeHuntBtn');
+    assert.equal(app.elements.get('progressBadge').textContent, '1 / 1');
   });
 });

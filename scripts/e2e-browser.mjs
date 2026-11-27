@@ -25,7 +25,8 @@ const MIME_TYPES = {
   '.csv': 'text/csv; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
-  '.png': 'image/png'
+  '.png': 'image/png',
+  '.wasm': 'application/wasm'
 };
 
 function createSqliteD1Database() {
@@ -327,13 +328,41 @@ async function assertNoHorizontalOverflow(page, label) {
 
 async function main() {
   const { default: worker } = await import('../worker/index.mjs');
+  const { buildEngineShellWasmBytes, buildScannerManifest } = await import('./build-scanner-assets.mjs');
+  const e2eWasmBytes = buildEngineShellWasmBytes();
+  const e2eScannerManifestJson = JSON.stringify(buildScannerManifest(e2eWasmBytes), null, 2);
+  let scannerOfflineFlag = false;
+  const scannerRequestLog = [];
   const db = createSqliteD1Database();
 
   const staticServer = http.createServer((req, res) => {
     const reqUrl = new URL(req.url, 'http://127.0.0.1');
+    if (reqUrl.pathname.includes('scanner')) {
+      scannerRequestLog.push(reqUrl.pathname);
+    }
     if (reqUrl.pathname === '/favicon.ico') {
       res.writeHead(204);
       res.end();
+      return;
+    }
+    if (reqUrl.pathname === '/scanner-assets/v1/manifest.json') {
+      if (scannerOfflineFlag) {
+        res.writeHead(503);
+        res.end('Offline');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(e2eScannerManifestJson);
+      return;
+    }
+    if (reqUrl.pathname === '/scanner-assets/v1/engine-shell.wasm') {
+      if (scannerOfflineFlag) {
+        res.writeHead(503);
+        res.end('Offline');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/wasm' });
+      res.end(Buffer.from(e2eWasmBytes));
       return;
     }
     const relPath = decodeURIComponent(reqUrl.pathname === '/' ? '/index.html' : reqUrl.pathname);
@@ -1146,7 +1175,121 @@ async function main() {
       await ctxC.close();
     }
 
-    console.log('✓ Browser E2E checks passed (desktop + 375px mobile Hunt & Collection, OAuth, multi-device SQLite sync, Collection IndexedDB reload + tombstones + graduation + Owned cross-ref badges, search/filters + track search, Crate Flip cover-only swipe, jacket search, Track List MB/IndexedDB persistence/paste override, backup modal, Google Sheet + dedup + write-back, /api/share, offline CSV cache, local CSV upload, sign-out, keepalive flush)');
+    // ── Device D: Phase 3a Opt-In Camera Scanner, Cache Storage Verification, Real Web Worker WASM + captureStream Loop, Offline Reopen & Wipe ──
+    const ctxD = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    await attachExternalRoutes(ctxD, appOrigin, workerBaseUrl);
+    await ctxD.addInitScript(() => {
+      window.__e2eCamTracks = [];
+      const fakeDevices = {
+        async getUserMedia() {
+          const canvas = document.createElement('canvas');
+          canvas.width = 320;
+          canvas.height = 240;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#0f172a';
+          ctx.fillRect(0, 0, 320, 240);
+          ctx.fillStyle = '#f8fafc';
+          ctx.fillRect(40, 60, 240, 120);
+          const stream = canvas.captureStream(15);
+          stream.getTracks().forEach((tr) => window.__e2eCamTracks.push(tr));
+          return stream;
+        }
+      };
+      try {
+        Object.defineProperty(navigator, 'mediaDevices', {
+          value: fakeDevices,
+          configurable: true
+        });
+      } catch (e) {
+        navigator.mediaDevices = fakeDevices;
+      }
+    });
+    const pageD = await ctxD.newPage();
+    const pageDErrors = [];
+    pageD.on('pageerror', (err) => pageDErrors.push(err.message));
+
+    try {
+      scannerRequestLog.length = 0;
+      await pageD.goto(`${appOrigin}/index.html?mode=collection`);
+      await pageD.waitForSelector('#openScannerBtn:not(.hidden)');
+      assert.equal(scannerRequestLog.length, 0, 'Startup must fetch 0 scanner files before opt-in');
+
+      // Seed an Owned release with barcode so local manual lookup & Wipe isolation are verified
+      await pageD.click('#addReleaseBtn');
+      await pageD.waitForSelector('#releaseFormModal.open');
+      await pageD.fill('#rfArtist', 'Scanner E2E Artist');
+      await pageD.fill('#rfTitle', 'Scanner E2E Release');
+      await pageD.fill('#rfCatNo', 'E2E-SCN-1');
+      await pageD.fill('#rfBarcode', '4547366611397');
+      await pageD.click('#saveReleaseFormBtn');
+      await pageD.waitForSelector('#releaseFormModal', { state: 'hidden' });
+      await pageD.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 release · 0 tracks');
+
+      // Open Scan -> lazy loads JS/CSS + manifest only; ZERO WASM fetched & NO Cache Storage created yet
+      await pageD.click('#openScannerBtn');
+      await pageD.waitForSelector('#scannerModal.open');
+      await pageD.waitForSelector('#scannerGatePanel:not(.hidden)');
+      await pageD.waitForFunction(() => (document.getElementById('scannerGateSizeText')?.textContent || '').includes('54 B'));
+      assert.equal(scannerRequestLog.some((p) => p.endsWith('engine-shell.wasm')), false);
+      assert.equal(await pageD.evaluate(() => caches.has('disk-crate-scanner-assets-v1')), false);
+
+      // Confirm download -> verifies WASM into Chromium Cache Storage, instantiates Worker, processes synthetic camera frames
+      await pageD.click('#scannerConfirmDownloadBtn');
+      await pageD.waitForSelector('#scannerViewfinderPanel:not(.hidden)');
+      assert.equal(scannerRequestLog.some((p) => p.endsWith('engine-shell.wasm')), true);
+      assert.equal(await pageD.evaluate(() => caches.has('disk-crate-scanner-assets-v1')), true);
+      await pageD.waitForFunction(() => (document.getElementById('scannerHudStatus')?.textContent || '').includes('WASM Live'));
+      await pageD.waitForFunction(() => parseInt(document.getElementById('scannerFrameCounter')?.textContent || '0', 10) >= 1);
+
+      // Check 375x812 mobile responsiveness while Scan modal is open
+      await pageD.setViewportSize({ width: 375, height: 812 });
+      await assertNoHorizontalOverflow(pageD, 'Mobile 375px Scanner modal');
+      await pageD.setViewportSize({ width: 1280, height: 800 });
+
+      // Close modal -> stops camera stream tracks cleanly
+      await pageD.click('#closeScannerModalBtn');
+      await pageD.waitForSelector('#scannerModal', { state: 'hidden' });
+      const allEnded = await pageD.evaluate(() =>
+        window.__e2eCamTracks.length > 0 && window.__e2eCamTracks.every((tr) => tr.readyState === 'ended')
+      );
+      assert.equal(allEnded, true, 'Closing scanner modal must stop all active camera tracks');
+
+      // Reopen 100% offline -> opens straight into viewfinder with ZERO network fetches to /scanner-assets/
+      scannerOfflineFlag = true;
+      const reqCountBeforeOffline = scannerRequestLog.length;
+      await pageD.click('#openScannerBtn');
+      await pageD.waitForSelector('#scannerViewfinderPanel:not(.hidden)');
+      await pageD.waitForFunction(() => (document.getElementById('scannerHudStatus')?.textContent || '').includes('WASM Live'));
+      assert.equal(
+        scannerRequestLog.slice(reqCountBeforeOffline).some((p) => p.includes('engine-shell.wasm')),
+        false,
+        'Offline reopen must load WASM from Cache Storage without network requests'
+      );
+
+      // Manual barcode lookup matches seeded Owned release locally
+      await pageD.fill('#scannerManualInput', '4547366611397');
+      await pageD.click('#scannerManualSubmitBtn');
+      await pageD.waitForFunction(() => (document.getElementById('scannerManualResult')?.innerHTML || '').includes('Already Owned'));
+
+      // Engine Manager -> Wipe Scanner Engine & Cache -> removes Cache Storage, preserves Owned release
+      await pageD.click('#scannerViewManagerBtn');
+      await pageD.waitForSelector('#scannerManagerPanel:not(.hidden)');
+      await pageD.click('#scannerWipeBtn');
+      await pageD.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Wiped Scanner Engine & Cache'));
+      assert.equal(await pageD.evaluate(() => caches.has('disk-crate-scanner-assets-v1')), false);
+
+      await pageD.click('#closeScannerModalBtn');
+      await pageD.waitForSelector('#scannerModal', { state: 'hidden' });
+      assert.equal(await pageD.textContent('#progressBadge'), '1 release · 0 tracks');
+      assert.equal(pageDErrors.length, 0, `Unexpected Device D errors: ${pageDErrors.join('; ')}`);
+    } catch (err) {
+      console.error('Device D debug:', { url: pageD.url(), errors: pageDErrors });
+      throw err;
+    } finally {
+      await ctxD.close();
+    }
+
+    console.log('✓ Browser E2E checks passed (desktop + 375px mobile Hunt, Collection, & Phase 3a Opt-In Scanner, OAuth, multi-device SQLite sync, Cache Storage + Web Worker + captureStream + Wipe isolation)');
   } finally {
     await browser.close();
     await Promise.all([

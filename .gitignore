@@ -3,3 +3,5 @@
 .dev.vars.*
 .wrangler/
 node_modules/
+scanner-assets/
+_site/
