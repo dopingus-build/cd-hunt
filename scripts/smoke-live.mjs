@@ -124,6 +124,17 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
     assert.ok(methods.includes('GET') && methods.includes('PUT') && methods.includes('POST'));
     assert.ok(allowHeaders.toLowerCase().includes('authorization') && allowHeaders.toLowerCase().includes('content-type'));
 
+    const colPreflightRes = await fetch(`${WORKER_URL}/api/collection/batch`, {
+      method: 'OPTIONS',
+      headers: { Origin: SITE_ORIGIN }
+    });
+    assert.equal(colPreflightRes.status, 204);
+    assert.equal(colPreflightRes.headers.get('access-control-allow-origin'), SITE_ORIGIN);
+    const colMethods = colPreflightRes.headers.get('access-control-allow-methods') || '';
+    const colAllowHeaders = colPreflightRes.headers.get('access-control-allow-headers') || '';
+    assert.ok(colMethods.includes('POST'));
+    assert.ok(colAllowHeaders.toLowerCase().includes('authorization') && colAllowHeaders.toLowerCase().includes('content-type'));
+
     const blockedRes = await fetch(`${WORKER_URL}/api/status`, {
       headers: { Origin: 'https://untrusted.example' }
     });
@@ -178,6 +189,13 @@ describe('Live deployment smoke checks (GitHub Pages + Cloudflare Worker)', () =
       body: JSON.stringify({ items: [] })
     });
     assert.equal(missingBatchRes.status, 401);
+
+    const missingSheetSyncRes = await fetch(`${WORKER_URL}/api/collection/sheet-sync`, {
+      method: 'POST',
+      headers: { Origin: SITE_ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ googleSheetUrl: 'https://docs.google.com/spreadsheets/d/exampleSheet/edit' })
+    });
+    assert.equal(missingSheetSyncRes.status, 401);
   });
 
   it('allows cross-origin GET /api/share/* from external origins and rejects invalid share tokens with 401', async () => {

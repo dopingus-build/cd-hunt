@@ -432,6 +432,7 @@ async function main() {
   const saPem = `-----BEGIN PRIVATE KEY-----\n${pkcs8B64.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
   const saBotEmail = 'cd-hunt-e2e@e2e-project.iam.gserviceaccount.com';
   const sheetBatchUpdates = [];
+  const e2eOwnedSheetWrites = [];
   const dupSheetRows = [
     ['Got it?', 'Aisle / Category', 'Artist / Franchise', 'Title / Release Details', 'Catalog Number'],
     ['FALSE', 'Video Game Soundtracks', 'Capcom (カプコン)', 'Breath of Fire III OST', 'CPCA-1004'],
@@ -496,6 +497,22 @@ async function main() {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ totalUpdatedCells: (body.data || []).length }));
+      return;
+    }
+    if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/e2eOwnedSheet') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ sheets: [{ properties: { sheetId: 77, title: 'Owned' } }] }));
+      return;
+    }
+    if (req.method === 'POST' && reqUrl.pathname.startsWith('/v4/spreadsheets/e2eOwnedSheet/values/') && reqUrl.pathname.endsWith(':clear')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({}));
+      return;
+    }
+    if (req.method === 'PUT' && reqUrl.pathname.startsWith('/v4/spreadsheets/e2eOwnedSheet/values/')) {
+      e2eOwnedSheetWrites.push({ path: decodeURIComponent(reqUrl.pathname), body: JSON.parse(bodyText) });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ updatedRows: 2 }));
       return;
     }
     res.writeHead(404);
@@ -1147,6 +1164,81 @@ async function main() {
       await pageC.waitForSelector('#batchGraduateBtn', { state: 'hidden' });
       await pageC.waitForFunction(() => (document.getElementById('albumGrid')?.innerHTML || '').includes('✓ Owned'));
 
+      // Gap 4: Collection Backup Download + real <input type="file"> Replace All + Owned Sheet two-way push
+      await pageC.click('#modeCollectionBtn');
+      await pageC.waitForSelector('#collectionBackupBtn:not(.hidden)');
+      await pageC.click('#collectionBackupBtn');
+      await pageC.waitForSelector('#collectionBackupModal.open');
+
+      await pageC.click('#downloadCollectionJsonBtn');
+      await pageC.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Downloaded owned-collection.json'));
+
+      const replacePayload = {
+        schemaVersion: 1,
+        items: [
+          {
+            id: 'own-e2e-1001',
+            artist: 'E2E Artist',
+            title: 'E2E Collection Disc',
+            category: 'Game',
+            catNo: 'E2E-1001',
+            tracks: [
+              { disc: 1, mediaType: 'CD', number: 1, title: 'Custom E2E Track' },
+              { disc: 1, mediaType: 'CD', number: 2, title: 'Hidden B-Side Track' }
+            ],
+            trackSource: 'manual',
+            customCovers: { variants: [{ url: 'https://custom.e2e.example/owned-cover.svg', label: 'Custom', source: 'custom' }], selectedIndex: 0 },
+            selectedVariant: { url: 'https://custom.e2e.example/owned-cover.svg', label: 'Custom', selectedIndex: 0 }
+          },
+          {
+            id: 'own-e2e-repl-2',
+            artist: 'Replace Artist',
+            title: 'Replaced Album',
+            category: 'Anime',
+            catNo: 'E2E-REPL-2'
+          }
+        ]
+      };
+      await pageC.setInputFiles('#collectionJsonFileInput', {
+        name: 'collection-replace.json',
+        mimeType: 'application/json',
+        buffer: Buffer.from(JSON.stringify(replacePayload), 'utf8')
+      });
+      await pageC.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Loaded collection-replace.json'));
+      await pageC.click('#importCollectionReplaceBtn');
+      await pageC.waitForSelector('#collectionBackupModal', { state: 'hidden' });
+      await pageC.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '2 releases · 2 tracks');
+
+      const replaceDeadline = Date.now() + 4500;
+      let replaceSynced = false;
+      while (Date.now() < replaceDeadline) {
+        const rows = db.queryRaw("SELECT release_id, deleted_at FROM owned_releases WHERE github_id = '2002'");
+        const activeIds = rows.filter((r) => r.deleted_at === null).map((r) => r.release_id);
+        const mrgRow = rows.find((r) => r.release_id === 'own-e2e-mrg-1');
+        if (activeIds.includes('own-e2e-1001') && activeIds.includes('own-e2e-repl-2') && mrgRow && mrgRow.deleted_at !== null) {
+          replaceSynced = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(replaceSynced, true, 'Expected Replace All import to persist active releases and tombstones in SQLite');
+
+      await pageC.click('#collectionBackupBtn');
+      await pageC.waitForSelector('#collectionBackupModal.open');
+      await pageC.waitForSelector('#ownedSheetBotBanner:not(.hidden)');
+      assert.ok((await pageC.textContent('#ownedSheetBotBanner')).includes(saBotEmail));
+      await pageC.fill('#ownedSheetUrlInput', 'https://docs.google.com/spreadsheets/d/e2eOwnedSheet/edit#gid=77');
+      await pageC.click('#pushOwnedSheetBtn');
+      await pageC.waitForFunction(() => document.getElementById('toast')?.textContent.includes('Synced 2 owned row(s) to Google Sheet'));
+      assert.ok(e2eOwnedSheetWrites.length >= 1, 'Expected Owned Google Sheet write');
+      assert.equal(e2eOwnedSheetWrites[e2eOwnedSheetWrites.length - 1].body.values.length, 3);
+      assert.equal(e2eOwnedSheetWrites[e2eOwnedSheetWrites.length - 1].body.values[0].length, 11);
+      await pageC.click('#closeCollectionBackupBtn');
+      await pageC.waitForSelector('#collectionBackupModal', { state: 'hidden' });
+
+      await pageC.click('#modeHuntBtn');
+      await pageC.waitForSelector('#openCatalogLoaderBtn:not(.hidden)');
+
       // Local .csv upload via real <input type="file"> + Sign-out keeps local progress
       await pageC.click('#openCatalogLoaderBtn');
       await pageC.waitForSelector('#catalogLoaderScreen:not(.hidden)');
@@ -1175,13 +1267,52 @@ async function main() {
       await ctxC.close();
     }
 
-    // ── Device D: Phase 3a Opt-In Camera Scanner, Cache Storage Verification, Real Web Worker WASM + captureStream Loop, Offline Reopen & Wipe ──
+    // ── Gap 2: Device C2 clean Chromium context at 375x812 signs in as @bob -> converges Owned Collection & offline reload ──
+    const ctxC2 = await browser.newContext({ viewport: { width: 375, height: 812 } });
+    await attachExternalRoutes(ctxC2, appOrigin, workerBaseUrl, { authCode: 'code_bob' });
+    const pageC2 = await ctxC2.newPage();
+    const pageC2Errors = [];
+    pageC2.on('pageerror', (err) => pageC2Errors.push(err.message));
+
+    try {
+      await pageC2.goto(`${appOrigin}/index.html?mode=collection&syncApi=${encodeURIComponent(workerBaseUrl)}`);
+      await pageC2.waitForSelector('#githubAuthBtn:not(.hidden)');
+      await pageC2.click('#githubAuthBtn');
+      await pageC2.waitForFunction(() => (document.getElementById('syncStatusPill')?.textContent || '').includes('Synced'));
+      await pageC2.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '2 releases · 2 tracks');
+      await pageC2.waitForFunction(() => {
+        const html = document.getElementById('albumGrid')?.innerHTML || '';
+        return html.includes('E2E-1001') && html.includes('E2E-REPL-2') && !html.includes('E2E-MRG-1');
+      });
+      await pageC2.waitForSelector('img[src="https://custom.e2e.example/owned-cover.svg"]');
+      await assertNoHorizontalOverflow(pageC2, 'Device C2 multi-device Collection mobile 375px');
+
+      // Block Worker network requests & reload -> restores converged Collection cleanly from Chromium IndexedDB offline
+      await ctxC2.route((url) => url.origin === workerBaseUrl, (route) => route.abort('failed'));
+      await pageC2.reload({ waitUntil: 'domcontentloaded' });
+      await pageC2.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '2 releases · 2 tracks');
+      await pageC2.waitForSelector('img[src="https://custom.e2e.example/owned-cover.svg"]');
+      assert.equal(pageC2Errors.length, 0, `Unexpected Device C2 errors: ${pageC2Errors.join('; ')}`);
+    } catch (err) {
+      console.error('Device C2 debug:', { url: pageC2.url(), errors: pageC2Errors });
+      throw err;
+    } finally {
+      await ctxC2.close();
+    }
+
+    // ── Device D: Phase 3a Opt-In Camera Scanner, Camera Denied -> Restart Recovery, Corrupted Cache Repair, Hunt Jump, + Add -> SQLite & Wipe ──
     const ctxD = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-    await attachExternalRoutes(ctxD, appOrigin, workerBaseUrl);
+    await attachExternalRoutes(ctxD, appOrigin, workerBaseUrl, { authCode: 'code_alice' });
     await ctxD.addInitScript(() => {
       window.__e2eCamTracks = [];
+      window.__e2eDenyCamera = false;
       const fakeDevices = {
         async getUserMedia() {
+          if (window.__e2eDenyCamera) {
+            const denied = new Error('Permission denied');
+            denied.name = 'NotAllowedError';
+            throw denied;
+          }
           const canvas = document.createElement('canvas');
           canvas.width = 320;
           canvas.height = 240;
@@ -1210,11 +1341,16 @@ async function main() {
 
     try {
       scannerRequestLog.length = 0;
-      await pageD.goto(`${appOrigin}/index.html?mode=collection`);
-      await pageD.waitForSelector('#openScannerBtn:not(.hidden)');
-      assert.equal(scannerRequestLog.length, 0, 'Startup must fetch 0 scanner files before opt-in');
+      await pageD.goto(appUrlWithSync);
+      await pageD.waitForSelector('#githubAuthBtn:not(.hidden)');
+      await pageD.click('#githubAuthBtn');
+      await pageD.waitForFunction(() => (document.getElementById('syncStatusPill')?.textContent || '').includes('Synced'));
+      await pageD.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '0 / 1');
+      assert.equal(scannerRequestLog.length, 0, 'Startup & signed-in Hunt hydration must fetch 0 scanner files');
 
-      // Seed an Owned release with barcode so local manual lookup & Wipe isolation are verified
+      // Switch to Collection & seed Owned release with barcode
+      await pageD.click('#modeCollectionBtn');
+      await pageD.waitForSelector('#openScannerBtn:not(.hidden)');
       await pageD.click('#addReleaseBtn');
       await pageD.waitForSelector('#releaseFormModal.open');
       await pageD.fill('#rfArtist', 'Scanner E2E Artist');
@@ -1224,6 +1360,7 @@ async function main() {
       await pageD.click('#saveReleaseFormBtn');
       await pageD.waitForSelector('#releaseFormModal', { state: 'hidden' });
       await pageD.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '1 release · 0 tracks');
+      assert.equal(scannerRequestLog.length, 0, 'Collection writes must fetch 0 scanner files before opt-in');
 
       // Open Scan -> lazy loads JS/CSS + manifest only; ZERO WASM fetched & NO Cache Storage created yet
       await pageD.click('#openScannerBtn');
@@ -1233,11 +1370,19 @@ async function main() {
       assert.equal(scannerRequestLog.some((p) => p.endsWith('engine-shell.wasm')), false);
       assert.equal(await pageD.evaluate(() => caches.has('disk-crate-scanner-assets-v1')), false);
 
-      // Confirm download -> verifies WASM into Chromium Cache Storage, instantiates Worker, processes synthetic camera frames
+      // Camera permission denied -> HUD shows Worker Ready, banner shows denial while manual lookup stays usable, then Restart Camera recovers
+      await pageD.evaluate(() => { window.__e2eDenyCamera = true; });
       await pageD.click('#scannerConfirmDownloadBtn');
       await pageD.waitForSelector('#scannerViewfinderPanel:not(.hidden)');
       assert.equal(scannerRequestLog.some((p) => p.endsWith('engine-shell.wasm')), true);
       assert.equal(await pageD.evaluate(() => caches.has('disk-crate-scanner-assets-v1')), true);
+      await pageD.waitForFunction(() => (document.getElementById('scannerHudStatus')?.textContent || '').includes('Ready'));
+      await pageD.waitForSelector('#scannerCamError:not(.hidden)');
+      assert.ok((await pageD.textContent('#scannerCamError')).toLowerCase().includes('denied'));
+
+      await pageD.evaluate(() => { window.__e2eDenyCamera = false; });
+      await pageD.click('#scannerStartCamBtn');
+      await pageD.waitForSelector('#scannerCamError', { state: 'hidden' });
       await pageD.waitForFunction(() => (document.getElementById('scannerHudStatus')?.textContent || '').includes('WASM Live'));
       await pageD.waitForFunction(() => parseInt(document.getElementById('scannerFrameCounter')?.textContent || '0', 10) >= 1);
 
@@ -1271,7 +1416,65 @@ async function main() {
       await pageD.click('#scannerManualSubmitBtn');
       await pageD.waitForFunction(() => (document.getElementById('scannerManualResult')?.innerHTML || '').includes('Already Owned'));
 
-      // Engine Manager -> Wipe Scanner Engine & Cache -> removes Cache Storage, preserves Owned release
+      // Corrupted Cache Storage recovery -> falls back cleanly to Gate with error banner and re-downloads valid WASM
+      await pageD.click('#closeScannerModalBtn');
+      await pageD.waitForSelector('#scannerModal', { state: 'hidden' });
+      scannerOfflineFlag = false;
+      await pageD.evaluate(async () => {
+        const cache = await caches.open('disk-crate-scanner-assets-v1');
+        const targetUrl = new URL('./scanner-assets/v1/engine-shell.wasm', window.location.href).href;
+        await cache.put(targetUrl, new Response(new Uint8Array([0, 1, 2, 3]), { status: 200 }));
+      });
+      await pageD.click('#openScannerBtn');
+      await pageD.waitForSelector('#scannerGatePanel:not(.hidden)');
+      await pageD.waitForSelector('#scannerGateError:not(.hidden)');
+      assert.ok((await pageD.textContent('#scannerGateError')).toLowerCase().includes('corrupted'));
+      await pageD.click('#scannerConfirmDownloadBtn');
+      await pageD.waitForSelector('#scannerViewfinderPanel:not(.hidden)');
+      await pageD.waitForFunction(() => (document.getElementById('scannerHudStatus')?.textContent || '').includes('WASM Live'));
+
+      // Manual Hunt catalog match (KSCL-737) -> Open in Hunt switches back to Hunt & opens Crate Flip
+      await pageD.fill('#scannerManualInput', 'KSCL-737');
+      await pageD.click('#scannerManualSubmitBtn');
+      await pageD.waitForFunction(() => (document.getElementById('scannerManualResult')?.innerHTML || '').includes('On Hunt List'));
+      await pageD.click('[data-scanner-jump="hunt"]');
+      await pageD.waitForSelector('#scannerModal', { state: 'hidden' });
+      await pageD.waitForSelector('#lightboxModal.open');
+      assert.ok((await pageD.textContent('#lbCatalogText')).includes('KSCL-737'));
+      await pageD.click('#closeLightboxBtn');
+      await pageD.waitForSelector('#lightboxModal', { state: 'hidden' });
+
+      // Manual unknown barcode -> + Add to Collection prefills barcode, saves, and syncs to SQLite
+      await pageD.click('#openScannerBtn');
+      await pageD.waitForSelector('#scannerViewfinderPanel:not(.hidden)');
+      await pageD.fill('#scannerManualInput', '4900000088888');
+      await pageD.click('#scannerManualSubmitBtn');
+      await pageD.waitForSelector('[data-scanner-add="4900000088888"]');
+      await pageD.click('[data-scanner-add="4900000088888"]');
+      await pageD.waitForSelector('#scannerModal', { state: 'hidden' });
+      await pageD.waitForSelector('#releaseFormModal.open');
+      assert.equal(await pageD.inputValue('#rfBarcode'), '4900000088888');
+      await pageD.fill('#rfArtist', 'Scanner E2E Added');
+      await pageD.fill('#rfTitle', 'Scanned Disc 2');
+      await pageD.fill('#rfCatNo', 'E2E-SCN-ADD');
+      await pageD.click('#saveReleaseFormBtn');
+      await pageD.waitForSelector('#releaseFormModal', { state: 'hidden' });
+      await pageD.waitForFunction(() => document.getElementById('progressBadge')?.textContent === '2 releases · 0 tracks');
+
+      const scnAddDeadline = Date.now() + 4500;
+      let syncedScannedAdd = false;
+      while (Date.now() < scnAddDeadline) {
+        const rows = db.queryRaw("SELECT data_json FROM owned_releases WHERE github_id = '1001'");
+        if (rows.some((r) => (r.data_json || '').includes('4900000088888'))) {
+          syncedScannedAdd = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(syncedScannedAdd, true, 'Expected release added from Scanner (+ Add to Collection) to sync to SQLite');
+
+      // Engine Manager -> Wipe Scanner Engine & Cache -> removes Cache Storage, preserves Owned releases
+      await pageD.click('#openScannerBtn');
       await pageD.click('#scannerViewManagerBtn');
       await pageD.waitForSelector('#scannerManagerPanel:not(.hidden)');
       await pageD.click('#scannerWipeBtn');
@@ -1280,7 +1483,7 @@ async function main() {
 
       await pageD.click('#closeScannerModalBtn');
       await pageD.waitForSelector('#scannerModal', { state: 'hidden' });
-      assert.equal(await pageD.textContent('#progressBadge'), '1 release · 0 tracks');
+      assert.equal(await pageD.textContent('#progressBadge'), '2 releases · 0 tracks');
       assert.equal(pageDErrors.length, 0, `Unexpected Device D errors: ${pageDErrors.join('; ')}`);
     } catch (err) {
       console.error('Device D debug:', { url: pageD.url(), errors: pageDErrors });

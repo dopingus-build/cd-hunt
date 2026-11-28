@@ -319,13 +319,24 @@
   function renderSheetSyncBotBanner() {
     const banner = document.getElementById('sheetSyncBotBanner');
     const textEl = document.getElementById('sheetSyncBotText');
-    if (!banner || !textEl) return;
-    if (sheetSyncBotEmail) {
-      textEl.textContent = 'Two-way Google Sheet sync: share your Sheet as Editor with ' + sheetSyncBotEmail;
-      banner.classList.remove('hidden');
-    } else {
-      textEl.textContent = '';
-      banner.classList.add('hidden');
+    if (banner && textEl) {
+      if (sheetSyncBotEmail) {
+        textEl.textContent = 'Two-way Google Sheet sync: share your Sheet as Editor with ' + sheetSyncBotEmail;
+        banner.classList.remove('hidden');
+      } else {
+        textEl.textContent = '';
+        banner.classList.add('hidden');
+      }
+    }
+    const ownedBanner = document.getElementById('ownedSheetBotBanner');
+    if (ownedBanner) {
+      if (sheetSyncBotEmail) {
+        ownedBanner.textContent = 'Two-way Google Sheet sync: share your Owned Sheet as Editor with ' + sheetSyncBotEmail;
+        ownedBanner.classList.remove('hidden');
+      } else {
+        ownedBanner.textContent = '';
+        ownedBanner.classList.add('hidden');
+      }
     }
   }
 
@@ -3502,15 +3513,9 @@
       if (sheetInput && !sheetInput.value && ownedSheetUrl) {
         sheetInput.value = ownedSheetUrl;
       }
-      const botBanner = document.getElementById('ownedSheetBotBanner');
-      if (botBanner) {
-        if (sheetSyncBotEmail) {
-          botBanner.textContent = 'Two-way Google Sheet sync: share your Owned Sheet as Editor with ' + sheetSyncBotEmail;
-          botBanner.classList.remove('hidden');
-        } else {
-          botBanner.classList.add('hidden');
-          loadSheetSyncBotInfo();
-        }
+      renderSheetSyncBotBanner();
+      if (!sheetSyncBotEmail) {
+        loadSheetSyncBotInfo();
       }
       const agentColBtn = document.getElementById('copyCollectionAgentLinkBtn');
       if (agentColBtn) {

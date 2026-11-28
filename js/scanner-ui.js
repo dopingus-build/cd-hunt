@@ -236,6 +236,24 @@
       });
     }
 
+    async function enterViewfinderSafely() {
+      showPanel('viewfinder');
+      try {
+        await initScannerWorkerFromCache();
+        await startCamera();
+      } catch (err) {
+        teardownWorkerAndCamera();
+        showPanel('gate');
+        const gateErr = getEl('scannerGateError');
+        if (gateErr) {
+          gateErr.textContent =
+            (err && err.message ? err.message : 'Cached scanner asset corrupted') +
+            ' — click Download & Enable Scanner to repair.';
+          gateErr.classList.remove('hidden');
+        }
+      }
+    }
+
     function startFrameSamplingLoop() {
       if (sampleTimer !== null) clearInterval(sampleTimer);
       sampleTimer = setInterval(function () {
@@ -563,9 +581,7 @@
         backToScanBtn.addEventListener('click', async function () {
           const st = activeManager ? await activeManager.getPackStatus(activeManifest) : { ready: false };
           if (st.ready) {
-            showPanel('viewfinder');
-            await initScannerWorkerFromCache();
-            await startCamera();
+            await enterViewfinderSafely();
           } else {
             showPanel('gate');
           }
@@ -753,9 +769,7 @@
       }
 
       if (status.ready) {
-        showPanel('viewfinder');
-        await initScannerWorkerFromCache();
-        await startCamera();
+        await enterViewfinderSafely();
       } else {
         showPanel('gate');
       }

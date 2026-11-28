@@ -308,6 +308,7 @@ function createDomHarness(html) {
       value: '',
       href: '',
       files: [],
+      disabled: false,
       style: {},
       classList: {
         add(...t) { t.filter(Boolean).forEach((x) => classes.add(x)); },
@@ -324,12 +325,20 @@ function createDomHarness(html) {
         },
         contains(tok) { return classes.has(tok); }
       },
+      get className() { return Array.from(classes).join(' '); },
+      set className(val) {
+        classes.clear();
+        String(val || '').split(/\s+/).filter(Boolean).forEach((t) => classes.add(t));
+      },
       setAttribute(name, val) { attrs[name] = String(val); },
       getAttribute(name) { return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null; },
       querySelectorAll(sel) {
         if (sel === 'img[data-fallback-id]') return extractFallbackImgs(this.innerHTML);
         return [];
       },
+      select() {},
+      focus() {},
+      click() { this.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} }); },
       addEventListener(type, fn) {
         if (!listeners[type]) listeners[type] = [];
         listeners[type].push(fn);
@@ -350,16 +359,39 @@ function createDomHarness(html) {
     return imgs;
   }
 
-  for (const m of html.matchAll(/<[^>]*\bid=["']([^"']+)["'][^>]*>/g)) {
-    const cm = m[0].match(/\bclass=["']([^"']+)["']/);
-    elements.set(m[1], createEl(m[1], cm ? cm[1].split(/\s+/).filter(Boolean) : []));
+  function registerMarkupIds(markup) {
+    if (!markup) return;
+    for (const m of String(markup).matchAll(/<[^>]*\bid=["']([^"']+)["'][^>]*>/g)) {
+      const id = m[1];
+      if (!elements.has(id)) {
+        const cm = m[0].match(/\bclass=["']([^"']+)["']/);
+        elements.set(id, createEl(id, cm ? cm[1].split(/\s+/).filter(Boolean) : []));
+      }
+    }
   }
 
+  registerMarkupIds(html);
+
+  let scriptLoader = null;
   const documentStub = {
     title: '',
     readyState: 'complete',
     visibilityState: 'visible',
-    body: { appendChild() {}, removeChild() {} },
+    head: {
+      appendChild(el) {
+        if (el && el.src && typeof scriptLoader === 'function') {
+          scriptLoader(el.src);
+        }
+        if (el && typeof el.onload === 'function') el.onload();
+      }
+    },
+    body: {
+      appendChild(el) {
+        if (el && el.id) elements.set(el.id, el);
+        if (el && el.innerHTML) registerMarkupIds(el.innerHTML);
+      },
+      removeChild() {}
+    },
     getElementById(id) {
       if (elements.has(id)) return elements.get(id);
       if (/^(?:art-slot|single-variants|refresh-icon)-/.test(id)) {
@@ -394,7 +426,13 @@ function createDomHarness(html) {
     }
   };
 
-  return { elements, docListeners, winListeners, documentStub };
+  return {
+    elements,
+    docListeners,
+    winListeners,
+    documentStub,
+    setScriptLoader(fn) { scriptLoader = fn; }
+  };
 }
 
 function createStorageInstance(seedObj = {}) {
@@ -419,10 +457,13 @@ async function bootSystemClient(sys, {
   coverMocks = null,
   imageImpl = null,
   indexedDBImpl = null,
-  offlineRef = null
+  offlineRef = null,
+  cachesImpl = undefined,
+  workerCtor = undefined,
+  extraNavigator = null
 } = {}) {
   const html = fs.readFileSync(HTML_PATH, 'utf8');
-  const { elements, docListeners, winListeners, documentStub } = createDomHarness(html);
+  const { elements, docListeners, winListeners, documentStub, setScriptLoader } = createDomHarness(html);
   const localStorage = createStorageInstance(initialStorage);
   const locationNavigations = [];
   const copiedTexts = [];
@@ -432,6 +473,7 @@ async function bootSystemClient(sys, {
     pathname,
     search,
     hash,
+    href: origin + pathname + search + hash,
     assign(next) { locationNavigations.push(next); }
   };
 
@@ -455,7 +497,8 @@ async function bootSystemClient(sys, {
       urlStr.includes('musicbrainz.org') ||
       urlStr.includes('coverartarchive.org') ||
       urlStr.includes('itunes.apple.com') ||
-      urlStr.startsWith('https://docs.google.com/')
+      urlStr.startsWith('https://docs.google.com/') ||
+      urlStr.includes('scanner-assets/')
     ) {
       if (coverMocks) return coverMocks(urlStr);
       return new Response(JSON.stringify({ releases: [], images: [], results: [] }), {
@@ -482,32 +525,43 @@ async function bootSystemClient(sys, {
     return res;
   }
 
+  const navObj = {
+    clipboard: {
+      async writeText(txt) {
+        copiedTexts.push(txt);
+      }
+    }
+  };
+  if (extraNavigator && typeof extraNavigator === 'object') {
+    Object.assign(navObj, extraNavigator);
+  }
+
   const sandbox = {
     console: { log() {}, warn() {}, error() {} },
     URL,
     URLSearchParams,
+    Response,
+    crypto: globalThis.crypto,
     atob,
     btoa,
     TextDecoder,
     TextEncoder,
+    caches: cachesImpl,
+    Worker: workerCtor,
     Image: imageImpl || NoopImage,
     FileReader: class {},
     IntersectionObserver: TrackingIntersectionObserver,
     indexedDB: indexedDBImpl,
     setTimeout,
     clearTimeout,
+    setInterval,
+    clearInterval,
     encodeURIComponent,
     decodeURIComponent,
     document: documentStub,
     localStorage,
     location: locationObj,
-    navigator: {
-      clipboard: {
-        async writeText(txt) {
-          copiedTexts.push(txt);
-        }
-      }
-    },
+    navigator: navObj,
     addEventListener(type, fn) {
       if (!winListeners[type]) winListeners[type] = [];
       winListeners[type].push(fn);
@@ -529,6 +583,13 @@ async function bootSystemClient(sys, {
   sandbox.globalThis = sandbox;
 
   const context = vm.createContext(sandbox);
+  setScriptLoader((src) => {
+    const rel = String(src).replace(/^\.\//, '');
+    const abs = path.resolve(ROOT_DIR, rel);
+    if (fs.existsSync(abs)) {
+      vm.runInContext(fs.readFileSync(abs, 'utf8'), context, { filename: abs });
+    }
+  });
   for (const filePath of [VALIDATE_PATH, STORAGE_PATH, DB_PATH, COVER_RESOLVER_PATH, TRACK_RESOLVER_PATH, CONFIG_PATH]) {
     vm.runInContext(fs.readFileSync(filePath, 'utf8'), context, { filename: filePath });
   }
@@ -2231,5 +2292,341 @@ describe('Full-stack cloud sync system tests (Frontend VM <-> HTTP Worker <-> SQ
     await client.settle(120);
     assert.equal(sys.db.queryRaw("SELECT release_id FROM owned_releases WHERE github_id = '1001'").length, 4);
     assert.equal((await clientDb.getDirtyOwnedReleases()).length, 0);
+  });
+
+  it('executes full-stack Owned Google Sheet two-way sync (#pushOwnedSheetBtn -> SQLite -> Sheets API #gid= -> #importOwnedSheetBtn on Device B)', async (t) => {
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256'
+      },
+      true,
+      ['sign', 'verify']
+    );
+    const pkcs8B64 = Buffer.from(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey)).toString('base64');
+    const pem = `-----BEGIN PRIVATE KEY-----\n${pkcs8B64.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----`;
+    const saBotEmail = 'owned-sheet-sync@sys.iam.gserviceaccount.com';
+
+    const clearCalls = [];
+    let storedSheetRows = [];
+    const googleMockServer = http.createServer(async (req, res) => {
+      const reqUrl = new URL(req.url, 'http://127.0.0.1');
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const bodyStr = Buffer.concat(chunks).toString('utf8');
+
+      if (req.method === 'POST' && reqUrl.pathname === '/oauth/token') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ access_token: 'ya29.owned-sys-token', expires_in: 3600 }));
+        return;
+      }
+      if (req.method === 'GET' && reqUrl.pathname === '/v4/spreadsheets/ownedSysSheet') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ sheets: [{ properties: { sheetId: 77, title: 'My Owned CDs' } }] }));
+        return;
+      }
+      if (req.method === 'POST' && reqUrl.pathname.endsWith(':clear')) {
+        clearCalls.push(decodeURIComponent(reqUrl.pathname));
+        storedSheetRows = [];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({}));
+        return;
+      }
+      if (req.method === 'PUT' && reqUrl.pathname.includes('/v4/spreadsheets/ownedSysSheet/values/')) {
+        const body = JSON.parse(bodyStr);
+        storedSheetRows = body.values || [];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ updatedRows: Math.max(0, storedSheetRows.length - 1) }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const googleMockUrl = await listenServer(googleMockServer);
+    t.after(() => closeServer(googleMockServer));
+
+    const sys = await startFullSystem({
+      GOOGLE_OAUTH_TOKEN_URL: `${googleMockUrl}/oauth/token`,
+      GOOGLE_SHEETS_API_BASE_URL: googleMockUrl,
+      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+        client_email: saBotEmail,
+        private_key: pem,
+        token_uri: `${googleMockUrl}/oauth/token`
+      })
+    });
+    t.after(() => sys.close());
+
+    const aliceHash = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
+      'code_alice'
+    );
+    const backingA = { stores: new Map() };
+    const devA = await bootSystemClient(sys, {
+      hash: aliceHash,
+      search: '?mode=collection',
+      syncDebounceMs: 10,
+      indexedDBImpl: makeDeviceIdb(backingA)
+    });
+
+    // Add 2 owned releases with full metadata on Device A
+    await devA.clickElement('addReleaseBtn');
+    devA.setInput('rfArtist', 'yama');
+    devA.setInput('rfArtistJa', 'ヤマ');
+    devA.setInput('rfTitle', 'slash');
+    devA.setInput('rfCategory', 'Anime');
+    devA.setInput('rfCatNo', 'SRCL-12539');
+    devA.setInput('rfBarcode', '4547366611397');
+    devA.setInput('rfPurchasePrice', '¥1,200');
+    devA.setInput('rfPurchaseShop', 'Book Off, Shibuya');
+    devA.setInput('rfPurchaseDate', '2026-11-28');
+    devA.setInput('rfNotes', 'First press with obi');
+    devA.setInput('rfTracksInput', '1. slash (3:30)');
+    await devA.clickElement('saveReleaseFormBtn');
+
+    await devA.clickElement('addReleaseBtn');
+    devA.setInput('rfArtist', 'Capcom');
+    devA.setInput('rfTitle', 'Breath of Fire III OST');
+    devA.setInput('rfCategory', 'Game');
+    devA.setInput('rfCatNo', 'CPCA-1004');
+    devA.setInput('rfPurchasePrice', '¥3,000');
+    devA.setInput('rfPurchaseShop', 'Mandarake');
+    devA.setInput('rfNotes', 'Mint');
+    await devA.clickElement('saveReleaseFormBtn');
+
+    const ownedSheetUrl = 'https://docs.google.com/spreadsheets/d/ownedSysSheet/edit#gid=77';
+    await devA.clickElement('collectionBackupBtn');
+    await devA.settle(80);
+    assert.equal(devA.elements.get('ownedSheetBotBanner').classList.contains('hidden'), false);
+    assert.ok(devA.elements.get('ownedSheetBotBanner').textContent.includes(saBotEmail));
+
+    devA.setInput('ownedSheetUrlInput', ownedSheetUrl);
+    await devA.clickElement('pushOwnedSheetBtn');
+    await devA.settle(120);
+
+    assert.ok(devA.elements.get('toast').textContent.includes('Synced 2 owned row(s) to Google Sheet'));
+    assert.equal(sys.db.queryRaw("SELECT release_id FROM owned_releases WHERE github_id = '1001'").length, 2);
+    assert.equal(clearCalls.length, 1);
+    assert.ok(clearCalls[0].includes("'My Owned CDs'!A1:K5000"));
+    assert.equal(storedSheetRows.length, 3);
+    assert.equal(storedSheetRows[0].length, 11);
+
+    function csvCell(v) {
+      const s = String(v == null ? '' : v);
+      return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
+    const serializedCsv = storedSheetRows.map((row) => row.map(csvCell).join(',')).join('\n');
+
+    // Device B (signed-out, clean IndexedDB) imports the exact CSV written to the mock Google Sheet
+    const backingB = { stores: new Map() };
+    const dbModLocal = require('../js/db.js');
+    const devBDb = dbModLocal.createDbClient({ indexedDBImpl: makeDeviceIdb(backingB) });
+    const devB = await bootSystemClient(sys, {
+      search: '?mode=collection',
+      syncDebounceMs: 10,
+      indexedDBImpl: makeDeviceIdb(backingB),
+      coverMocks: async (url) => {
+        if (url === 'https://docs.google.com/spreadsheets/d/ownedSysSheet/export?format=csv&gid=77') {
+          return new Response(serializedCsv, { status: 200, headers: { 'Content-Type': 'text/csv' } });
+        }
+        return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+    });
+
+    await devB.clickElement('collectionBackupBtn');
+    devB.setInput('ownedSheetUrlInput', ownedSheetUrl);
+    await devB.clickElement('importOwnedSheetBtn');
+    await devB.settle(80);
+    assert.ok(devB.elements.get('toast').textContent.includes('Imported Owned Sheet: +2 added, 0 merged'));
+
+    const devBItems = await devBDb.getAllOwnedReleases();
+    assert.equal(devBItems.length, 2);
+    const yamaB = devBItems.find((x) => x.catNo === 'SRCL-12539');
+    assert.ok(yamaB);
+    assert.equal(yamaB.artist, 'yama');
+    assert.equal(yamaB.artistJa, 'ヤマ');
+    assert.equal(yamaB.barcode, '4547366611397');
+    assert.equal(yamaB.purchasePrice, '¥1,200');
+    assert.equal(yamaB.purchaseShop, 'Book Off, Shibuya');
+    assert.equal(yamaB.purchaseDate, '2026-11-28');
+    assert.equal(yamaB.notes, 'First press with obi');
+
+    // Re-importing same Sheet CSV is idempotent (0 added, 2 merged)
+    await devB.clickElement('collectionBackupBtn');
+    devB.setInput('ownedSheetUrlInput', ownedSheetUrl);
+    await devB.clickElement('importOwnedSheetBtn');
+    await devB.settle(80);
+    assert.ok(devB.elements.get('toast').textContent.includes('Imported Owned Sheet: +0 added, 2 merged'));
+  });
+
+  it('isolates signed-in Phase 3a Scanner runtime, download, scan, and Wipe from cloud sync (/api/state & /api/collection) while syncing explicit Add-to-Collection saves', async (t) => {
+    const { buildEngineShellWasmBytes, buildScannerManifest } = await import('../scripts/build-scanner-assets.mjs');
+    const wasmBytes = buildEngineShellWasmBytes();
+    const manifest = buildScannerManifest(wasmBytes);
+    const scannerWorkerMod = require('../js/scanner-worker.js');
+
+    const sys = await startFullSystem();
+    t.after(() => sys.close());
+
+    const aliceHash = await sys.completeOAuthRedirect(
+      `${sys.workerBaseUrl}/auth/login?redirect=${encodeURIComponent('https://dopingus-build.github.io/disk-crate/')}`,
+      'code_alice'
+    );
+
+    const cacheBuckets = new Map();
+    const cachesImpl = {
+      async has(name) { return cacheBuckets.has(name); },
+      async open(name) {
+        if (!cacheBuckets.has(name)) cacheBuckets.set(name, new Map());
+        const map = cacheBuckets.get(name);
+        return {
+          async put(k, res) {
+            const key = typeof k === 'string' ? k : k.url;
+            map.set(key, Buffer.from(await res.arrayBuffer()));
+          },
+          async match(k) {
+            const key = typeof k === 'string' ? k : k.url;
+            const buf = map.get(key);
+            if (!buf) return undefined;
+            return {
+              ok: true,
+              status: 200,
+              async arrayBuffer() { return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength); },
+              async json() { return JSON.parse(buf.toString('utf8')); }
+            };
+          },
+          async delete(k) { return map.delete(typeof k === 'string' ? k : k.url); }
+        };
+      },
+      async delete(name) { return cacheBuckets.delete(name); }
+    };
+
+    class FakeScannerWorker {
+      constructor() {
+        this._core = scannerWorkerMod.createScannerWorkerCore();
+        this.onmessage = null;
+      }
+      postMessage(msg) {
+        Promise.resolve(this._core.handleMessage(msg)).then((reply) => {
+          if (reply && typeof this.onmessage === 'function') this.onmessage({ data: reply });
+        });
+      }
+      terminate() {}
+    }
+
+    const backing = { stores: new Map() };
+    const sampleUrl = 'https://raw.githubusercontent.com/alice/cd-metadata/main/sample.json';
+    const client = await bootSystemClient(sys, {
+      hash: aliceHash,
+      search: '?catalog=' + encodeURIComponent(sampleUrl),
+      syncDebounceMs: 10,
+      indexedDBImpl: makeDeviceIdb(backing),
+      cachesImpl,
+      workerCtor: FakeScannerWorker,
+      extraNavigator: {
+        mediaDevices: {
+          async getUserMedia() {
+            const tr = { getCapabilities() { return {}; }, stop() {} };
+            return { getTracks: () => [tr], getVideoTracks: () => [tr] };
+          }
+        }
+      },
+      coverMocks: async (url) => {
+        if (url.endsWith('scanner-assets/v1/manifest.json')) {
+          return new Response(JSON.stringify(manifest), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (url.endsWith('scanner-assets/v1/engine-shell.wasm')) {
+          return new Response(wasmBytes, { status: 200, headers: { 'Content-Type': 'application/wasm' } });
+        }
+        return new Response(JSON.stringify({ releases: [], images: [], results: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    });
+
+    // Seed 1 Owned release via UI & wait for initial cloud sync to settle completely
+    await client.clickElement('modeCollectionBtn');
+    await client.clickElement('addReleaseBtn');
+    client.setInput('rfArtist', 'Iso Test Artist');
+    client.setInput('rfTitle', 'Existing Owned');
+    client.setInput('rfCategory', 'OST');
+    client.setInput('rfCatNo', 'SC-OWN-1');
+    client.setInput('rfBarcode', '4547366000111');
+    await client.clickElement('saveReleaseFormBtn');
+    await client.settle(140);
+    assert.equal(sys.db.queryRaw("SELECT release_id FROM owned_releases WHERE github_id = '1001'").length, 1);
+
+    const workerReqCountBefore = client.requestLog.filter((r) => r.url.startsWith(sys.workerBaseUrl)).length;
+    const dailyWritesBefore = sys.db.queryRaw('SELECT write_count FROM daily_usage')[0].write_count;
+
+    // 1) Open Scanner (Gate) -> 0 WASM downloads, 0 Cache Storage
+    await client.clickElement('openScannerBtn');
+    assert.equal(client.elements.get('scannerGatePanel').classList.contains('hidden'), false);
+    assert.equal(await cachesImpl.has('disk-crate-scanner-assets-v1'), false);
+
+    // 2) Confirm download -> verifies WASM into Cache Storage & enters live viewfinder
+    await client.clickElement('scannerConfirmDownloadBtn');
+    await client.settle(60);
+    assert.equal(client.elements.get('scannerViewfinderPanel').classList.contains('hidden'), false);
+    assert.equal(await cachesImpl.has('disk-crate-scanner-assets-v1'), true);
+
+    // 3) Manual Hunt match (KSCL-737) -> Open in Hunt switches back to Hunt & opens Crate Flip
+    client.setInput('scannerManualInput', 'KSCL-737');
+    await client.clickElement('scannerManualSubmitBtn');
+    assert.ok(client.elements.get('scannerManualResult').innerHTML.includes('On Hunt List'));
+    const jumpTarget = {
+      closest: () => jumpTarget,
+      getAttribute: (a) => (a === 'data-scanner-jump' ? 'hunt' : (a === 'data-target-id' ? 'sample-01' : null))
+    };
+    client.elements.get('scannerManualResult').dispatchEvent({ type: 'click', target: jumpTarget });
+    await client.settle(60);
+    assert.equal(client.elements.get('scannerModal').classList.contains('open'), false);
+    assert.equal(client.elements.get('lightboxModal').classList.contains('open'), true);
+    assert.ok(client.elements.get('lbCatalogText').textContent.includes('KSCL-737'));
+    await client.clickElement('closeLightboxBtn');
+
+    // 4) Wipe Scanner Engine & Cache while signed in
+    await client.clickElement('openScannerBtn');
+    await client.clickElement('scannerViewManagerBtn');
+    await client.clickElement('scannerWipeBtn');
+    assert.equal(await cachesImpl.has('disk-crate-scanner-assets-v1'), false);
+
+    // Assert ZERO Worker HTTP calls or SQLite writes during entire Scanner lifecycle & zero scanner state in SQLite
+    assert.equal(
+      client.requestLog.filter((r) => r.url.startsWith(sys.workerBaseUrl)).length,
+      workerReqCountBefore,
+      'Scanner open/download/lookup/wipe must send 0 requests to cloud Worker'
+    );
+    assert.equal(sys.db.queryRaw('SELECT write_count FROM daily_usage')[0].write_count, dailyWritesBefore);
+    const allSqlState = JSON.stringify(sys.db.queryRaw('SELECT state_json FROM user_state')) +
+      JSON.stringify(sys.db.queryRaw('SELECT data_json FROM owned_releases'));
+    assert.equal(allSqlState.toLowerCase().includes('scanner'), false);
+
+    // 5) Reopen Scanner from gate, scan unknown barcode -> + Add to Collection saves & syncs to SQLite
+    await client.clickElement('closeScannerModalBtn');
+    await client.clickElement('openScannerBtn');
+    client.setInput('scannerManualInput', '4547366999999');
+    await client.clickElement('scannerManualSubmitBtn');
+    const addTarget = {
+      closest: () => addTarget,
+      getAttribute: (a) => (a === 'data-scanner-add' ? '4547366999999' : null)
+    };
+    client.elements.get('scannerManualResult').dispatchEvent({ type: 'click', target: addTarget });
+    await client.settle(60);
+    assert.equal(client.elements.get('releaseFormModal').classList.contains('open'), true);
+    assert.equal(client.elements.get('rfBarcode').value, '4547366999999');
+
+    client.setInput('rfArtist', 'Scanned New Artist');
+    client.setInput('rfTitle', 'Scanned New Release');
+    client.setInput('rfCatNo', 'SCN-ADD-99');
+    client.setInput('rfCategory', 'Rock');
+    await client.clickElement('saveReleaseFormBtn');
+    await client.settle(140);
+
+    const ownedSqlRows = sys.db.queryRaw("SELECT release_id, data_json FROM owned_releases WHERE github_id = '1001'");
+    assert.equal(ownedSqlRows.length, 2);
+    assert.equal(ownedSqlRows.some((r) => r.data_json.includes('4547366999999')), true);
   });
 });
