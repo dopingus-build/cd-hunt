@@ -104,7 +104,7 @@ Requires Node.js `22.5+` (uses built-in `node:test` and `node:sqlite`, zero npm 
 
 ```sh
 # Core unit, integration, and full-stack system tests
-node --test test/*.test.js
+node --test --experimental-test-coverage --test-coverage-lines=95 test/*.test.js
 
 # Live deployment HTTP/CORS/OAuth smoke checks (Pages + Worker)
 node --test scripts/smoke-live.mjs

@@ -252,8 +252,8 @@
         ? opts.locationHref
         : (root && root.location && root.location.href) || '';
     const fetchFn =
-      typeof opts.fetchImpl === 'function'
-        ? opts.fetchImpl
+      opts.fetchImpl !== undefined
+        ? (typeof opts.fetchImpl === 'function' ? opts.fetchImpl : null)
         : (root && typeof root.fetch === 'function' ? root.fetch.bind(root) : (typeof fetch === 'function' ? fetch : null));
     const cachesImpl =
       opts.cachesImpl !== undefined

@@ -717,5 +717,89 @@ describe('Frontend Collection Sync Client (js/sync.js)', () => {
       async json() { return { ok: false, skipped: true, reason: 'service_account_not_configured' }; }
     }));
     assert.equal(sheetSkipped.skipped, true);
+
+    // Complete error coverage for pullCollectionPage, pushCollectionBatch, and pushOwnedSheetSync
+    assert.equal((await syncMod.pullCollectionPage('', 'tok', 0)).offline, true);
+    assert.equal((await syncMod.pullCollectionPage('https://sync.example', 'tok', 0, 10, async () => ({ ok: false, status: 401 }))).unauthorized, true);
+    assert.equal((await syncMod.pullCollectionPage('https://sync.example', 'tok', 0, 10, async () => ({ ok: false, status: 503, async json() { return { paused: true, resetsAt: 'later' }; } }))).paused, true);
+    assert.equal((await syncMod.pullCollectionPage('https://sync.example', 'tok', 0, 10, async () => ({ ok: false, status: 500, async json() { return { error: 'boom' }; } }))).error, 'boom');
+    assert.equal((await syncMod.pullCollectionPage('https://sync.example', 'tok', 0, 10, async () => { throw new Error('net down'); })).offline, true);
+
+    assert.equal((await syncMod.pushCollectionBatch('', 'tok', [])).offline, true);
+    assert.equal((await syncMod.pushCollectionBatch('https://sync.example', 'tok', [], async () => ({ ok: false, status: 401 }))).unauthorized, true);
+    assert.equal((await syncMod.pushCollectionBatch('https://sync.example', 'tok', [], async () => ({ ok: false, status: 413 }))).payloadTooLarge, true);
+    assert.equal((await syncMod.pushCollectionBatch('https://sync.example', 'tok', [], async () => ({ ok: false, status: 503, async json() { return { paused: true }; } }))).paused, true);
+    assert.equal((await syncMod.pushCollectionBatch('https://sync.example', 'tok', [], async () => ({ ok: false, status: 500, async json() { return { error: 'srv' }; } }))).error, 'srv');
+    assert.equal((await syncMod.pushCollectionBatch('https://sync.example', 'tok', [], async () => { throw new Error('net'); })).offline, true);
+
+    assert.equal((await syncMod.pushOwnedSheetSync('', 'tok', 'u')).offline, true);
+    assert.equal((await syncMod.pushOwnedSheetSync('https://sync.example', 'tok', 'u', async () => ({ ok: false, status: 401 }))).unauthorized, true);
+    assert.equal((await syncMod.pushOwnedSheetSync('https://sync.example', 'tok', 'u', async () => ({ ok: false, status: 429, async json() { return { retryAfterSeconds: 30 }; } }))).rateLimited, true);
+    assert.equal((await syncMod.pushOwnedSheetSync('https://sync.example', 'tok', 'u', async () => ({ ok: false, status: 503, async json() { return { paused: true }; } }))).paused, true);
+    assert.equal((await syncMod.pushOwnedSheetSync('https://sync.example', 'tok', 'u', async () => ({ ok: false, status: 502, async json() { return { error: 'sheet fail' }; } }))).error, 'sheet fail');
+    assert.equal((await syncMod.pushOwnedSheetSync('https://sync.example', 'tok', 'u', async () => ({ ok: true, status: 200, async json() { return { ok: true, writtenRows: 3, tabTitle: 'Owned' }; } }))).writtenRows, 3);
+    assert.equal((await syncMod.pushOwnedSheetSync('https://sync.example', 'tok', 'u', async () => { throw new Error('offline'); })).offline, true);
+  });
+
+  it('rejects malformed collection root fields, customCovers, selectedVariant, and release timestamps in validateCollection', () => {
+    const rootErrs = validateCollection({
+      $schema: '',
+      exportedAt: -1,
+      meta: { title: 99, ownedSheetUrl: 123, exportedBy: false },
+      items: 'not-array'
+    });
+    assert.equal(rootErrs.valid, false);
+    assert.ok(rootErrs.errors.some((e) => e.includes('$schema')));
+    assert.ok(rootErrs.errors.some((e) => e.includes('schemaVersion is required')));
+    assert.ok(rootErrs.errors.some((e) => e.includes('items must be an array')));
+
+    const floatVer = validateCollection({ schemaVersion: 1.5, items: [] });
+    assert.equal(floatVer.valid, false);
+    assert.ok(floatVer.errors.some((e) => e.includes('must be an integer')));
+
+    const itemErrs = validateCollection({
+      schemaVersion: 1,
+      items: [
+        null,
+        {
+          id: 'bad id!',
+          artist: 'A',
+          title: 'T',
+          category: 'OST',
+          catNo: 'C-1',
+          notes: 42,
+          barcode: 123,
+          mbid: 456,
+          trackSource: 'bad-src',
+          createdAt: -1,
+          clientUpdatedAt: -1,
+          syncSeq: -1,
+          deletedAt: -1,
+          customCovers: 'bad',
+          selectedVariant: { url: 'https://ok.example/cover.jpg', selectedIndex: -1, label: 9 }
+        },
+        {
+          id: 'ok-1',
+          artist: 'A',
+          title: 'T',
+          category: 'OST',
+          catNo: 'C-2',
+          customCovers: {
+            selectedIndex: -1,
+            variants: [
+              { url: '' },
+              { url: 'https://ok.example/v.jpg', label: 1, catNo: 2, source: 3, isRegular: 'yes' }
+            ]
+          },
+          selectedVariant: 'bad'
+        }
+      ]
+    });
+    assert.equal(itemErrs.valid, false);
+    assert.ok(itemErrs.errors.some((e) => e.includes('must be an object')));
+    assert.ok(itemErrs.errors.some((e) => e.includes('customCovers')));
+    assert.ok(itemErrs.errors.some((e) => e.includes('selectedVariant')));
+    assert.ok(itemErrs.errors.some((e) => e.includes('syncSeq')));
+    assert.ok(itemErrs.errors.some((e) => e.includes('deletedAt')));
   });
 });

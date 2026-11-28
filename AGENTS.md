@@ -14,4 +14,4 @@
 1. Keep the frontend core strictly zero-dependency (no npm runtime packages, no CDN scripts/CSS frameworks). Normal page loads download **0 bytes** of camera scanner or WASM code; opt-in Stage 3a+ scanner packs load asynchronously only after user confirmation via `.github/workflows/deploy-pages.yml` (`scripts/fetch-scanner-assets.mjs` for local development) and must never be committed as binaries in Git.
 2. Preserve `schemaVersion: 1` catalog validation, derived per-catalog `localStorage` keys (`deriveStoragePrefix`), zero-scope GitHub OAuth, and offline-first behavior.
 3. For Google Sheet authoring, always enforce **1 release per row** across the 9 canonical columns (`Got it?`, `Aisle / Category`, `Artist / Franchise`, `Title / Release Details`, `Catalog Number`, `Filing Location & Shelf Search Advice`, `Target Used Price`, `Priority`, `Recommended Shops`).
-4. Run `node --test test/*.test.js` (Node `22.5+`) before committing changes.
+4. Run `node --test --experimental-test-coverage --test-coverage-lines=95 test/*.test.js` (Node `22.5+`) before committing changes.

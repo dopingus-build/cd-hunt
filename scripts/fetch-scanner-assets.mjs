@@ -142,7 +142,7 @@ export async function fetchAndVerifyScannerAssets(options) {
   }
 }
 
-function parseCliArgs(argv) {
+export function parseCliArgs(argv) {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const out = {
     outDir: path.resolve(__dirname, '..', 'scanner-assets', 'v1')
@@ -157,12 +157,13 @@ function parseCliArgs(argv) {
   return out;
 }
 
-async function runCli() {
-  const args = parseCliArgs(process.argv.slice(2));
+export async function runCli(argv = process.argv.slice(2)) {
+  const args = parseCliArgs(argv);
   const result = await fetchAndVerifyScannerAssets(args);
   console.log(
     `Verified & extracted scanner assets (${RELEASE_TAG}, ${result.verifiedFiles} pack files, sha256=${result.archiveSha256}) -> ${result.outDir}`
   );
+  return result;
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

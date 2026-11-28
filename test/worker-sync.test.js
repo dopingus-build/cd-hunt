@@ -1143,4 +1143,109 @@ describe('Semi-private read-only share endpoint (/api/share) and Google Service 
       globalThis.fetch = prevFetch;
     }
   });
+
+  it('validates collection batch payloads and rejects invalid auth/body/query states across /api/collection* endpoints', async () => {
+    const { validateCollectionBatchPayload } = require('../worker/index.js');
+
+    assert.equal(validateCollectionBatchPayload(null).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: 'bad' }).valid, false);
+    assert.equal(
+      validateCollectionBatchPayload({ items: new Array(101).fill({ id: 'a', clientUpdatedAt: 1, deletedAt: 1 }) }).valid,
+      false
+    );
+    assert.equal(validateCollectionBatchPayload({ items: [null] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ id: 'bad id!', clientUpdatedAt: 1 }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ id: 'ok-1', clientUpdatedAt: 0 }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ id: 'ok-1', clientUpdatedAt: 1, deletedAt: -5 }] }).valid, false);
+
+    const baseValid = { id: 'ok-1', artist: 'A', title: 'T', category: 'OST', catNo: 'C-1', clientUpdatedAt: 100 };
+    assert.equal(validateCollectionBatchPayload({ items: [{ id: 'ok-1', clientUpdatedAt: 100 }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, notes: 42 }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, barcode: 123 }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, barcode: '12' }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, mbid: 123 }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, mbid: 'not-uuid' }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, trackSource: 'invalid-src' }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, tracks: 'not-array' }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, tracks: [{ number: 1, title: '' }] }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, customCovers: { variants: 'bad' } }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, customCovers: { variants: [{ url: '' }] } }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, selectedVariant: { url: '' } }] }).valid, false);
+    assert.equal(validateCollectionBatchPayload({ items: [{ ...baseValid, createdAt: -1 }] }).valid, false);
+    assert.equal(
+      validateCollectionBatchPayload({ items: [{ ...baseValid, notes: 'https://vgmdb.net/album/1' }] }).valid,
+      false
+    );
+
+    const env = makeEnv();
+    const sessionJwt = await signToken({ purpose: 'session', sub: '12345', login: 'alice' }, TEST_JWT_SECRET, 3600);
+    const noDbEnv = makeEnv({ DB: null });
+
+    // Unauthorized & missing DB guards across /api/collection*
+    for (const [method, endpoint] of [
+      ['GET', '/api/collection'],
+      ['POST', '/api/collection/batch'],
+      ['POST', '/api/collection/sheet-sync']
+    ]) {
+      const unauth = await workerFetch(new Request('https://sync.example' + endpoint, { method, headers: { Origin: DEFAULT_ORIGIN } }), env);
+      assert.equal(unauth.status, 401);
+      const noDb = await workerFetch(
+        new Request('https://sync.example' + endpoint, {
+          method,
+          headers: { Origin: DEFAULT_ORIGIN, Authorization: 'Bearer ' + sessionJwt }
+        }),
+        noDbEnv
+      );
+      assert.equal(noDb.status, 500);
+    }
+
+    // Invalid query/body errors
+    const badLimit = await workerFetch(
+      new Request('https://sync.example/api/collection?limit=0', {
+        headers: { Origin: DEFAULT_ORIGIN, Authorization: 'Bearer ' + sessionJwt }
+      }),
+      env
+    );
+    assert.equal(badLimit.status, 400);
+
+    const badBatchJson = await workerFetch(
+      new Request('https://sync.example/api/collection/batch', {
+        method: 'POST',
+        headers: { Origin: DEFAULT_ORIGIN, Authorization: 'Bearer ' + sessionJwt },
+        body: '{not json'
+      }),
+      env
+    );
+    assert.equal(badBatchJson.status, 400);
+
+    const badBatchSchema = await workerFetch(
+      new Request('https://sync.example/api/collection/batch', {
+        method: 'POST',
+        headers: { Origin: DEFAULT_ORIGIN, Authorization: 'Bearer ' + sessionJwt },
+        body: JSON.stringify({ items: [{ id: 'x', clientUpdatedAt: -1 }] })
+      }),
+      env
+    );
+    assert.equal(badBatchSchema.status, 400);
+
+    const badSheetJson = await workerFetch(
+      new Request('https://sync.example/api/collection/sheet-sync', {
+        method: 'POST',
+        headers: { Origin: DEFAULT_ORIGIN, Authorization: 'Bearer ' + sessionJwt },
+        body: '{bad'
+      }),
+      env
+    );
+    assert.equal(badSheetJson.status, 400);
+
+    const badSheetUrl = await workerFetch(
+      new Request('https://sync.example/api/collection/sheet-sync', {
+        method: 'POST',
+        headers: { Origin: DEFAULT_ORIGIN, Authorization: 'Bearer ' + sessionJwt },
+        body: JSON.stringify({ googleSheetUrl: 'https://example.com/not-a-sheet' })
+      }),
+      env
+    );
+    assert.equal(badSheetUrl.status, 400);
+  });
 });

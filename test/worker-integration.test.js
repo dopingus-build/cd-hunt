@@ -1079,6 +1079,7 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
 
     const sheetWrites = [];
     const sheetClears = [];
+    let sheetFailMode = null;
     const mockGoogleServer = http.createServer(async (req, res) => {
       const reqUrl = new URL(req.url, 'http://127.0.0.1');
       const chunks = [];
@@ -1096,12 +1097,22 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
         return;
       }
       if (req.method === 'POST' && reqUrl.pathname.endsWith(':clear')) {
+        if (sheetFailMode === 'clear') {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'clear fail' }));
+          return;
+        }
         sheetClears.push(reqUrl.pathname);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({}));
         return;
       }
       if (req.method === 'PUT' && reqUrl.pathname.includes('/v4/spreadsheets/ownedSheet01/values/')) {
+        if (sheetFailMode === 'update') {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'update fail' }));
+          return;
+        }
         sheetWrites.push({ path: reqUrl.pathname, body: JSON.parse(bodyText) });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ updatedRows: 2 }));
@@ -1145,6 +1156,30 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
       body: JSON.stringify({
         items: [
           {
+            id: 'own-s4',
+            artist: 'zArtist',
+            title: 'Game Album',
+            category: 'Game',
+            catNo: 'GAME-0001',
+            clientUpdatedAt: 2997
+          },
+          {
+            id: 'own-s3',
+            artist: 'yama',
+            title: 'zzTitle',
+            category: 'Anime',
+            catNo: 'SRCL-9000',
+            clientUpdatedAt: 2998
+          },
+          {
+            id: 'own-s2',
+            artist: 'yama',
+            title: 'slash',
+            category: 'Anime',
+            catNo: 'SRCL-12540',
+            clientUpdatedAt: 2999
+          },
+          {
             id: 'own-s1',
             artist: 'yama',
             artistJa: 'ヤマ',
@@ -1172,13 +1207,61 @@ describe('Cloudflare Worker HTTP + SQLite end-to-end integration tests', () => {
       })
     ).json();
     assert.equal(syncRes.ok, true);
-    assert.equal(syncRes.writtenRows, 1);
+    assert.equal(syncRes.writtenRows, 4);
     assert.equal(syncRes.tabTitle, 'Owned');
     assert.equal(sheetClears.length, 1);
     assert.equal(sheetWrites[0].body.values[0].length, 11);
     assert.equal(sheetWrites[0].body.values[1][0], 'SRCL-12539');
     assert.equal(sheetWrites[0].body.values[1][3], 'yama (ヤマ)');
     assert.equal(sheetWrites[0].body.values[1][9], '1');
+
+    // Empty batch -> 200 ok with accepted: []
+    const emptyBatchRes = await fetch(`${env.workerBaseUrl}/api/collection/batch`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: [] })
+    });
+    assert.equal(emptyBatchRes.status, 200);
+    assert.deepEqual((await emptyBatchRes.json()).accepted, []);
+
+    // Stale-only batch -> accepted: [], conflicts: 1
+    const staleOnlyRes = await fetch(`${env.workerBaseUrl}/api/collection/batch`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items: [{ id: 'own-s1', artist: 'yama', title: 'slash', category: 'Anime', catNo: 'SRCL-12539', clientUpdatedAt: 1 }]
+      })
+    });
+    assert.equal(staleOnlyRes.status, 200);
+    const staleOnlyJson = await staleOnlyRes.json();
+    assert.deepEqual(staleOnlyJson.accepted, []);
+    assert.equal(staleOnlyJson.conflicts.length, 1);
+
+    // Clear & update failures in Sheets API -> 502 error payload
+    sheetFailMode = 'clear';
+    const clearFailRes = await fetch(`${env.workerBaseUrl}/api/collection/sheet-sync`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ googleSheetUrl: 'https://docs.google.com/spreadsheets/d/ownedSheet01/edit#gid=77' })
+    });
+    assert.equal(clearFailRes.status, 502);
+
+    sheetFailMode = 'update';
+    const updateFailRes = await fetch(`${env.workerBaseUrl}/api/collection/sheet-sync`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ googleSheetUrl: 'https://docs.google.com/spreadsheets/d/ownedSheet01/edit#gid=77' })
+    });
+    assert.equal(updateFailRes.status, 502);
+
+    sheetFailMode = null;
+    env.workerEnv.USER_HOURLY_WRITE_LIMIT = '1';
+    const rateLimitedSheetRes = await fetch(`${env.workerBaseUrl}/api/collection/sheet-sync`, {
+      method: 'POST',
+      headers: { Origin: ALLOWED_ORIGIN, Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ googleSheetUrl: 'https://docs.google.com/spreadsheets/d/ownedSheet01/edit#gid=77' })
+    });
+    assert.equal(rateLimitedSheetRes.status, 429);
   });
 
   it('pushes and pulls 255 Owned releases across chunked batches (50/batch) and paginated deltas (200/page) in SQLite', async (t) => {

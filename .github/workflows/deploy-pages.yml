@@ -27,7 +27,7 @@ jobs:
           node-version: 22
 
       - name: Run full test suite before staging Pages artifact
-        run: node --test test/*.test.js
+        run: node --test --experimental-test-coverage --test-coverage-lines=95 test/*.test.js
 
       - name: Stage static site and fetch verified scanner release assets
         env:

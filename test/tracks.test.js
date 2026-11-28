@@ -498,4 +498,165 @@ describe('Smart Paste Parser & Variant-Aware Track Matcher (js/track-resolver.js
     assert.equal(sandbox.window.CDHunt.db, sandbox.window.DiskCrate.db);
     assert.equal(sandbox.window.CDHunt.trackResolver, sandbox.window.DiskCrate.trackResolver);
   });
+
+  it('covers lookupReleaseCandidates barcode, catno, text search, iTunes fallback, and parser edge cases', async () => {
+    const queue = { schedule(fn) { return fn(); } };
+
+    // Barcode lookup on MusicBrainz
+    const barcodeCands = await trackResolver.lookupReleaseCandidates('4547366611397', {
+      queue,
+      fetchImpl: async (url) => {
+        const u = String(url);
+        if (u.includes('query=barcode%3A4547366611397')) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                releases: [
+                  { id: '11111111-1111-4111-8111-111111111111', title: 'slash', barcode: '4547366611397', 'artist-credit': [{ name: 'yama' }], 'label-info': [{ 'catalog-number': 'SRCL-12539' }] }
+                ]
+              };
+            }
+          };
+        }
+        if (u.includes('11111111-1111-4111-8111-111111111111')) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                id: '11111111-1111-4111-8111-111111111111',
+                title: 'slash',
+                'artist-credit': [{ name: 'yama' }],
+                'label-info': [{ 'catalog-number': 'SRCL-12539' }],
+                media: [{ position: 1, format: 'CD', tracks: [{ position: 1, title: 'slash', length: 210000 }] }]
+              };
+            }
+          };
+        }
+        return { ok: true, status: 200, async json() { return { results: [] }; } };
+      }
+    });
+    assert.equal(barcodeCands.length, 1);
+    assert.equal(barcodeCands[0].catNo, 'SRCL-12539');
+    assert.equal(barcodeCands[0].tracks.length, 1);
+
+    // Text lookup -> empty MB -> iTunes album + track fallback
+    const itunesCands = await trackResolver.lookupReleaseCandidates('Sol-fa AKFG', {
+      queue,
+      fetchImpl: async (url) => {
+        const u = String(url);
+        if (u.includes('musicbrainz.org')) {
+          return { ok: true, status: 200, async json() { return { releases: [] }; } };
+        }
+        if (u.includes('itunes.apple.com/search')) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { results: [{ collectionId: 999, artistName: 'ASIAN KUNG-FU GENERATION', collectionName: 'Sol-fa', trackCount: 12 }] };
+            }
+          };
+        }
+        if (u.includes('itunes.apple.com/lookup?id=999')) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                results: [
+                  { wrapperType: 'collection', artistName: 'ASIAN KUNG-FU GENERATION', collectionName: 'Sol-fa' },
+                  { wrapperType: 'track', discNumber: 1, trackNumber: 1, trackName: 'Rewrite', trackTimeMillis: 225000 }
+                ]
+              };
+            }
+          };
+        }
+        return { ok: false, status: 404 };
+      }
+    });
+    assert.equal(itunesCands.length, 1);
+    assert.equal(itunesCands[0].trackSource, 'itunes');
+    assert.equal(itunesCands[0].tracks[0].title, 'Rewrite');
+
+    assert.deepEqual(await trackResolver.lookupReleaseCandidates('   '), []);
+    assert.deepEqual(trackResolver.parseTracklistText(''), []);
+    assert.deepEqual(trackResolver.normalizeTracksList('bad'), []);
+
+    // Catalog number with tilde ('~') fallback query on MusicBrainz -> iTunes empty fallback
+    const seenQueries = [];
+    const tildeEmpty = await trackResolver.lookupReleaseCandidates('SRCL-12539~40', {
+      queue,
+      fetchImpl: async (url) => {
+        seenQueries.push(String(url));
+        return { ok: true, status: 200, async json() { return { releases: [], results: [] }; } };
+      }
+    });
+    assert.deepEqual(tildeEmpty, []);
+    assert.ok(seenQueries.some((u) => u.includes('catno%3ASRCL-12539~40')));
+    assert.ok(seenQueries.some((u) => u.includes('catno%3ASRCL-12539&')));
+
+    // tryMusicBrainzTracks direct MBID lookup path
+    const directRes = await trackResolver.tryMusicBrainzTracks(
+      { artist: 'yama', title: 'slash', regCatNo: 'SRCL-12539', barcode: '4547366611397', mbid: '11111111-1111-4111-8111-111111111111' },
+      {
+        queue,
+        fetchImpl: async () => ({
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              id: '11111111-1111-4111-8111-111111111111',
+              title: 'slash',
+              'artist-credit': [{ name: 'yama' }],
+              'label-info': [{ 'catalog-number': 'SRCL-12539' }],
+              media: [{ position: 1, format: 'CD', tracks: [{ position: 1, title: 'Direct MBID Track', length: 180000 }] }]
+            };
+          }
+        })
+      }
+    );
+    assert.equal(directRes.trackSource, 'musicbrainz');
+    assert.equal(directRes.sourceDetail, 'SRCL-12539');
+
+    // tryMusicBrainzTracks multi-candidate scoring + non-matching label fallback path
+    const searchSortRes = await trackResolver.tryMusicBrainzTracks(
+      { artist: 'yama', title: 'slash', regCatNo: 'SRCL-12539' },
+      {
+        queue,
+        fetchImpl: async (url) => {
+          const u = String(url);
+          if (u.includes('query=catno%3ASRCL-12539')) {
+            return {
+              ok: true,
+              status: 200,
+              async json() {
+                return {
+                  releases: [
+                    { id: '22222222-2222-4222-8222-222222222222', status: 'Bootleg', 'label-info': [{ 'catalog-number': 'ALT-999' }] },
+                    { id: '33333333-3333-4333-8333-333333333333', status: 'Official', country: 'JP', media: [{}], 'label-info': [{ 'catalog-number': 'SRCL-12539' }] }
+                  ]
+                };
+              }
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                id: '33333333-3333-4333-8333-333333333333',
+                title: 'slash',
+                'label-info': [{ 'catalog-number': 'ALT-JP-01' }],
+                media: [{ position: 1, format: 'CD', tracks: [{ position: 1, title: 'Sorted Candidate Track', length: 200000 }] }]
+              };
+            }
+          };
+        }
+      }
+    );
+    assert.equal(searchSortRes.trackSource, 'musicbrainz');
+    assert.equal(searchSortRes.sourceDetail, 'ALT-JP-01');
+  });
 });

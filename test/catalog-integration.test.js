@@ -435,6 +435,8 @@ async function bootApp({
     FileReader: MockFileReader,
     setTimeout,
     clearTimeout,
+    setInterval,
+    clearInterval,
     encodeURIComponent,
     decodeURIComponent,
     document: documentStub,
@@ -3369,6 +3371,9 @@ describe('Phase 2 Owned Collection, Cross-Referencing, Graduation & Shared relea
     });
 
     // Hybrid overlay kept JSON tracks/barcode/mbid while merging Sheet's priority & extra CPCA-9001 row
+    for (let i = 0; i < 20 && !appA.elements.get('albumGrid').innerHTML.includes('ChouCho'); i++) {
+      await appA.flush();
+    }
     await appA.clickElement('openCrateFlipBtn');
     assert.equal(appA.elements.get('lbTrackSourceBadge').textContent, 'Catalog · LACM-24156');
     assert.ok(appA.elements.get('lbTracksList').innerHTML.includes('Hybrid Overlay Opening'));
@@ -3904,7 +3909,12 @@ describe('Phase 3a Opt-In Scanner Engine Integration', () => {
 
     const requestedUrls = [];
     const cachesImpl = makeCacheStorageMock();
-    const workerEvents = { inits: 0, terminated: 0 };
+    const workerEvents = { inits: 0, frames: 0, terminated: 0 };
+    let failWasmOnce = true;
+    let camMode = 'ok';
+    let failTorchApply = false;
+    let torchCalls = [];
+    let camStopCount = 0;
 
     class MockScannerWorker {
       constructor() {
@@ -3913,6 +3923,7 @@ describe('Phase 3a Opt-In Scanner Engine Integration', () => {
       }
       postMessage(msg) {
         if (msg && msg.type === 'init') workerEvents.inits++;
+        if (msg && msg.type === 'frame') workerEvents.frames++;
         Promise.resolve(this._core.handleMessage(msg)).then((reply) => {
           if (reply && typeof this.onmessage === 'function') {
             this.onmessage({ data: reply });
@@ -3923,6 +3934,15 @@ describe('Phase 3a Opt-In Scanner Engine Integration', () => {
         workerEvents.terminated++;
       }
     }
+
+    const mockTrack = {
+      getCapabilities() { return { torch: true }; },
+      async applyConstraints(c) {
+        torchCalls.push(c);
+        if (failTorchApply) throw new Error('torch locked');
+      },
+      stop() { camStopCount++; }
+    };
 
     const huntCatalog = {
       schemaVersion: 1,
@@ -3948,6 +3968,24 @@ describe('Phase 3a Opt-In Scanner Engine Integration', () => {
       catalogObject: huntCatalog,
       cachesImpl,
       workerCtor: MockScannerWorker,
+      extraNavigator: {
+        mediaDevices: {
+          async getUserMedia() {
+            if (camMode === 'denied') {
+              const e = new Error('Permission denied');
+              e.name = 'NotAllowedError';
+              throw e;
+            }
+            if (camMode === 'missing') {
+              throw new Error('Requested device not found');
+            }
+            return {
+              getTracks: () => [mockTrack],
+              getVideoTracks: () => [mockTrack]
+            };
+          }
+        }
+      },
       indexedDBImpl: {
         open() {
           const req = { result: null, error: null, onsuccess: null, onerror: null, onupgradeneeded: null };
@@ -3992,6 +4030,10 @@ describe('Phase 3a Opt-In Scanner Engine Integration', () => {
           return new Response(JSON.stringify(manifest), { status: 200 });
         }
         if (u.endsWith('scanner-assets/v1/engine-shell.wasm')) {
+          if (failWasmOnce) {
+            failWasmOnce = false;
+            return new Response('err', { status: 500 });
+          }
           return new Response(wasmBytes, { status: 200, headers: { 'Content-Type': 'application/wasm' } });
         }
         return new Response(JSON.stringify({ releases: [], results: [] }), { status: 200 });
@@ -4024,7 +4066,29 @@ describe('Phase 3a Opt-In Scanner Engine Integration', () => {
     assert.equal(requestedUrls.some((u) => u.endsWith('engine-shell.wasm')), false);
     assert.equal(await cachesImpl.has('disk-crate-scanner-assets-v1'), false);
 
-    // Confirm download -> downloads & verifies WASM, opens viewfinder, boots WASM worker
+    // Attach mock video & canvas properties for frame sampler + torch testing
+    const videoEl = app.elements.get('scannerVideo');
+    videoEl.readyState = 4;
+    videoEl.videoWidth = 320;
+    videoEl.videoHeight = 240;
+    videoEl.play = async () => {};
+    const canvasEl = app.elements.get('scannerCanvas');
+    canvasEl.getContext = () => ({
+      drawImage() {},
+      getImageData: () => ({ data: new Uint8ClampedArray(64 * 48 * 4).fill(180) })
+    });
+
+    // Gate cancel & open Manager before confirming
+    await app.clickElement('scannerCancelGateBtn');
+    assert.equal(app.elements.get('scannerModal').classList.contains('open'), false);
+    await app.clickElement('openScannerBtn');
+
+    // First confirm hits HTTP 500 -> shows #scannerGateError without opening viewfinder
+    await app.clickElement('scannerConfirmDownloadBtn');
+    assert.equal(app.elements.get('scannerGateError').classList.contains('hidden'), false);
+    assert.match(app.elements.get('scannerGateError').textContent, /HTTP 500/);
+
+    // Second confirm succeeds -> downloads & verifies WASM, opens viewfinder, boots WASM worker & starts camera
     await app.clickElement('scannerConfirmDownloadBtn');
     await app.flush();
     assert.equal(requestedUrls.some((u) => u.endsWith('engine-shell.wasm')), true);
@@ -4033,26 +4097,345 @@ describe('Phase 3a Opt-In Scanner Engine Integration', () => {
     assert.equal(app.elements.get('scannerViewfinderPanel').classList.contains('hidden'), false);
     assert.ok(app.elements.get('scannerHudStatus').textContent.includes('ping 301'));
 
-    // Manual lookup matches both Hunt catalog # and Owned barcode locally
-    await app.inputText('scannerManualInput', 'CPCA-1004');
-    await app.clickElement('scannerManualSubmitBtn');
-    assert.ok(app.elements.get('scannerManualResult').innerHTML.includes('On Hunt List'));
-    assert.ok(app.elements.get('scannerManualResult').innerHTML.includes('Breath of Fire III OST'));
+    // Wait briefly so 333ms frame sampler executes at least 1 frame -> updates #scannerFrameCounter & HUD
+    await new Promise((r) => setTimeout(r, 380));
+    assert.ok(workerEvents.frames >= 1);
+    assert.ok(app.elements.get('scannerFrameCounter').textContent.includes('frame'));
 
+    // Exercise Torch toggle (on + failure toast), Guide toggle, & Switch Camera
+    await app.clickElement('scannerTorchBtn');
+    assert.equal(app.elements.get('scannerTorchBtn').textContent, 'Torch: On');
+    failTorchApply = true;
+    await app.clickElement('scannerTorchBtn');
+    assert.equal(app.elements.get('toast').textContent, 'Torch unavailable on this camera');
+    failTorchApply = false;
+    await app.clickElement('scannerGuideToggleBtn');
+    assert.equal(app.elements.get('scannerReticle').classList.contains('scanner-reticle--square'), true);
+    await app.clickElement('scannerSwitchCamBtn');
+
+    // Test camera permission denied & missing errors cleanly
+    camMode = 'denied';
+    await app.clickElement('scannerStartCamBtn');
+    assert.match(app.elements.get('scannerCamError').textContent, /permission denied/i);
+    camMode = 'missing';
+    await app.clickElement('scannerStartCamBtn');
+    assert.match(app.elements.get('scannerCamError').textContent, /No live camera detected/i);
+    camMode = 'ok';
+
+    // Manual lookup: empty clear, Enter key on Hunt catno, jump to Hunt, Owned jump, and Add unknown code -> Release Form
+    await app.inputText('scannerManualInput', '');
+    await app.clickElement('scannerManualSubmitBtn');
+    assert.equal(app.elements.get('scannerManualResult').classList.contains('hidden'), true);
+
+    await app.inputText('scannerManualInput', 'CPCA-1004');
+    await app.pressKey('scannerManualInput', 'Enter');
+    assert.ok(app.elements.get('scannerManualResult').innerHTML.includes('On Hunt List'));
+    app.elements.get('scannerManualResult').dispatchEvent({
+      type: 'click',
+      target: {
+        closest: () => ({
+          getAttribute: (k) => (k === 'data-scanner-jump' ? 'hunt' : k === 'data-target-id' ? 'hunt-scan-01' : null)
+        })
+      }
+    });
+    await app.flush();
+    assert.equal(app.elements.get('lightboxModal').classList.contains('open'), true);
+    await app.clickElement('closeLightboxBtn');
+
+    // Reopen straight into viewfinder, lookup Owned barcode, jump to Owned Crate Flip
+    await app.clickElement('openScannerBtn');
     await app.inputText('scannerManualInput', '4900000000099');
     await app.clickElement('scannerManualSubmitBtn');
     assert.ok(app.elements.get('scannerManualResult').innerHTML.includes('Already Owned'));
+    app.elements.get('scannerManualResult').dispatchEvent({
+      type: 'click',
+      target: {
+        closest: () => ({
+          getAttribute: (k) => (k === 'data-scanner-jump' ? 'owned' : k === 'data-target-id' ? 'own-own-scn-9' : null)
+        })
+      }
+    });
+    await app.flush();
+    assert.equal(app.elements.get('lightboxModal').classList.contains('open'), true);
+    await app.clickElement('closeLightboxBtn');
 
-    // Switch to Engine Manager -> Wipe Scanner Engine & Cache -> Worker terminated & Cache cleared, Owned & Hunt intact
+    // Unknown barcode -> "+ Add to Collection" opens #releaseFormModal prefilled with barcode
+    await app.clickElement('openScannerBtn');
+    await app.inputText('scannerManualInput', '4988001122334');
+    await app.clickElement('scannerManualSubmitBtn');
+    app.elements.get('scannerManualResult').dispatchEvent({
+      type: 'click',
+      target: {
+        closest: () => ({
+          getAttribute: (k) => (k === 'data-scanner-add' ? '4988001122334' : null)
+        })
+      }
+    });
+    await app.flush();
+    assert.equal(app.elements.get('releaseFormModal').classList.contains('open'), true);
+    assert.equal(app.elements.get('rfBarcode').value, '4988001122334');
+    await app.clickElement('cancelReleaseFormBtn');
+
+    // Engine Manager: per-pack Remove/Download, Back -> gate & viewfinder, Pre-Download, Backdrop/Escape/visibility/pagehide, & Wipe
+    await app.clickElement('openScannerBtn');
     await app.clickElement('scannerViewManagerBtn');
     assert.equal(app.elements.get('scannerManagerPanel').classList.contains('hidden'), false);
+    const packsListEl = app.elements.get('scannerManagerPacksList');
+    packsListEl.dispatchEvent({
+      type: 'click',
+      target: { getAttribute: (k) => (k === 'data-scanner-del' ? 'engine-shell' : null) }
+    });
+    await app.flush();
+    await app.clickElement('scannerBackToScanBtn');
+    assert.equal(app.elements.get('scannerGatePanel').classList.contains('hidden'), false);
+
+    await app.clickElement('scannerOpenManagerBtn');
+    packsListEl.dispatchEvent({
+      type: 'click',
+      target: { getAttribute: (k) => (k === 'data-scanner-dl' ? 'engine-shell' : null) }
+    });
+    await app.flush();
+    await app.clickElement('scannerPreDownloadAllBtn');
+    await app.clickElement('scannerBackToScanBtn');
+    assert.equal(app.elements.get('scannerViewfinderPanel').classList.contains('hidden'), false);
+
+    // Escape, backdrop click, visibilitychange('hidden'), and pagehide cleanly close & tear down
+    await app.triggerKeydown('Escape');
+    assert.equal(app.elements.get('scannerModal').classList.contains('open'), false);
+    await app.clickElement('openScannerBtn');
+    await app.triggerVisibilityChange('hidden');
+    assert.equal(app.elements.get('scannerModal').classList.contains('open'), false);
+    app.document.visibilityState = 'visible';
+    await app.clickElement('openScannerBtn');
+    await app.triggerPageHide();
+    assert.equal(app.elements.get('scannerModal').classList.contains('open'), false);
+
+    // Reopen, Wipe cleanly, verify Hunt & Owned data preserved
+    await app.clickElement('openScannerBtn');
+    await app.clickElement('scannerViewManagerBtn');
     await app.clickElement('scannerWipeBtn');
-    assert.equal(workerEvents.terminated, 1);
+    assert.ok(workerEvents.terminated >= 1);
+    assert.ok(camStopCount >= 1);
     assert.equal(await cachesImpl.has('disk-crate-scanner-assets-v1'), false);
 
     await app.clickElement('closeScannerModalBtn');
     assert.equal(app.elements.get('progressBadge').textContent, '1 release · 0 tracks');
     await app.clickElement('modeHuntBtn');
     assert.equal(app.elements.get('progressBadge').textContent, '1 / 1');
+  });
+
+  it('covers Collection 1-Col view, release form validations, JSON download/file upload, Owned Sheet errors, and session 401 expiry', async () => {
+    const sharedBacking = { stores: new Map() };
+    const jwt = makeFakeSyncJwt({ login: 'alice' });
+    let sheetPushMode = 'ok';
+    let return401OnBatch = false;
+
+    const app = await bootApp({
+      catalogObject: {
+        schemaVersion: 1,
+        meta: { title: 'Col 1-Col Catalog' },
+        items: [
+          { id: 'c1', category: 'OST', artist: 'A', title: 'T', regCatNo: 'C-1', catalog: 'C-1', kana: 'ア', filing: 'S1', price: '¥500' }
+        ]
+      },
+      syncApiUrl: 'https://cd-hunt-sync.tndo.workers.dev',
+      syncDebounceMs: 10,
+      initialStorage: { cd_hunt_sync_token_v1: jwt },
+      indexedDBImpl: {
+        open() {
+          const req = { result: null, error: null, onsuccess: null, onerror: null, onupgradeneeded: null };
+          queueMicrotask(() => {
+            const dbObj = {
+              objectStoreNames: { contains: (s) => sharedBacking.stores.has(s) },
+              createObjectStore: (s, opts) => {
+                if (!sharedBacking.stores.has(s)) sharedBacking.stores.set(s, { keyPath: opts.keyPath, rows: new Map() });
+                return { indexNames: { contains: () => true }, createIndex: () => {} };
+              },
+              transaction: (storeName) => {
+                const storeMeta = sharedBacking.stores.get(storeName);
+                const tx = { error: null, oncomplete: null, onerror: null, onabort: null };
+                const makeReq = (exec) => {
+                  const r = { result: undefined, error: null, onsuccess: null, onerror: null };
+                  queueMicrotask(() => { exec(r); });
+                  return r;
+                };
+                tx.objectStore = () => ({
+                  get: (k) => makeReq((r) => { r.result = storeMeta.rows.get(k); if (r.onsuccess) r.onsuccess({ target: r }); }),
+                  put: (v) => makeReq((r) => { storeMeta.rows.set(v[storeMeta.keyPath], JSON.parse(JSON.stringify(v))); r.result = v[storeMeta.keyPath]; if (r.onsuccess) r.onsuccess({ target: r }); }),
+                  delete: (k) => makeReq((r) => { storeMeta.rows.delete(k); if (r.onsuccess) r.onsuccess({ target: r }); }),
+                  getAll: () => makeReq((r) => { r.result = Array.from(storeMeta.rows.values()).map((v) => JSON.parse(JSON.stringify(v))); if (r.onsuccess) r.onsuccess({ target: r }); }),
+                  clear: () => makeReq((r) => { storeMeta.rows.clear(); if (r.onsuccess) r.onsuccess({ target: r }); })
+                });
+                setTimeout(() => { if (tx.oncomplete) tx.oncomplete({ target: tx }); }, 0);
+                return tx;
+              }
+            };
+            req.result = dbObj;
+            req.transaction = { objectStore: () => ({ indexNames: { contains: () => true }, createIndex: () => {} }) };
+            if (req.onupgradeneeded) req.onupgradeneeded({ target: { result: dbObj } });
+            if (req.onsuccess) req.onsuccess({ target: req });
+          });
+          return req;
+        }
+      },
+      fetchImpl: async (url, init = {}) => {
+        const u = String(url);
+        const m = String(init.method || 'GET').toUpperCase();
+        if (u.endsWith('/api/status')) {
+          return { ok: true, status: 200, async json() { return { ok: true, sheetSync: { configured: true, serviceAccountEmail: 'bot@e.iam' } }; } };
+        }
+        if (u.endsWith('/api/state') && m === 'GET') {
+          return { ok: true, status: 200, async json() { return { user: { login: 'alice' }, updatedAt: 1, shareUrl: 'https://cd-hunt-sync.tndo.workers.dev/api/share/tok', state: null }; } };
+        }
+        if (u.includes('/api/collection/batch')) {
+          if (return401OnBatch) return { ok: false, status: 401, async json() { return { ok: false }; } };
+          const body = JSON.parse(init.body);
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { ok: true, accepted: body.items.map((x, idx) => ({ id: x.id, syncSeq: idx + 1, clientUpdatedAt: x.clientUpdatedAt })), conflicts: [], latestSeq: body.items.length };
+            }
+          };
+        }
+        if (u.includes('/api/collection/sheet-sync')) {
+          if (sheetPushMode === 'skipped') return { ok: true, status: 200, async json() { return { ok: false, skipped: true }; } };
+          if (sheetPushMode === 'err') return { ok: false, status: 502, async json() { return { error: 'sheet api 502' }; } };
+          return { ok: true, status: 200, async json() { return { ok: true, writtenRows: 1 }; } };
+        }
+        if (u.includes('/api/collection')) {
+          return { ok: true, status: 200, async json() { return { ok: true, items: [], hasMore: false, latestSeq: 0 }; } };
+        }
+        if (u.includes('docs.google.com/spreadsheets/d/badOwned/')) {
+          return { ok: false, status: 500 };
+        }
+        if (u.includes('musicbrainz.org')) {
+          if (u.includes('offline-throw')) throw new Error('MB offline');
+          return { ok: true, status: 200, async json() { return { releases: [] }; } };
+        }
+        return { ok: true, status: 200, async json() { return { results: [] }; } };
+      }
+    });
+
+    // Release Form validation & lookup edge cases
+    await app.clickElement('modeCollectionBtn');
+    await app.clickElement('addReleaseBtn');
+    await app.clickElement('saveReleaseFormBtn');
+    assert.equal(app.elements.get('toast').textContent, 'Artist, Title, and Catalog Number are required');
+
+    await app.inputText('rfArtist', 'Single Col Artist');
+    await app.inputText('rfTitle', 'Single Col Title');
+    await app.inputText('rfCatNo', 'SCOL-001');
+    await app.inputText('rfBarcode', '123');
+    await app.clickElement('saveReleaseFormBtn');
+    assert.equal(app.elements.get('toast').textContent, 'Barcode must contain 8 to 14 digits');
+
+    await app.inputText('rfBarcode', '4900000000123');
+    await app.inputText('rfMbid', 'not-a-uuid');
+    await app.clickElement('saveReleaseFormBtn');
+    assert.equal(app.elements.get('toast').textContent, 'MusicBrainz ID must be a valid UUID');
+    await app.inputText('rfMbid', '');
+
+    await app.inputText('releaseLookupInput', 'no-hits');
+    await app.pressKey('releaseLookupInput', 'Enter');
+    assert.ok(app.elements.get('releaseLookupResults').innerHTML.includes('No matching releases found'));
+    const origLookup = app.window.DiskCrate.trackResolver.lookupReleaseCandidates;
+    app.window.DiskCrate.trackResolver.lookupReleaseCandidates = async () => { throw new Error('MB offline'); };
+    await app.inputText('releaseLookupInput', 'offline-throw');
+    await app.clickElement('releaseLookupBtn');
+    app.window.DiskCrate.trackResolver.lookupReleaseCandidates = origLookup;
+    assert.ok(app.elements.get('releaseLookupResults').innerHTML.includes('Lookup unavailable offline'));
+
+    await app.inputText('rfPurchaseShop', 'Mandarake');
+    await app.inputText('rfPurchaseDate', '2026-11-28');
+    await app.inputText('rfPurchasePrice', '¥900');
+    await app.inputText('rfNotes', 'Obi mint');
+    await app.inputText('rfTracksInput', '1. Initial Track (3:00)');
+    await app.clickElement('saveReleaseFormBtn');
+
+    // Switch to 1-Column View in Collection mode -> exercises 1-Col markup + edit-owned / delete-owned
+    await app.clickElement('viewModeBtn');
+    const colHtml = app.elements.get('albumGrid').innerHTML;
+    assert.ok(colHtml.includes('Mandarake'));
+    assert.ok(colHtml.includes('Single Col Artist'));
+
+    // Edit tracks in Crate Flip (save & clear) -> syncOwnedReleaseTracksChange
+    await app.clickElement('openCrateFlipBtn');
+    await app.clickElement('lbEditTracksBtn');
+    await app.inputText('lbTrackEditorInput', '1. Overridden Collection Track (4:00)');
+    await app.clickElement('saveManualTracksBtn');
+    await app.clickElement('lbResetTracksBtn');
+    assert.ok(app.elements.get('toast').textContent.includes('Cleared custom track list'));
+    await app.clickElement('closeLightboxBtn');
+
+    // Backup Modal: Copy, Download fallback & Blob, File Upload text/FileReader/error, Sheet Import & Push branches
+    await app.clickElement('collectionBackupBtn');
+    await app.clickElement('copyCollectionBackupBtn');
+    assert.equal(app.elements.get('toast').textContent, 'Copied Collection JSON');
+
+    const OrigURL = app.window.URL;
+    app.window.Blob = function (parts) { this.parts = parts; };
+    app.window.URL = { createObjectURL: () => 'blob:mock-1', revokeObjectURL: () => {} };
+    await app.clickElement('downloadCollectionJsonBtn');
+    assert.equal(app.elements.get('toast').textContent, 'Downloaded owned-collection.json');
+
+    app.window.URL = {};
+    await app.clickElement('downloadCollectionJsonBtn');
+    assert.equal(app.elements.get('toast').textContent, 'Copied Collection JSON');
+    app.window.URL = OrigURL;
+
+    const colFileIn = app.elements.get('collectionJsonFileInput');
+    await app.clickElement('uploadCollectionJsonBtn');
+    colFileIn.files = [{ name: 'col.json', async text() { return JSON.stringify({ schemaVersion: 1, items: [] }); } }];
+    colFileIn.dispatchEvent({ type: 'change', target: colFileIn });
+    await app.flush();
+    assert.ok(app.elements.get('toast').textContent.includes('Loaded col.json'));
+
+    colFileIn.files = [{ name: 'fr.json', _content: JSON.stringify({ schemaVersion: 1, items: [] }) }];
+    colFileIn.dispatchEvent({ type: 'change', target: colFileIn });
+    await app.flush();
+    assert.ok(app.elements.get('toast').textContent.includes('Loaded fr.json'));
+
+    colFileIn.files = [{ name: 'bad.json', _failRead: true }];
+    colFileIn.dispatchEvent({ type: 'change', target: colFileIn });
+    await app.flush();
+    assert.equal(app.elements.get('toast').textContent, 'Failed to read JSON file');
+
+    await app.inputText('ownedSheetUrlInput', 'https://example.com/invalid');
+    await app.clickElement('importOwnedSheetBtn');
+    assert.equal(app.elements.get('toast').textContent, 'Enter a valid Google Sheet URL');
+
+    await app.inputText('ownedSheetUrlInput', 'https://docs.google.com/spreadsheets/d/badOwned/edit');
+    await app.clickElement('importOwnedSheetBtn');
+    assert.match(app.elements.get('toast').textContent, /Failed to import Owned Sheet/);
+
+    await app.clickElement('pushOwnedSheetBtn');
+    assert.ok(app.elements.get('toast').textContent.includes('Synced 1 owned row'));
+    sheetPushMode = 'skipped';
+    await app.clickElement('pushOwnedSheetBtn');
+    assert.ok(app.elements.get('toast').textContent.includes('service account not configured'));
+    sheetPushMode = 'err';
+    await app.clickElement('pushOwnedSheetBtn');
+    assert.match(app.elements.get('toast').textContent, /Google Sheet sync failed/);
+
+    await app.inputText('ownedSheetUrlInput', 'bad-url');
+    await app.clickElement('pushOwnedSheetBtn');
+    assert.equal(app.elements.get('toast').textContent, 'Enter a valid Google Sheet URL');
+
+    await app.clickElement('closeCollectionBackupBtn');
+    await app.clickElement('closeReleaseFormBtn');
+
+    // Trigger edit-owned & delete-owned -> 401 session expiry clears session cleanly
+    app.triggerDocumentClick('edit-owned', { 'data-id': 'own-scol-001' });
+    await app.clickElement('cancelReleaseFormBtn');
+    return401OnBatch = true;
+    app.triggerDocumentClick('delete-owned', { 'data-id': 'own-scol-001' });
+    await new Promise((r) => setTimeout(r, 65));
+    assert.ok(app.elements.get('syncStatusPill').textContent.includes('Session expired'));
+
+    // Signed out pushOwnedSheetBtn guard
+    await app.clickElement('collectionBackupBtn');
+    await app.clickElement('pushOwnedSheetBtn');
+    assert.equal(app.elements.get('toast').textContent, 'Sign in with GitHub first to sync to Google Sheets');
   });
 });

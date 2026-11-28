@@ -18,4 +18,4 @@ jobs:
           node-version: 22
 
       - name: Run unit, integration, & system tests
-        run: node --test test/*.test.js
+        run: node --test --experimental-test-coverage --test-coverage-lines=95 test/*.test.js

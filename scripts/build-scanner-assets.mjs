@@ -172,11 +172,10 @@ function parseArgs(argv) {
   return out;
 }
 
-async function runCli() {
-  const { outDir, tarPath } = parseArgs(process.argv.slice(2));
+export async function runCli(argv = process.argv.slice(2)) {
+  const { outDir, tarPath } = parseArgs(argv);
   if (!outDir) {
-    console.error('Usage: node scripts/build-scanner-assets.mjs --out <dir> [--tar <tarPath>]');
-    process.exit(1);
+    throw new Error('Usage: node scripts/build-scanner-assets.mjs --out <dir> [--tar <tarPath>]');
   }
 
   const resolvedOut = path.resolve(outDir);

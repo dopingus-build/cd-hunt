@@ -371,4 +371,242 @@ describe('Phase 3a Scanner Manifest, Manager, Integrity Verification & Wipe', ()
     assert.equal(context.DiskCrate.scannerManager, context.CDHunt.scannerManager);
     assert.equal(context.DiskCrate.scannerUI, context.CDHunt.scannerUI);
   });
+
+  it('covers scanner-manager validation, download error guards, offline cache corruption, and config overrides', async () => {
+    const { buildEngineShellWasmBytes, buildScannerManifest } = await import('../scripts/build-scanner-assets.mjs');
+    const wasmBytes = buildEngineShellWasmBytes();
+    const manifest = buildScannerManifest(wasmBytes);
+
+    // validateManifest negative branches
+    assert.equal(scannerManagerMod.validateManifest(null).valid, false);
+    assert.equal(scannerManagerMod.validateManifest([]).valid, false);
+    assert.equal(scannerManagerMod.validateManifest({ schemaVersion: 1, packs: 'nope' }).valid, false);
+    assert.equal(
+      scannerManagerMod.validateManifest({
+        schemaVersion: 1,
+        packs: [null, { id: 'p1', totalBytes: -1, files: 'nope' }, { id: 'p2', totalBytes: 1, files: [null, { path: '/abs', bytes: -1, sha256: 'a'.repeat(64) }] }]
+      }).valid,
+      false
+    );
+
+    assert.equal(
+      scannerManagerMod.resolveScannerAssetsBaseUrl('?scannerAssets=http://[::1', { scannerAssetsBaseUrl: 'https://cdn.example/scan' }),
+      'https://cdn.example/scan/'
+    );
+    await assert.rejects(() => scannerManagerMod.sha256Hex(wasmBytes, {}), /Web Crypto subtle\.digest is unavailable/);
+
+    const cachesImpl = makeMockCacheStorage();
+    let mode = 'good';
+    const mgr = scannerManagerMod.createScannerManager({
+      baseUrl: 'https://example.test/scanner/',
+      cachesImpl,
+      cryptoImpl: globalThis.crypto,
+      ResponseCtor: Response,
+      fetchImpl: async (url) => {
+        if (mode === 'throw') throw new Error('boom');
+        if (mode === '404') return new Response('missing', { status: 404 });
+        if (String(url).endsWith('manifest.json')) {
+          if (mode === 'bad-manifest') return new Response(JSON.stringify({ schemaVersion: 9 }), { status: 200 });
+          return new Response(JSON.stringify(manifest), { status: 200 });
+        }
+        if (mode === 'bad-size') {
+          return new Response(new Uint8Array([1, 2]), { status: 200 });
+        }
+        return new Response(wasmBytes, { status: 200 });
+      }
+    });
+
+    assert.equal(await mgr.readCachedFileBytes('engine-shell.wasm'), null);
+    mode = 'bad-manifest';
+    await assert.rejects(() => mgr.fetchManifest(), /Invalid scanner manifest/);
+    mode = '404';
+    await assert.rejects(() => mgr.fetchManifest(), /Manifest HTTP 404/);
+    mode = 'good';
+    await mgr.fetchManifest();
+
+    assert.equal((await mgr.downloadPack('missing-pack', manifest)).ok, false);
+    assert.equal((await mgr.downloadPack('barcode-wasm', manifest)).ok, false);
+
+    mode = 'throw';
+    assert.match((await mgr.downloadPack('engine-shell', manifest)).error, /Failed to download/);
+    mode = '404';
+    assert.match((await mgr.downloadPack('engine-shell', manifest)).error, /HTTP 404/);
+    mode = 'bad-size';
+    assert.match((await mgr.downloadPack('engine-shell', manifest)).error, /Size mismatch/);
+
+    const noFetchMgr = scannerManagerMod.createScannerManager({ baseUrl: './scanner-assets/v1/', fetchImpl: null, cachesImpl });
+    assert.match((await noFetchMgr.downloadPack('engine-shell', manifest)).error, /Network fetch is unavailable/);
+
+    const noCacheMgr = scannerManagerMod.createScannerManager({
+      baseUrl: './scanner-assets/v1/',
+      fetchImpl: async () => new Response(wasmBytes, { status: 200 }),
+      cachesImpl: null
+    });
+    assert.match((await noCacheMgr.downloadPack('engine-shell', manifest)).error, /Cache Storage is unavailable/);
+
+    // Verify good download + corrupted cache rejection in readCachedFileBytes
+    mode = 'good';
+    assert.equal((await mgr.downloadPack('engine-shell', manifest)).ok, true);
+    await assert.rejects(
+      () => mgr.readCachedFileBytes('engine-shell.wasm', 'f'.repeat(64)),
+      /Cached scanner asset corrupted/
+    );
+  });
+
+  it('covers scanner-worker error paths, DedicatedWorkerGlobalScope onmessage, CLI runners, and db clearScannerCoverIndex', async () => {
+    const { buildEngineShellWasmBytes, sha256HexSync, runCli: runBuildCli } = await import('../scripts/build-scanner-assets.mjs');
+    const {
+      fetchAndVerifyScannerAssets,
+      verifyManifestFilesOnDisk,
+      parseCliArgs,
+      runCli: runFetchCli
+    } = await import('../scripts/fetch-scanner-assets.mjs');
+
+    // scanner-worker edge cases + real DedicatedWorkerGlobalScope VM runtime
+    const worker = scannerWorkerMod.createScannerWorkerCore();
+    assert.equal((await worker.handleMessage({ type: 'init', wasmBytes: new Uint8Array(0) })).type, 'error');
+    assert.equal((await worker.handleMessage({ type: 'unknown-op' })).type, 'error');
+
+    const badPingWasm = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]); // empty valid WASM module without ping() -> ping=0
+    assert.match((await worker.handleMessage({ type: 'init', wasmBytes: badPingWasm })).error, /Unexpected WASM ping/);
+
+    const validWasm = buildEngineShellWasmBytes();
+    assert.equal((await worker.handleMessage({ type: 'init', wasmBytes: validWasm })).type, 'ready');
+    const defaultLuma = await worker.handleMessage({ type: 'frame' });
+    assert.equal(defaultLuma.luma, 128);
+    assert.equal(defaultLuma.hint, 'ready');
+
+    const postedReplies = [];
+    const workerScope = {
+      postMessage(msg) { postedReplies.push(msg); },
+      WebAssembly,
+      Uint8Array,
+      ArrayBuffer,
+      Date,
+      Math,
+      Number,
+      Promise
+    };
+    workerScope.self = workerScope;
+    const workerFilePath = path.join(__dirname, '..', 'js', 'scanner-worker.js');
+    vm.runInNewContext(fs.readFileSync(workerFilePath, 'utf8'), workerScope, { filename: workerFilePath });
+    workerScope.onmessage({ data: { type: 'init', wasmBytes: validWasm, nativeEan13: false } });
+    await new Promise((r) => setTimeout(r, 25));
+    workerScope.onmessage({ data: { type: 'frame', sampleLuma: 150 } });
+    workerScope.onmessage({ data: { type: 'init', wasmBytes: new Uint8Array([0x00, 0x01]) } }); // triggers .catch() reply
+    await new Promise((r) => setTimeout(r, 25));
+    assert.ok(postedReplies.some((r) => r.type === 'ready' && r.ping === 301));
+    assert.ok(postedReplies.some((r) => r.type === 'frame-result' && r.luma === 150));
+    assert.ok(postedReplies.some((r) => r.type === 'error'));
+
+    // build-scanner-assets & fetch-scanner-assets CLI + error paths
+    await assert.rejects(() => runBuildCli([]), /Usage:/);
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'disk-crate-cli-test-'));
+    try {
+      const cliOut = path.join(tmpRoot, 'built');
+      const cliTar = path.join(tmpRoot, 'bundle.tar.gz');
+      const cliExtract = path.join(tmpRoot, 'extracted');
+      await runBuildCli(['--out', cliOut, '--tar', cliTar]);
+      const tarBytes = fs.readFileSync(cliTar);
+      const cliSha = sha256HexSync(tarBytes);
+
+      const parsedFlags = parseCliArgs(['--out', cliExtract, '--url', 'https://api.github.com/repos/a/b/releases/1', '--file', cliTar, '--sha256', cliSha]);
+      assert.equal(parsedFlags.expectedSha256, cliSha);
+      const fetchCliRes = await runFetchCli(['--file', cliTar, '--out', cliExtract, '--sha256', cliSha]);
+      assert.equal(fetchCliRes.ok, true);
+
+      // Remote fetch success with api.github.com Authorization header + 404 rejection
+      const capturedHeaders = [];
+      const httpExtract = path.join(tmpRoot, 'http-out');
+      await fetchAndVerifyScannerAssets({
+        url: 'https://api.github.com/repos/dopingus-build/disk-crate/releases/assets/1',
+        outDir: httpExtract,
+        expectedSha256: cliSha,
+        token: 'tok-abc',
+        fetchImpl: async (_u, init) => {
+          capturedHeaders.push(init.headers);
+          return new Response(tarBytes, { status: 200 });
+        }
+      });
+      assert.equal(capturedHeaders[0].Authorization, 'Bearer tok-abc');
+      assert.equal(capturedHeaders[0].Accept, 'application/octet-stream');
+      await assert.rejects(
+        () => fetchAndVerifyScannerAssets({
+          url: 'https://example.test/fail.tar.gz',
+          outDir: httpExtract,
+          fetchImpl: async () => new Response('nope', { status: 404 })
+        }),
+        /Failed to fetch scanner assets archive/
+      );
+
+      // verifyManifestFilesOnDisk error branches
+      const emptyDir = path.join(tmpRoot, 'empty');
+      fs.mkdirSync(emptyDir, { recursive: true });
+      assert.throws(() => verifyManifestFilesOnDisk(emptyDir), /Missing manifest\.json/);
+
+      const badDir = path.join(tmpRoot, 'bad');
+      fs.mkdirSync(badDir, { recursive: true });
+      fs.writeFileSync(path.join(badDir, 'manifest.json'), JSON.stringify({ schemaVersion: 2 }));
+      assert.throws(() => verifyManifestFilesOnDisk(badDir), /Invalid scanner asset manifest schema/);
+
+      fs.writeFileSync(path.join(badDir, 'manifest.json'), JSON.stringify({
+        schemaVersion: 1,
+        packs: [{ id: 'p', available: true, files: [{ path: '../bad', sha256: 'a'.repeat(64), bytes: 1 }] }]
+      }));
+      assert.throws(() => verifyManifestFilesOnDisk(badDir), /Unsafe manifest file path/);
+
+      fs.writeFileSync(path.join(badDir, 'manifest.json'), JSON.stringify({
+        schemaVersion: 1,
+        packs: [{ id: 'p', available: true, files: [{ path: 'missing.wasm', sha256: 'a'.repeat(64), bytes: 4 }] }]
+      }));
+      assert.throws(() => verifyManifestFilesOnDisk(badDir), /Missing scanner pack file/);
+
+      fs.writeFileSync(path.join(badDir, 'missing.wasm'), Buffer.from([1, 2]));
+      assert.throws(() => verifyManifestFilesOnDisk(badDir), /Byte size mismatch/);
+      fs.writeFileSync(path.join(badDir, 'missing.wasm'), Buffer.from([1, 2, 3, 4]));
+      assert.throws(() => verifyManifestFilesOnDisk(badDir), /SHA-256 mismatch/);
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+
+    // js/db.js clearScannerCoverIndex & null guards
+    const memDb = dbMod.createDbClient({ indexedDBImpl: null });
+    assert.equal(await memDb.clearScannerCoverIndex(), false);
+    assert.equal(await memDb.putOwnedRelease(null), null);
+    await memDb.clearOwnedReleases();
+    await memDb.deleteSyncMeta('missing');
+
+    const stores = new Map([
+      ['owned_releases', new Map()],
+      ['scanner_cover_index', new Map([['k1', { id: 'k1' }]])]
+    ]);
+    const idbDb = dbMod.createDbClient({
+      indexedDBImpl: {
+        open() {
+          const req = { result: null, onsuccess: null, onupgradeneeded: null };
+          queueMicrotask(() => {
+            req.result = {
+              objectStoreNames: { contains: (s) => stores.has(s) },
+              transaction(s) {
+                const tx = { oncomplete: null };
+                tx.objectStore = () => ({
+                  clear() {
+                    const r = { onsuccess: null };
+                    queueMicrotask(() => { stores.get(s).clear(); if (r.onsuccess) r.onsuccess({ target: r }); });
+                    return r;
+                  }
+                });
+                setTimeout(() => { if (tx.oncomplete) tx.oncomplete({ target: tx }); }, 0);
+                return tx;
+              }
+            };
+            if (req.onsuccess) req.onsuccess({ target: req });
+          });
+          return req;
+        }
+      }
+    });
+    assert.equal(await idbDb.clearScannerCoverIndex(), true);
+    assert.equal(stores.get('scanner_cover_index').size, 0);
+  });
 });
